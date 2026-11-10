@@ -1,0 +1,16 @@
+# Coinpile next to Firefly III. Copy to docker-compose.yml and change the addresses.
+services:
+  coinpile:
+    image: ghcr.io/wizard815/coinpile:latest
+    restart: unless-stopped
+    ports:
+      - "8190:8000"
+    environment:
+      FIREFLY_URL: http://192.168.1.50:8182            # how Coinpile reaches Firefly III (inside your network)
+      # FIREFLY_PUBLIC_URL: https://firefly.example.com  # how your browser reaches it, if different (for "Sign in with Firefly III")
+      # FIREFLY_CLIENT_ID: ...                          # an OAuth client made in Firefly III (Options, Profile, OAuth, Create New Client, NOT confidential)
+      # COINPILE_PUBLIC_URL: https://coins.example.com  # the address you open Coinpile at (the OAuth client's redirect is this + /auth/callback)
+      # CONNECTOR_URL: http://192.168.1.50:6421         # the Plaid connector, as a default for everyone's Banks settings
+      TZ: America/New_York
+    volumes:
+      - ./data:/data
