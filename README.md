@@ -137,6 +137,10 @@ FIREFLY_URL=http://127.0.0.1:8080 DATA_DIR=./data UI_DIR=./ui PYTHONPATH=src uvi
 
 The tests use a stand-in for Firefly III's API (`tests/fake_firefly.py`) and a scripted model (`devtools/fake_llm.py`).
 
+## Drop folder
+
+PayPal, Venmo and Cash App CSVs put in `/data/people/<your Firefly III user id>-imports/` are imported into Coinpile accounts within a minute, then moved to `done/` (or `failed/` if the file is not one of those exports). Uploading them on the Accounts tab does the same.
+
 ## Webhooks (Coinpile tells other apps)
 
 Settings, Webhooks: add an address and choose what to send. Coinpile POSTs a small JSON message when it happens:
