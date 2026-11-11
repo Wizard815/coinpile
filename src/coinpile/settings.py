@@ -24,6 +24,7 @@ SPEC = {
     "refresh_minutes": ("int", False, "REFRESH_MINUTES"),
     "ff_webhook_secret": ("str", True, ""), "ff_hook_key": ("str", False, ""), "ff_last_hook": ("str", False, ""),
     "ff_send_goals": ("onoff", False, ""), "ff_send_bills": ("onoff", False, ""), "ff_send_categories": ("onoff", False, ""), "ff_send_accounts": ("onoff", False, ""), "ff_last_refresh": ("str", False, ""), "ff_last_full": ("str", False, ""), "ff_last_error": ("str", False, ""),
+    "currency": ("str", False, ""),            # the primary currency of the person's Firefly III (every total is in it), as last read
     # Plaid cost guard. Rates are YOURS to enter: Plaid shows them in its dashboard, not in any public price list.
     "plaid_rate_item_month": ("num", False, ""), "plaid_use_recurring": ("onoff", False, ""), "plaid_min_minutes": ("int", False, ""), "plaid_budget_month": ("num", False, ""), "plaid_daily_cap": ("int", False, ""), "agent_provider": ("int", False, ""), "alert_missed": ("onoff", False, ""), "sync_minutes": ("int", False, ""), "alert_maturity_days": ("int", False, ""), "notify_url": ("str", True, ""), "notify_min_severity": ("sev", False, ""), "notify_url_cds": ("str", True, ""), "notify_min_severity_cds": ("sev", False, ""), "alert_untracked": ("onoff", False, ""),
 }
@@ -31,7 +32,7 @@ SPEC = {
 
 # Out of the box Plaid is kept cheap: at most $5 a month and a modest daily call cap; each bank is asked on a schedule that suits what it holds (see plaidplan.py).
 DEFAULTS = {"plaid_budget_month": "5", "plaid_min_minutes": "0", "plaid_daily_cap": "300", "refresh_minutes": "10", "ff_send_goals": "off", "ff_send_bills": "off", "ff_send_categories": "off", "ff_send_accounts": "off"}
-INTERNAL = {"ff_last_refresh", "ff_last_full", "ff_last_error"}
+INTERNAL = {"ff_last_refresh", "ff_last_full", "ff_last_error", "currency"}
 
 
 def set_value(db, key: str, value: str) -> None:

@@ -65,6 +65,11 @@ COLUMNS = {  # added after the first release: (table, column) -> DDL fragment
     ("subscriptions", "notify_days"): "INTEGER DEFAULT 3", ("subscriptions", "end_date"): "TEXT", ("subscriptions", "created"): "TEXT", ("subscriptions", "match_key"): "TEXT", ("incomes", "match_key"): "TEXT",
     ("transactions", "plaid_category"): "TEXT", ("transactions", "category_locked"): "INTEGER DEFAULT 0", ("transactions", "notes"): "TEXT DEFAULT ''", ("transactions", "ff_group"): "TEXT",
     ("accounts", "min_balance"): "REAL", ("accounts", "subtype"): "TEXT", ("accounts", "savings_pool"): "INTEGER", ("accounts", "mask"): "TEXT", ("plaid_items", "last_sync"): "REAL", ("plaid_items", "last_slow"): "REAL", ("plaid_items", "schedule"): "TEXT", ("plaid_items", "category"): "TEXT", ("accounts", "category"): "TEXT", ("plaid_items", "last_hook"): "REAL", ("plaid_items", "status"): "TEXT", ("plaid_items", "status_detail"): "TEXT", ("plaid_items", "hook_url"): "TEXT", ("plaid_items", "recurring"): "TEXT", ("accounts", "joint_with"): "TEXT", ("accounts", "my_share"): "REAL", ("goals", "shared_id"): "TEXT", ("goals", "members"): "TEXT", ("goals", "shared_state"): "TEXT", ("goals", "rev"): "INTEGER DEFAULT 0", ("goals", "edited_by"): "TEXT", ("goals", "sent_sig"): "TEXT", ("accounts", "nickname"): "TEXT", ("accounts", "pinned"): "INTEGER DEFAULT 0", ("providers", "context_tokens"): "INTEGER DEFAULT 8192",
+    # money in another currency than the person's primary one: balance/amount hold the primary-currency value (what every total adds up),
+    # native_* the account's own amount and currency (NULL when it is the primary currency)
+    ("accounts", "native_balance"): "REAL", ("accounts", "native_currency"): "TEXT", ("accounts", "in_net_worth"): "INTEGER DEFAULT 1",
+    ("transactions", "native_amount"): "REAL", ("transactions", "native_currency"): "TEXT", ("transactions", "ff_bill"): "TEXT",
+    ("subscriptions", "native_amount"): "REAL", ("subscriptions", "native_currency"): "TEXT",
 }
 DEFAULT_CATEGORIES = [("Income", "income"), ("Food", "expense"), ("Groceries", "expense"), ("Clothes", "expense"), ("Fun", "expense"), ("Games", "expense"),
                       ("Gas", "expense"), ("Transport", "expense"), ("Bills", "expense"), ("Housing", "expense"), ("Health", "expense"), ("Shopping", "expense"),

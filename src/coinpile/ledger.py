@@ -1,6 +1,5 @@
 """All money logic in one place. The HTTP routes and the agent's tools both call these, so they can never disagree.
 Signed amounts everywhere: positive = money in, negative = money out."""
-import re
 from datetime import date, timedelta
 
 from coinpile import recur, settings as cfg
@@ -143,8 +142,9 @@ def sub_view(row: dict, today: date) -> dict:
     every, unit = row.get("every") or 1, row.get("unit") or "month"
     stop = d(row["end_date"]) if row.get("end_date") else None
     nd = recur.next_due(d(row["next_date"]), every, unit, today, stop)
-    return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None,
-            "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and row.get("payer", "me") == "me" else 0.0}
+    ended = stop is not None and nd is None                  # past its end date: nothing more to pay
+    return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended,
+            "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended else 0.0}
 
 
 SUB_SELECT = "SELECT s.*, a.name account_name, a.institution account_institution FROM subscriptions s LEFT JOIN accounts a ON a.id=s.account_id"
@@ -253,7 +253,7 @@ def savings_summary(db, today: date) -> dict:
 # ------------------------------------------------------------------ net worth, projection, alerts
 def net_worth(db, today: date | None = None) -> float:
     total = 0.0
-    for a in db.all("SELECT kind, balance, my_share FROM accounts"):
+    for a in db.all("SELECT kind, balance, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0"):     # Firefly III's "include in net worth" off
         total += mine(a) * (-1 if a["kind"] in OUT_KINDS else 1)
     for s in db.all("SELECT * FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')"):
         total += s["balance"] or 0                       # savings linked to an account are already counted via that account
@@ -292,8 +292,10 @@ def project_balance(db, days: int, today: date, account_ids: list[str] | None = 
 
 def recurring_found(db, today: date, account_id: str | None = None, days: int = 800, loose: bool = False) -> list[dict]:
     # Interest accruing on a loan and transfers between your own accounts repeat on a schedule but are not subscriptions or income.
-    rows = db.all("SELECT t.id, t.account_id, t.date, t.name, t.amount FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id "
-                  "WHERE t.date >= ? AND coalesce(a.kind,'') != 'loan' AND coalesce(t.category,'') != 'Transfer'" + (" AND t.account_id=?" if account_id else "") + " ORDER BY t.date",
+    # Payments Firefly III already links to one of its bills are that bill: never suggested again under another name.
+    rows = db.all("SELECT t.id, t.account_id, t.date, t.name, t.amount FROM transactions t LEFT JOIN accounts a ON a.id=t.account_id LEFT JOIN categories c ON c.name=t.category "
+                  "WHERE t.date >= ? AND coalesce(a.kind,'') != 'loan' AND coalesce(t.category,'') != 'Transfer' AND coalesce(c.kind,'') != 'transfer' "
+                  "AND coalesce(t.ff_bill,'') = ''" + (" AND t.account_id=?" if account_id else "") + " ORDER BY t.date",
                   ((today - timedelta(days=days)).isoformat(),) + ((account_id,) if account_id else ()))
     return recur.detect(rows, today, loose)
 
@@ -437,7 +439,7 @@ def overview(db, days: int, today: date) -> dict:
     up = upcoming(db, days, today)
     subs = db.all("SELECT * FROM subscriptions WHERE active=1")
     monthly = sum(sub_view(s, today)["monthly"] for s in subs)
-    return {"net_worth": net_worth(db), "by_kind": by_kind, "accounts": accts, "subscriptions_monthly": round(monthly, 2), "upcoming": up,
+    return {"net_worth": net_worth(db), "currency": cfg.get(db, "currency") or "USD", "by_kind": by_kind, "accounts": accts, "subscriptions_monthly": round(monthly, 2), "upcoming": up,
             "events": db.all("SELECT * FROM events ORDER BY ts DESC LIMIT 10"), "alerts": alerts(db, today), "savings_total": gv["total"], "savings_free": gv["free"], "goals_needed": gv["needed"]}
 
 

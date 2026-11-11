@@ -503,7 +503,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.get("/api/status")
         def status():
             u = users.get(uid) or {}
-            return {"firefly": {"address": ff_public, "email": u.get("email"), "signed_in_with": u.get("kind"), "last_refresh": cfg.get(db, "ff_last_refresh") or None,
+            return {"currency": cfg.get(db, "currency") or "USD", "firefly": {"address": ff_public, "email": u.get("email"), "signed_in_with": u.get("kind"), "last_refresh": cfg.get(db, "ff_last_refresh") or None,
                                 "last_error": cfg.get(db, "ff_last_error") or None, "refresh_minutes": int(float(cfg.get(db, "refresh_minutes") or 10)),
                                 "accounts": db.one("SELECT COUNT(*) n FROM accounts WHERE source='firefly'")["n"], "transactions": db.one("SELECT COUNT(*) n FROM transactions WHERE source='firefly'")["n"]},
                     "sends": {k: cfg.get(db, v) == "on" for k, v in ffwrite.PARTS.items()},

@@ -165,7 +165,10 @@ function h(tag, attrs, ...kids) {
 const $ = (s, r = document) => r.querySelector(s);
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat(9).filter((k) => k != null && k !== false));
 const add = (el, ...kids) => el.append(...kids.flat(9).filter((k) => k != null && k !== false));   // native append() would print "null"
-const usd = (n, signed) => (n == null ? "–" : (signed && n > 0 ? "+" : n < 0 ? "−" : "") + "$" + Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+// Every total is in the primary currency of the person's Firefly III (S.cur); money in another currency also shows its own amount (cur()).
+const fmtMoney = (n, code) => { try { return Math.abs(n).toLocaleString("en-US", { style: "currency", currency: code || "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }); } catch { return (code || "") + " " + Math.abs(n).toFixed(2); } };
+const usd = (n, signed) => (n == null ? "–" : (signed && n > 0 ? "+" : n < 0 ? "−" : "") + fmtMoney(n, S.cur || "USD"));
+const cur = (x, field) => (x && x.native_currency && x[field] != null ? h("span", { class: "muted small", style: "margin-left:6px" }, (x[field] < 0 ? "−" : "") + fmtMoney(x[field], x.native_currency)) : null);
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
 const an = (a) => (a.nickname || a.name || "") + (a.mask && !a.nickname && !String(a.name).includes(a.mask) ? " ••" + a.mask : "");
 const today = () => new Date().toISOString().slice(0, 10);
@@ -334,7 +337,7 @@ async function txBrowser(root, fixed = {}, accounts = null) {
           h("tbody", {}, r.items.map((tx) => h("tr", {}, h("td", { class: "mono muted" }, tx.date), h("td", {}, tx.name, tx.pending ? h("span", { class: "pill" }, "pending") : null), h("td", { class: "muted small" }, tx.account_name || ""),
             h("td", {}, h("select", { class: "bare", "aria-label": "Category", onchange: async (e) => { try { const x = await api(`/api/transactions/${encodeURIComponent(tx.id)}/category`, send("PUT", { category: e.target.value, make_rule: remember })); toast(x.in_firefly ? (x.rule ? "Set in Firefly III, and a Firefly III rule does it from now on" : "Set in Firefly III") : remember ? `Set, and ${x.updated - 1} similar updated` : "Category set"); load(); } catch (err) { fail(err); } } },
               cats.map((c) => h("option", { value: c.name, selected: c.name === tx.category }, c.name)))),
-            h("td", { class: "num r " + (tx.amount > 0 ? "pos" : "") }, usd(tx.amount, true))))))) : h("p", { class: "muted" }, "Nothing matches these filters."),
+            h("td", { class: "num r " + (tx.amount > 0 ? "pos" : "") }, usd(tx.amount, true), cur(tx, "native_amount"))))))) : h("p", { class: "muted" }, "Nothing matches these filters."),
         spend.length && !fixed.account_id ? h("div", { style: "margin-top:14px" }, h("h3", {}, "Spending by category (these dates)"), barList(spend.slice(0, 8).map((x) => [x.category, x.spent]))) : null);
       fill(foot, h("span", { class: "muted small" }, r.total ? `${F.offset + 1}–${Math.min(F.offset + 50, r.total)} of ${r.total}` : ""),
         h("div", { class: "chips" }, h("button", { class: "btn sm", disabled: F.offset === 0, onclick: () => { F.offset = Math.max(0, F.offset - 50); load(); } }, "Previous"), h("button", { class: "btn sm", disabled: F.offset + 50 >= r.total, onclick: () => { F.offset += 50; load(); } }, "Next"),
@@ -368,7 +371,7 @@ async function viewAccounts(root, rerender) {
     ...entries.map(([k, list]) => { const inst = list[0].institution; seen[inst] = (seen[inst] || 0) + 1; const dupe = entries.filter(([, l]) => l[0].institution === inst).length > 1;
       return h("div", { class: "panel scroll" }, h("div", { class: "bar" }, h("h3", {}, inst + (dupe ? ` (login ${seen[inst]})` : ""), h("span", { class: "muted small", style: "margin-left:8px;font-family:var(--body);font-weight:400" }, `${list.length} account${list.length === 1 ? "" : "s"}`)), h("span", { class: "num " + (list.reduce((t, a) => t + signed(a), 0) < 0 ? "neg" : "") }, usd(list.reduce((t, a) => t + signed(a), 0)))),
         h("table", { style: "table-layout:fixed" }, h("colgroup", {}, h("col"), h("col", { style: "width:110px" }), h("col", { style: "width:130px" }), h("col", { style: "width:56px" }), h("col", { style: "width:24px" })), h("tbody", {}, list.map((a) => h("tr", { class: "click", tabindex: 0, onclick: () => { S.acct = a.id; rerender(); }, onkeydown: (e) => e.key === "Enter" && (S.acct = a.id, rerender()) },
-          h("td", {}, an(a), a.source === "manual" ? h("span", { class: "pill" }, "manual") : null), h("td", { class: "muted small" }, a.category_effective ? h("span", { class: "pill t" }, a.category_effective) : (KIND[a.kind] || [a.kind])[0]), h("td", { class: "num r " + (a.kind === "credit" || a.kind === "loan" ? "neg" : "") }, usd(a.balance)),
+          h("td", {}, an(a), a.source === "manual" ? h("span", { class: "pill" }, "manual") : null), h("td", { class: "muted small" }, a.category_effective ? h("span", { class: "pill t" }, a.category_effective) : (KIND[a.kind] || [a.kind])[0]), h("td", { class: "num r " + (a.kind === "credit" || a.kind === "loan" ? "neg" : "") }, usd(a.balance), cur(a, "native_balance")),
           h("td", { class: "r" }, h("button", { class: "btn sm", title: a.pinned ? "Shown on Overview. Click to remove" : "Show this balance on Overview", "aria-pressed": !!a.pinned, onclick: async (e) => { e.stopPropagation(); try { await api("/api/accounts/" + encodeURIComponent(a.id), send("PUT", { pinned: !a.pinned })); rerender(); } catch (err) { fail(err); } } }, a.pinned ? "★" : "☆")), h("td", { class: "r muted" }, "›")))))); }),
     h("div", { class: "panel" }, h("h3", {}, "PayPal, Venmo, Cash App"), h("p", { class: "muted small" }, "These have no bank feed. Download the activity CSV in the app or website and choose it here: each becomes its own account in Coinpile (Firefly III is not changed). Importing an overlapping file again never doubles anything."),
       h("div", { class: "chips" }, h("input", { type: "file", id: "p2p-csv", accept: ".csv,text/csv" }), h("button", { class: "btn", onclick: async () => { const f = $("#p2p-csv").files[0]; if (!f) return toast("Choose a CSV first"); try { const r = await api("/api/import/csv", { method: "POST", headers: { "Content-Type": "text/csv" }, body: await f.text() }); toast(`${r.provider}: ${r.added} new of ${r.rows}`); rerender(); } catch (err) { fail(err); } } }, "Import"))),
@@ -1078,7 +1081,7 @@ async function boot() {
   let me = {}; try { me = await (await fetch("/auth/me", { credentials: "same-origin", cache: "no-store" })).json(); } catch {}
   if (!me.signed_in) return login();
   S.authed = true; S.name = me.email || "";
-  try { S.sends = (await api("/api/status")).sends || {}; } catch { S.sends = {}; }
+  try { const st0 = await api("/api/status"); S.sends = st0.sends || {}; S.cur = st0.currency || "USD"; } catch { S.sends = {}; }
   if (me.problem) toast("Firefly III needs you to sign in again (Settings, Firefly III)");
   try { const st = await api("/api/status"); if (!st.firefly.last_refresh) { toast("Reading your Firefly III for the first time..."); await api("/api/refresh", { method: "POST" }).catch(() => {}); } } catch {}
   resumeOAuth(); render();
