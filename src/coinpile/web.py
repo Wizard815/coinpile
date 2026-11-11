@@ -23,7 +23,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_links, api_money, ffwrite, importers, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import agent, api_links, api_money, ffwrite, importers, investments, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
@@ -524,6 +524,30 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         ctx.writer = ffwrite.Writer(db, lambda: ff_for(uid), read_back, today)
 
         rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, who())
+
+        @app.get("/api/investments")
+        def investments_view():
+            accts = investments.accounts(db)
+            return {"accounts": accts, "total": round(sum(a["balance"] for a in accts), 2), "currency": cfg.get(db, "currency") or "USD",
+                    "candidates": investments.candidates(db), "providers": investments.providers(rh)}
+
+        class TrackIn(BaseModel):
+            investment: bool
+            category: str = "Investment"           # Investment or Retirement
+
+        @app.put("/api/investments/{aid}")
+        def investments_track(aid: str, b: TrackIn):
+            """Track an account as an investment (or stop). This is Coinpile's own label: Firefly III is not changed."""
+            a = db.one("SELECT * FROM accounts WHERE id=?", (aid,))
+            if not a:
+                raise HTTPException(404, "account not found")
+            if b.investment and b.category not in investments.INVEST_CATEGORIES:
+                raise HTTPException(422, "category must be Investment or Retirement")
+            if not b.investment and a["kind"] == "investment" and not a.get("category"):
+                raise HTTPException(409, "this account is an investment account by type; it cannot be untracked")
+            with db.tx() as c:
+                c.execute("UPDATE accounts SET category=? WHERE id=?", (b.category if b.investment else None, aid))
+            return investments_view()
 
         @app.get("/api/robinhood/main")
         def rh_main():

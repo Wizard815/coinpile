@@ -428,8 +428,10 @@ def budget_status(db, month: str, today: date) -> list[dict]:
 def overview(db, days: int, today: date) -> dict:
     accts = db.all("SELECT * FROM accounts")
     by_kind = {}
+    from coinpile import investments
     for a in accts:
-        by_kind[a["kind"]] = round(by_kind.get(a["kind"], 0) + mine(a), 2)
+        k = "investment" if investments.is_investment(a) else a["kind"]          # an account you track as an investment shows as one
+        by_kind[k] = round(by_kind.get(k, 0) + mine(a), 2)
     sav = savings_summary(db, today)
     from coinpile import plan
     gv = plan.goals_view(db, today)

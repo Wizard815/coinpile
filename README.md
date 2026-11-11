@@ -13,6 +13,7 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Agent**: chat with a model (a local one such as Ollama by default) that can look up your accounts, transactions, subscriptions, savings and bills, and write notes.
 - **Settings, Banks**: your banks at the Plaid connector: link a bank, fix a bank sign-in, pull now.
 
+- **Investments**: every account you track as an investment, with a total. Mark any account (a Firefly III brokerage or 401k, an account from the Plaid connector, one you keep in Coinpile) as Investment or Retirement, on the Investments tab or on the account's page; it then shows here and under Investments on the Overview (Firefly III is not changed). Sources that know positions plug in: Robinhood now, Foliofox planned.
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
 - **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
