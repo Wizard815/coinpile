@@ -174,7 +174,9 @@ def main(out: str, artifact: bool):
     rec["/api/banks/usage"] = {"month": TODAY.strftime("%Y-%m"), "calls_month": 96, "calls_today": 4, "daily_cap": 300, "items": 3, "est_monthly_cost": 1.35, "budget": 5.0, "over_budget": False,
                                "room_for_items": 8, "per_item": 0.45, "webhook_banks": 2, "webhook_set": True}
     rec["/api/robinhood/main"] = {"source": "csv", "as_of": TODAY.isoformat(), "balances": {"net_transfers": 6000},
-                                  "positions": [{"symbol": "VTI", "quantity": 18.5, "net_cost": 4400}, {"symbol": "AAPL", "quantity": 6, "net_cost": 1080}], "history": []}
+                                  "positions": [{"symbol": "VTI", "quantity": 18.5, "net_cost": 4400}, {"symbol": "AAPL", "quantity": 6, "net_cost": 1080}],
+                                  "monthly": [{"month": (TODAY.replace(day=1) - timedelta(days=30 * k)).strftime("%Y-%m"), "deposits": 1000.0 if k % 2 == 0 else 500.0,
+                                               "bought": 900.0 if k % 2 == 0 else 450.0, "sold": 0.0, "dividends": [0, 0, 11.42][k % 3], "fees": 0.0, "trades": 2} for k in range(6)]}
     rec["/api/status"]["robinhood"]["csv_files"] = ["import-2026-11-01.csv"]
     for pr in rec["/api/investments"]["providers"]:
         if pr["id"] == "robinhood":
