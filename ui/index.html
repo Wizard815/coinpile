@@ -716,6 +716,7 @@ async function viewInvestments(root, rerender) {
         select("iv-acct", "Track an account as an investment", [["", "Choose an account..."], ...inv.candidates.map((a) => [a.id, `${a.name} (${a.institution || ""})`])], ""),
         select("iv-cat", "As", [["Investment", "Investment"], ["Retirement", "Retirement"]], "Investment"),
         h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Track it"))) : null),
+    (inv.monthly || []).length >= 2 ? h("div", { class: "panel wide" }, h("h3", {}, "Investments by month"), spark(inv.monthly.map((m) => ({ date: m.month, net_worth: m.value })))) : null,
     ...inv.providers.map((p) => h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, p.name), h("span", { class: "pill " + (p.connected ? "t" : p.available ? "" : "b") }, p.connected ? "connected" : p.available ? "not set up" : "planned")),
       h("p", { class: "muted small", style: "margin:0" }, p.how + (p.id === "robinhood" ? ". An activity report has no prices, so it shows shares, cost and money moved, not value over time; a live connector adds value." : "")), p.id === "robinhood" ? h("div", { id: "rh-box" }) : null)));
   const box = $("#rh-box");
@@ -853,7 +854,18 @@ async function tabRobinhood(root, rerender) {
     h("p", { class: "muted small" }, "Live uses an unofficial library that breaks Robinhood's terms and can get a login locked. It stays off until you enable it in the container's env file.")),
     h("div", { class: "panel" }, h("h3", {}, "Main account CSV"), h("p", { class: "muted small" }, rh.csv_files.length ? `${rh.csv_files.length} file(s) imported. Latest: ${rh.csv_files.at(-1)}` : "No files yet. Download the account activity report as CSV from Robinhood and upload it here."),
       h("input", { type: "file", id: "rhcsv", accept: ".csv,text/csv", disabled: S.demo }), " ", h("button", { class: "btn", disabled: S.demo, onclick: async () => { const f = $("#rhcsv").files[0]; if (!f) return toast("Choose a CSV first"); try { const r = await api("/api/robinhood/csv-upload", { method: "POST", headers: { "Content-Type": "text/csv" }, body: await f.text() }); toast("Saved " + r.saved); rerender(); } catch (e) { fail(e); } } }, "Upload")),
-    h("div", { class: "panel" }, h("h3", {}, "Agent account (official MCP)"), h("p", { class: "muted small" }, "Runs as its own small container (rh-agent) with Robinhood's official MCP and read tools only; Coinpile reads it at RH_AGENT_URL. " + (rh.agent === "not deployed" ? "Not set up." : "Status: " + rh.agent))));
+    h("div", { class: "panel" }, h("h3", {}, "Robinhood MCP (agentic account)"),
+      h("p", { class: "muted small" }, "Robinhood's official MCP server: you sign in on Robinhood's own site and Coinpile gets permission to read. Coinpile asks only for reading and only ever calls read tools (portfolio, positions); it cannot place, cancel or change an order. It reads your Robinhood agentic account, records its value each time, and shows positions and value by month on the Investments tab."),
+      h("div", { class: "legend", style: "margin:6px 0 10px" }, h("span", {}, "Status ", dot(rh.mcp ? "up" : "not connected"))),
+      h("div", { class: "chips" },
+        h("button", { class: "btn primary", disabled: S.demo, onclick: async () => { try { const r = await api("/api/robinhood/connect", { method: "POST" }); location.href = r.url; } catch (e) { fail(e); } } }, rh.mcp ? "Sign in to Robinhood again" : "Connect Robinhood"),
+        rh.mcp ? h("button", { class: "btn", onclick: async () => { try { const r = await api("/api/robinhood/test", { method: "POST" }); toast(`Connected. Reads used: ${r.reads_used.join(", ") || "none found"}. ${r.never_called.length} other tools are never called.`); } catch (e) { fail(e); } } }, "Test") : null,
+        rh.mcp ? h("button", { class: "btn danger", onclick: sure(null, "Disconnect Robinhood? Coinpile stops reading it.", async () => { await api("/api/robinhood/disconnect", { method: "POST" }); rerender(); }) }, "Disconnect") : null),
+      h("details", { style: "margin-top:10px" }, h("summary", { class: "small" }, "Other address, or paste a token"),
+        h("form", { class: "row", onsubmit: async (e) => { e.preventDefault(); try { if (val("rh-tok")) { await api("/api/robinhood/token", send("POST", { token: val("rh-tok"), url: val("rh-url") || null })); } else { await api("/api/settings", send("PUT", { rh_mcp_url: val("rh-url") })); } toast("Saved"); rerender(); } catch (err) { fail(err); } } },
+          field("rh-url", "MCP server address", cfg.rh_mcp_url || "https://agent.robinhood.com/mcp/trading", { type: "url" }),
+          field("rh-tok", "Access token (only if signing in here does not work)", "", { type: "password", autocomplete: "off" }),
+          h("div", { class: "formbtns" }, h("button", { class: "btn", type: "submit" }, "Save"))))));
 }
 async function tabCalendar(root, rerender) {
   const cfg = await api("/api/settings");
@@ -1185,6 +1197,8 @@ async function boot() {
   S.authed = true; S.name = me.email || "";
   try { const st0 = await api("/api/status"); S.sends = st0.sends || {}; S.cur = st0.currency || "USD"; } catch { S.sends = {}; }
   if (me.problem) toast("Firefly III needs you to sign in again (Settings, Firefly III)");
+  const rhBack = new URLSearchParams(location.search).get("robinhood");
+  if (rhBack) { toast({ connected: "Robinhood connected", failed: "Signing in to Robinhood did not finish", refused: "Robinhood refused the sign-in" }[rhBack] || "Robinhood"); history.replaceState(null, "", location.pathname + location.hash); }
   try { const st = await api("/api/status"); if (!st.firefly.last_refresh) { toast("Reading your Firefly III for the first time..."); await api("/api/refresh", { method: "POST" }).catch(() => {}); } } catch {}
   resumeOAuth(); render();
 }

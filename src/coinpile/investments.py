@@ -43,8 +43,22 @@ def providers(rh) -> list[dict]:
         import os
         has_csv = os.path.isdir(rh.csv_dir) and bool(os.listdir(rh.csv_dir))
         out.append({"id": "robinhood", "name": "Robinhood", "available": True, "connected": has_csv or st["agent"] == "up" or st["live"] == "up",
-                    "how": "activity-report CSV" + (", agent connector" if st["agent"] != "not deployed" else "") + (", live connector" if st["live"] != "not deployed" else ""),
+                    "how": "activity-report CSV" + (", Robinhood MCP" if rh.mcp_token_set() else ", agent connector" if st["agent"] != "not deployed" else "") + (", live connector" if st["live"] != "not deployed" else ""),
                     "views": ["main", "agent"]})
     out.append({"id": "foliofox", "name": "Foliofox", "available": False, "connected": False,
                 "how": "planned: portfolio tracking and its AI advisor, reading what you hold elsewhere"})
     return out
+
+
+def monthly(db, ids: list[str], months: int = 12) -> list[dict]:
+    """Month-end value of all tracked investment accounts together, from the daily balances Coinpile keeps (read from Firefly III, or recorded
+    each time Robinhood or another source is read). A month with no reading carries the last known value."""
+    if not ids:
+        return []
+    ph = ",".join("?" * len(ids))
+    rows = db.all(f"SELECT substr(ts,1,7) m, account_id, balance, ts FROM snapshots WHERE account_id IN ({ph}) ORDER BY ts, rowid", tuple(ids))
+    last, by = {}, {}
+    for r in rows:
+        last[r["account_id"]] = r["balance"] or 0
+        by[r["m"]] = round(sum(last.values()), 2)
+    return [{"month": m, "value": v} for m, v in sorted(by.items())][-months:]

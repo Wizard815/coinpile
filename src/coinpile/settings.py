@@ -16,6 +16,7 @@ SPEC = {
     "caldav_password": ("str", True, ""),
     "rh_mcp_url": ("str", False, ""), "rh_mcp_token": ("str", True, ""),
     "rh_mcp_read_tools": ("str", False, ""),
+    "rh_mcp_refresh": ("str", True, ""), "rh_mcp_expires": ("str", False, ""), "rh_mcp_client": ("str", False, ""), "rh_mcp_meta": ("str", False, ""),
     "rh_mcp_tool_balances": ("str", False, ""),
     "rh_mcp_tool_positions": ("str", False, ""),
     "rh_mcp_tool_history": ("str", False, ""),
