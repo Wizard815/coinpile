@@ -395,6 +395,28 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         from datetime import datetime
         return (time.time() - datetime.fromisoformat(last).timestamp()) >= mins * 60
 
+    def scan_drop_folder(uid: str) -> int:
+        """PayPal, Venmo and Cash App CSVs put in DATA_DIR/people/<id>-imports/ are imported into Coinpile accounts, then moved to done/."""
+        folder = os.path.join(data_dir, "people", f"{safe_id(uid)}-imports")
+        if not os.path.isdir(folder):
+            return 0
+        db, n = person_db(uid), 0
+        done = os.path.join(folder, "done")
+        for f in sorted(os.listdir(folder)):
+            path = os.path.join(folder, f)
+            if not (f.lower().endswith(".csv") and os.path.isfile(path)) or os.path.getsize(path) > 5_000_000:
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    prov, rows = importers.parse(fh.read())
+                n += importers.store(db, prov, rows)
+                os.makedirs(done, exist_ok=True)
+                os.replace(path, os.path.join(done, f))
+            except (ValueError, OSError):
+                os.makedirs(os.path.join(folder, "failed"), exist_ok=True)
+                os.replace(path, os.path.join(folder, "failed", f))
+        return n
+
     def send_hooks(uid: str, refreshed: dict | None = None) -> None:
         """Queue what changed for this person's webhooks and send what is due. Never breaks the caller."""
         try:
@@ -411,6 +433,10 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 if gone(u["id"]):                               # forgotten since the list was read
                     continue
                 try:
+                    try:
+                        scan_drop_folder(u["id"])
+                    except Exception:
+                        pass
                     if not u.get("problem") and due(u["id"]):
                         refresh(u["id"])                  # also sends webhooks
                     else:
@@ -774,6 +800,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         class BankPatch(BaseModel):
             schedule: str | None = None
             recurring: str | None = None
+            category: str | None = None              # what this bank is for (Checking, Savings, Bills...); the connector asks savings-only banks less often
 
         @app.put("/api/banks/{item_id}")
         async def bank_set(item_id: str, b: BankPatch):
@@ -1074,6 +1101,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     app.refresh = refresh            # for tests
     app.users = users
     app.person_db = person_db
+    app.scan_drop_folder = scan_drop_folder
     return app
 
 

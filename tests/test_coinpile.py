@@ -583,3 +583,15 @@ def test_failed_webhooks_are_retried_then_given_up(tmp_path, monkeypatch):
     assert row == {"tries": len(webhooks.RETRY_MINUTES) + 1, "done": 2} and len(got) == len(webhooks.RETRY_MINUTES) + 1
     assert c.get(f"/api/webhooks/{h['id']}/deliveries").json()[0]["status"] == "500"
     assert c.get("/api/webhooks").json()["items"][0]["last_status"] == "500"
+
+
+def test_csvs_dropped_in_the_imports_folder_are_imported(tmp_path, monkeypatch):
+    a = app(tmp_path, world())
+    c = signed_in(a)
+    folder = tmp_path / "people" / "1-imports"
+    folder.mkdir(parents=True)
+    (folder / "paypal.csv").write_text('Date,Time,TimeZone,Name,Type,Status,Currency,Gross,Fee,Net,Transaction ID\n11/02/2026,10:00:00,PST,Etsy Shop,Payment,Completed,USD,-25.00,0.00,-25.00,7AB12345\n')
+    (folder / "junk.csv").write_text("nothing,useful\n1,2\n")
+    assert a.scan_drop_folder("1") == 1
+    assert (folder / "done" / "paypal.csv").exists() and (folder / "failed" / "junk.csv").exists()
+    assert any(t["name"] == "Etsy Shop" for t in c.get("/api/transactions?limit=100").json()["items"])

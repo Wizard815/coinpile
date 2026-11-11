@@ -58,7 +58,7 @@ class Connector:
         ff = self.call("GET", "api/firefly/status")
         items = [{"item_id": it.get("item_id"), "institution": it.get("institution"), "status": it.get("status"), "last_sync": it.get("last_sync"),
                   "webhook_live": it.get("webhook_live"), "schedule": it.get("schedule"), "schedule_effective": it.get("schedule_effective"),
-                  "recurring": it.get("recurring"), "recurring_effective": it.get("recurring_effective"), "calls_per_day": it.get("calls_per_day"),
+                  "recurring": it.get("recurring"), "recurring_effective": it.get("recurring_effective"), "calls_per_day": it.get("calls_per_day"), "category": it.get("category"),
                   "accounts": [{"name": a.get("nickname") or a.get("name"), "mask": a.get("mask")} for a in it.get("accounts", [])]} for it in (st.get("plaid") or {}).get("items", [])]
         return {"items": items, "plaid_configured": (st.get("plaid") or {}).get("configured"), "plaid_env": (st.get("plaid") or {}).get("env"),
                 "firefly": {k: ff.get(k) for k in ("configured", "sent", "waiting", "failed", "awaiting_approval", "last_ok", "last_error")}}
