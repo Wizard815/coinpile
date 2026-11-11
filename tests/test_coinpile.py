@@ -595,3 +595,35 @@ def test_csvs_dropped_in_the_imports_folder_are_imported(tmp_path, monkeypatch):
     assert a.scan_drop_folder("1") == 1
     assert (folder / "done" / "paypal.csv").exists() and (folder / "failed" / "junk.csv").exists()
     assert any(t["name"] == "Etsy Shop" for t in c.get("/api/transactions?limit=100").json()["items"])
+
+
+def test_editing_a_euro_bill_keeps_it_in_euros_in_firefly(tmp_path):
+    ff = world()
+    ff.data["1"]["bills"].append({"type": "bills", "id": "9", "attributes": {"name": "Spotify EU", "amount_avg": "10", "amount_min": "10", "amount_max": "10", "pc_amount_avg": "11", "pc_amount_min": "11",
+                                                                             "pc_amount_max": "11", "currency_code": "EUR", "primary_currency_code": "USD", "repeat_freq": "monthly", "skip": 0,
+                                                                             "date": "2026-01-03T00:00:00+00:00", "pay_dates": ["2026-12-03T00:00:00+00:00"], "active": True}})
+    c = signed_in(app(tmp_path, ff))
+    c.put("/api/settings", json={"ff_send_bills": "on"})
+    s = next(x for x in c.get("/api/subscriptions").json()["items"] if x["name"] == "Spotify EU")
+    c.put(f"/api/subscriptions/{s['id']}", json={"name": "Spotify EU", "amount": s["amount"], "next_date": s["next_date"], "cycle": "monthly", "notify_days": 7})
+    b = next(x for x in ff.data["1"]["bills"] if x["id"] == "9")["attributes"]
+    assert (b["currency_code"], b["amount_min"]) == ("EUR", "10.00")                                  # its own amount and currency, not the converted dollars
+
+
+def test_forms_refuse_impossible_dates(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    r = c.post("/api/subscriptions", json={"name": "X", "amount": 5, "next_date": "2026-12-01", "end_date": "2026-11-01", "cycle": "monthly"})
+    assert r.status_code == 422 and "end date" in r.json()["detail"]
+    r = c.post("/api/incomes", json={"name": "Pay", "amount": 100, "next_date": "soon", "cycle": "monthly"})
+    assert r.status_code == 422 and "next_date" in r.json()["detail"]
+
+
+def test_a_closed_firefly_account_keeps_its_history_but_not_its_net_worth(tmp_path):
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
+    before = c.get("/api/overview").json()["net_worth"]
+    ff.data["1"]["accounts"][1]["attributes"]["active"] = False                          # Axos savings closed in Firefly III (balance 5000 left in the fake)
+    c.post("/api/refresh?full=true")
+    a = next(x for x in c.get("/api/accounts").json() if x["id"] == "ff:3")
+    assert a["name"].endswith("(closed)") and c.get("/api/overview").json()["net_worth"] == round(before - 5000, 2)
+    assert any(t["account_id"] == "ff:3" for t in c.get("/api/transactions?limit=100").json()["items"])           # the transfer into it is still there

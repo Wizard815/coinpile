@@ -417,6 +417,8 @@ def register(app, ctx):
         date_ok(s.next_date, "next_date")
         if s.end_date:
             date_ok(s.end_date, "end_date")
+            if s.end_date < s.next_date:
+                bad("the end date is before the next payment")
         if s.amount < 0:
             bad("amount must be >= 0")
         if not s.name.strip():
@@ -496,6 +498,7 @@ def register(app, ctx):
     def subs_update(request: Request, sid: int, s: Sub):
         auth(request)
         from_firefly(sid)
+        before = store.one("SELECT * FROM subscriptions WHERE id=?", (sid,))
         every, unit = check_sub(s)
         sets = ",".join(f"{c}=?" for c in COLS.split(","))
         with store.tx() as c:
@@ -503,7 +506,7 @@ def register(app, ctx):
         if not cur.rowcount:
             bad("not found", 404)
         if sends("bills"):
-            in_firefly(W.sub_updated, sid)
+            in_firefly(W.sub_updated, sid, before)
         return ledger.subscription(store, sid, ctx.today())
 
     @app.delete("/api/subscriptions/{sid}")

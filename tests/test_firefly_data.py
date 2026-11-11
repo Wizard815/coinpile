@@ -131,7 +131,7 @@ def test_a_transfer_to_a_closed_account_is_not_spending():
     ff.tx("1", 10, "transfer", 80, "From old savings", 8, 1, "2026-10-26")
     db = read(ff)
     t = {r["id"]: r for r in db.all("SELECT * FROM transactions")}
-    assert (t["ff:9"]["amount"], t["ff:9"]["category"], t["ff:10"]["amount"], t["ff:10"]["category"]) == (-500, "Transfer", 80, "Transfer")
+    assert (t["ff:9:out"]["amount"], t["ff:9:out"]["category"], t["ff:10:in"]["amount"], t["ff:10:in"]["category"]) == (-500, "Transfer", 80, "Transfer")   # a closed account is kept, so both sides are a transfer
     assert "Savings goal" not in {r["category"] for r in ledger.spending_by_category(db)}
 
 
