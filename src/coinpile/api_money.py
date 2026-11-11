@@ -159,7 +159,10 @@ def register(app, ctx):
                 continue
             last[r["account_id"]] = r["balance"] * (100.0 if a["my_share"] is None else a["my_share"]) / 100 * sign.get(a["kind"], 1)
             by_day[r["ts"][:10]] = round(sum(last.values()), 2)
-        return [{"date": d, "net_worth": v} for d, v in by_day.items()]
+        # savings you keep by hand (a CD, a jar) count in net worth too: from the day they were opened, at their current value
+        manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
+        extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
+        return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]
 
     @app.get("/api/events")
     def events(request: Request, limit: int = 50):
