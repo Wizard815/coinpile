@@ -24,8 +24,20 @@ class NeedsSignIn(MCPError):
     pass
 
 
+MAX_BODY = 5_000_000
+
+
+def _https(u, what: str) -> str:
+    """Sign-in addresses a server hands us are opened in the person's browser or posted to: https only (a javascript: or http: one is refused)."""
+    if not isinstance(u, str) or urlparse(u).scheme != "https" or not urlparse(u).hostname:
+        raise MCPError(f"the MCP server gave an unsafe {what} address")
+    return u
+
+
 def _rpc_result(r: httpx.Response) -> dict:
     """A JSON-RPC answer, sent as plain JSON or as a server-sent event stream."""
+    if len(r.content) > MAX_BODY:
+        raise MCPError("the MCP server sent too much")
     if r.status_code == 401:
         raise NeedsSignIn("Robinhood needs you to sign in again")
     if r.status_code >= 400:
@@ -133,11 +145,13 @@ def discover(url: str, transport=None) -> dict:
             if r.status_code == 200:
                 d = r.json()
                 resource = d.get("resource") or url
+                if resource.rstrip("/") != url.rstrip("/") and not url.startswith(resource.rstrip("/") + "/"):
+                    raise MCPError("the MCP server's sign-in information is for a different address")       # RFC 9728: the metadata must be for this server
                 auth_server = (d.get("authorization_servers") or [None])[0]
                 break
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, AttributeError):
             continue
-    auth_server = (auth_server or base).rstrip("/")
+    auth_server = _https((auth_server or base).rstrip("/"), "sign-in server")
     a = urlparse(auth_server)
     for c in [f"{a.scheme}://{a.netloc}/.well-known/oauth-authorization-server{a.path}", f"{a.scheme}://{a.netloc}/.well-known/openid-configuration{a.path}",
               f"{auth_server}/.well-known/oauth-authorization-server"]:
@@ -146,8 +160,10 @@ def discover(url: str, transport=None) -> dict:
             if r.status_code == 200:
                 m = r.json()
                 if m.get("authorization_endpoint") and m.get("token_endpoint"):
-                    return {"resource": resource, "issuer": m.get("issuer", auth_server), "authorization_endpoint": m["authorization_endpoint"],
-                            "token_endpoint": m["token_endpoint"], "registration_endpoint": m.get("registration_endpoint"), "scopes": m.get("scopes_supported") or []}
+                    reg = m.get("registration_endpoint")
+                    return {"resource": resource, "issuer": m.get("issuer", auth_server), "authorization_endpoint": _https(m["authorization_endpoint"], "sign-in"),
+                            "token_endpoint": _https(m["token_endpoint"], "token"), "registration_endpoint": _https(reg, "registration") if reg else None,
+                            "scopes": [s for s in (m.get("scopes_supported") or []) if isinstance(s, str)]}
         except (httpx.HTTPError, ValueError):
             continue
     raise MCPError("could not find where to sign in to this MCP server")
@@ -157,9 +173,12 @@ def register(meta: dict, redirect_uri: str, transport=None) -> str:
     """Dynamic client registration: Coinpile introduces itself and gets a client id (no secret: a public client using PKCE)."""
     if not meta.get("registration_endpoint"):
         raise MCPError("this MCP server does not let apps register themselves; paste a token instead")
-    r = netguard.client(transport, timeout=20).post(meta["registration_endpoint"], json={
+    try:
+        r = netguard.client(transport, timeout=20).post(_https(meta["registration_endpoint"], "registration"), json={
         "client_name": "Coinpile (read-only)", "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"], "token_endpoint_auth_method": "none"})
+    except httpx.HTTPError as e:
+        raise MCPError(f"could not reach the MCP server's registration ({type(e).__name__})")
     if r.status_code not in (200, 201):
         raise MCPError(f"registering with the MCP server failed ({r.status_code})")
     return r.json()["client_id"]
@@ -173,15 +192,36 @@ def pkce() -> tuple[str, str]:
 def authorize_url(meta: dict, client_id: str, redirect_uri: str, state: str, challenge: str) -> str:
     q = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "state": state, "code_challenge": challenge,
          "code_challenge_method": "S256", "resource": meta["resource"]}
-    reads = [s for s in meta.get("scopes") or [] if "read" in s.lower()]
-    if reads:
-        q["scope"] = " ".join(reads)                  # ask only for reading where the server lets us choose
+    q["scope"] = " ".join(read_scopes(meta.get("scopes") or [])) or None
+    if not q["scope"]:
+        del q["scope"]
     return meta["authorization_endpoint"] + ("&" if "?" in meta["authorization_endpoint"] else "?") + urlencode(q)
 
 
+def read_scopes(scopes: list[str]) -> list[str]:
+    """Only scopes that are plainly read-only: 'read', or ending in ':read' / '.read' / '_read', and never one naming write, trade or order."""
+    out = []
+    for s in scopes:
+        low = s.lower()
+        if any(w in low for w in ("write", "trade", "order", "transfer", "withdraw", "admin")):
+            continue
+        if low == "read" or low.endswith((":read", ".read", "_read", "/read")) or low in ("openid", "offline_access"):
+            out.append(s)
+    return out
+
+
 def exchange(meta: dict, client_id: str, data: dict, transport=None) -> dict:
-    r = netguard.client(transport, timeout=20).post(meta["token_endpoint"], data={**data, "client_id": client_id, "resource": meta["resource"]},
-                                                    headers={"Accept": "application/json"})
+    try:
+        r = netguard.client(transport, timeout=20).post(_https(meta["token_endpoint"], "token"), data={**data, "client_id": client_id, "resource": meta["resource"]},
+                                                        headers={"Accept": "application/json"})
+    except httpx.HTTPError as e:
+        raise MCPError(f"could not reach Robinhood's sign-in ({type(e).__name__})")
     if r.status_code != 200:
         raise NeedsSignIn(f"Robinhood refused the sign-in ({r.status_code})")
-    return r.json()
+    try:
+        d = r.json()
+    except ValueError:
+        raise MCPError("Robinhood's sign-in did not answer in JSON")
+    if not isinstance(d, dict) or not d.get("access_token"):
+        raise MCPError("Robinhood's sign-in sent no access token")
+    return d

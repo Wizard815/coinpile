@@ -114,7 +114,7 @@ class Writer:
     def add_account(self, name: str, institution: str | None, kind: str, balance: float | None) -> str:
         full = f"{institution} - {name}" if institution and institution.lower() not in ("manual", "") else name
         today = self.today().isoformat()
-        body = {"name": full[:1024], "currency_code": "USD", "active": True, "include_net_worth": True}
+        body = {"name": full[:1024], "currency_code": cfg.get(self.db, "currency") or "USD", "active": True, "include_net_worth": True}
         if kind == "credit":
             body.update({"type": "asset", "account_role": "ccAsset", "credit_card_type": "monthlyFull", "monthly_payment_date": today,
                          "opening_balance": f"{-abs(balance or 0):.2f}", "opening_balance_date": today})
@@ -162,7 +162,10 @@ class Writer:
         s = self.db.one("SELECT * FROM subscriptions WHERE id=?", (sid,))
         if s is not None:
             s = {**s, "_stored_amount": (before or {}).get("amount")}
-        if not s or s["source"] != "firefly":
+        if not s:
+            return
+        if s["source"] != "firefly":
+            self.sub_created(sid)                           # a Coinpile-only subscription edited with "send subscriptions" on becomes a bill now
             return
         body = self._bill_body(s)
         if not body:
@@ -189,7 +192,7 @@ class Writer:
                 accts[fid] = round(accts.get(fid, 0) + a["amount"], 2)
             body = {"name": g["name"][:255], "target_amount": f"{g['target']:.2f}", "start_date": (g.get("created") or start)[:10], "target_date": g.get("deadline"),
                     "notes": "Kept in step by Coinpile (its goal of the same name).", "accounts": [{"account_id": k, "current_amount": f"{v:.2f}"} for k, v in accts.items()],
-                    "transaction_currency_code": "USD"}
+                    "transaction_currency_code": cfg.get(self.db, "currency") or "USD"}
             sig = json.dumps(body, sort_keys=True)
             if gid in links:
                 if sigs.get(gid) == sig:

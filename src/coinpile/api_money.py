@@ -509,7 +509,13 @@ def register(app, ctx):
         if not cur.rowcount:
             bad("not found", 404)
         if sends("bills"):
-            in_firefly(W.sub_updated, sid, before)
+            from coinpile import firefly
+            try:
+                W.sub_updated(sid, before)
+            except firefly.FireflyError as e:
+                with store.tx() as c:                       # Firefly III refused: put Coinpile back the way it was, so the two never disagree
+                    c.execute(f"UPDATE subscriptions SET {sets} WHERE id=?", tuple(before[k] for k in COLS.split(",")) + (sid,))
+                bad(str(e), 502)
         return ledger.subscription(store, sid, ctx.today())
 
     @app.delete("/api/subscriptions/{sid}")

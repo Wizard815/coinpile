@@ -277,7 +277,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     locks: dict[str, threading.Lock] = {}
     pending_oauth: dict[str, tuple[str, float]] = {}
     oauth_lock = threading.Lock()
-    rh_pending: dict[str, tuple[str, str, float]] = {}
+    rh_pending: dict[str, tuple] = {}
     ui = ui_dir()
     from contextlib import asynccontextmanager
 
@@ -430,7 +430,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 n += importers.store(db, prov, rows)
                 os.makedirs(done, exist_ok=True)
                 os.replace(path, os.path.join(done, f))
-            except (ValueError, OSError):
+            except Exception:                              # any file that cannot be read is set aside, so it never blocks the folder
                 os.makedirs(os.path.join(folder, "failed"), exist_ok=True)
                 os.replace(path, os.path.join(folder, "failed", f))
         return n
@@ -444,23 +444,39 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         except Exception:
             pass
 
+    from concurrent.futures import ThreadPoolExecutor
+    workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix="coinpile-round")
+    running: set[str] = set()
+    running_lock = threading.Lock()
+
+    def one_round(u: dict) -> None:
+        """One person's background work. People are handled side by side, so one person's slow servers never hold up anyone else."""
+        try:
+            try:
+                scan_drop_folder(u["id"])
+            except Exception:
+                pass
+            if not u.get("problem") and due(u["id"]):
+                refresh(u["id"])                          # also sends webhooks
+            else:
+                send_hooks(u["id"])                       # CSV imports, goals, retries
+        except Exception:
+            pass
+        finally:
+            with running_lock:
+                running.discard(u["id"])
+
     def loop():
         while True:
             time.sleep(60)
             for u in users.all():
                 if gone(u["id"]):                               # forgotten since the list was read
                     continue
-                try:
-                    try:
-                        scan_drop_folder(u["id"])
-                    except Exception:
-                        pass
-                    if not u.get("problem") and due(u["id"]):
-                        refresh(u["id"])                  # also sends webhooks
-                    else:
-                        send_hooks(u["id"])               # CSV imports, goals, retries
-                except Exception:
-                    pass
+                with running_lock:
+                    if u["id"] in running:                      # last round for this person is still going
+                        continue
+                    running.add(u["id"])
+                workers.submit(one_round, u)
 
     # ---------------- each person's own app
     def person_app(uid: str) -> FastAPI:
@@ -530,26 +546,38 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, who(), mcp_transport)
 
+        def forget_rh_signin() -> None:
+            for k in ("rh_mcp_token", "rh_mcp_refresh", "rh_mcp_expires", "rh_mcp_client", "rh_mcp_meta"):
+                cfg.set_value(db, k, "")
+
+        def rh_connect_work(url: str, back: str) -> tuple[dict, str]:
+            with outbound.hold():
+                meta = mcp.discover(url, mcp_transport)
+                old = json.loads(cfg.get(db, "rh_mcp_meta") or "{}")
+                same = old.get("redirect") == back and old.get("issuer") == meta.get("issuer") and old.get("url") == url
+                client = cfg.get(db, "rh_mcp_client") if same else ""                   # an app registration belongs to one sign-in server
+                if not client:
+                    client = mcp.register(meta, back, mcp_transport)
+            return meta, client
+
         @app.post("/api/robinhood/connect")
         async def rh_connect(request: Request):
             """Start signing in to Robinhood's MCP on Robinhood's own site. Coinpile only ever asks it for reads."""
             url = cfg.get(db, "rh_mcp_url") or robinhood.MCP_URL
             back = (my_url or str(request.base_url).rstrip("/")) + "/auth/robinhood/callback"
             try:
-                meta = await run_in_threadpool(mcp.discover, url, mcp_transport)
-                client = cfg.get(db, "rh_mcp_client") if cfg.get(db, "rh_mcp_meta") and json.loads(cfg.get(db, "rh_mcp_meta")).get("redirect") == back else ""
-                if not client:
-                    client = await run_in_threadpool(mcp.register, meta, back, mcp_transport)
+                meta, client = await run_in_threadpool(rh_connect_work, url, back)
             except (mcp.MCPError, netguard.Blocked) as e:
                 raise HTTPException(502, str(e))
-            cfg.set_value(db, "rh_mcp_client", client)
-            cfg.set_value(db, "rh_mcp_meta", json.dumps({**meta, "redirect": back}))
+            meta = {**meta, "redirect": back, "url": url}
             verifier, challenge = mcp.pkce()
             state = secrets.token_urlsafe(24)
             with oauth_lock:
                 for k in [k for k, v in rh_pending.items() if time.time() - v[2] > 900]:
                     del rh_pending[k]
-                rh_pending[state] = (uid, verifier, time.time())
+                if len(rh_pending) >= 1000:
+                    raise HTTPException(429, "too many sign-ins in progress; try again in a few minutes")
+                rh_pending[state] = (uid, verifier, time.time(), meta, client)       # what the callback uses, fixed now
             return {"url": mcp.authorize_url(meta, client, back, state, challenge)}
 
         class RhToken(BaseModel):
@@ -566,18 +594,20 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     cfg.put(db, "rh_mcp_url", b.url.strip())
                 except ValueError as e:
                     raise HTTPException(422, str(e))
+            forget_rh_signin()
             cfg.set_value(db, "rh_mcp_token", b.token.strip())
-            for k in ("rh_mcp_refresh", "rh_mcp_expires"):
-                cfg.set_value(db, k, "")
             return {"connected": True}
 
         @app.post("/api/robinhood/test")
         async def rh_test():
-            c = rh.mcp_client()
-            if not c:
-                raise HTTPException(409, "not connected to Robinhood yet")
+            def work():
+                with outbound.hold():
+                    c = rh.mcp_client()
+                    if not c:
+                        raise HTTPException(409, "not connected to Robinhood yet")
+                    return c.tools()
             try:
-                tools = await run_in_threadpool(c.tools)
+                tools = await run_in_threadpool(work)
             except mcp.MCPError as e:
                 raise HTTPException(502, str(e))
             return {"ok": True, "tools": len(tools), "reads_used": sorted(t for t in tools if t in robinhood.READ_TOOLS),
@@ -585,8 +615,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         @app.post("/api/robinhood/disconnect")
         def rh_disconnect():
-            for k in ("rh_mcp_token", "rh_mcp_refresh", "rh_mcp_expires"):
-                cfg.set_value(db, k, "")
+            forget_rh_signin()
             with db.tx() as c:
                 c.execute("DELETE FROM accounts WHERE id='rh:agent'")
             return {"connected": False}
@@ -609,7 +638,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 raise HTTPException(404, "account not found")
             if b.investment and b.category not in investments.INVEST_CATEGORIES:
                 raise HTTPException(422, "category must be Investment or Retirement")
-            if not b.investment and a["kind"] == "investment" and not a.get("category"):
+            if not b.investment and a["kind"] == "investment":
                 raise HTTPException(409, "this account is an investment account by type; it cannot be untracked")
             with db.tx() as c:
                 c.execute("UPDATE accounts SET category=? WHERE id=?", (b.category if b.investment else None, aid))
@@ -737,7 +766,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         webhooks.init(db)
 
         class HookIn(BaseModel):
-            name: str = "Webhook"
+            name: str | None = None
             url: str | None = None
             events: list[str] | None = None
             detail: bool | None = None
@@ -759,13 +788,13 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         def hooks_add(b: HookIn):
             if not b.url or not b.events:
                 raise HTTPException(422, "an address and at least one event are required")
-            r = hook_err(lambda: webhooks.add(db, b.name, b.url, b.events, True if b.detail is None else b.detail))
+            r = hook_err(lambda: webhooks.add(db, b.name or "Webhook", b.url, b.events, True if b.detail is None else b.detail))
             webhooks.collect(db, users.ensure_handle(uid), today())          # from now on: what already happened is not sent
             return r
 
         @app.put("/api/webhooks/{hid}")
         def hooks_update(hid: int, b: HookIn):
-            return hook_err(lambda: webhooks.update(db, hid, **b.model_dump()))
+            return hook_err(lambda: webhooks.update(db, hid, **b.model_dump(exclude_unset=True)))
 
         @app.delete("/api/webhooks/{hid}")
         def hooks_delete(hid: int):
@@ -777,7 +806,11 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             if not db.one("SELECT 1 FROM webhooks WHERE id=? AND active=1", (hid,)):
                 raise HTTPException(404, "no such webhook (or it is switched off)")
             webhooks.queue(db, users.ensure_handle(uid), "test", {"message": "Coinpile webhooks are working."}, {"message": "Coinpile webhooks are working."}, only_hook=hid)
-            r = await run_in_threadpool(webhooks.deliver, db, webhook_transport)
+
+            def work():
+                with outbound.hold():
+                    return webhooks.deliver(db, webhook_transport, limit=5)
+            r = await run_in_threadpool(work)
             last = db.one("SELECT status FROM webhook_outbox WHERE hook_id=? ORDER BY id DESC LIMIT 1", (hid,))
             return {"ok": r["sent"] > 0, "status": (last or {}).get("status")}
 
@@ -793,19 +826,19 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         async def password_set(b: PasswordSet, request: Request):
             """Set or change the Coinpile password. Changing one needs the current one (forgot it? sign out and use Forgot password with a token)."""
             u = users.get(uid) or {}
-            if u.get("pw_hash") and not await run_in_threadpool(verify_password, b.current or "", u["pw_hash"]):
+            if u.get("pw_hash") and not await run_in_threadpool(slow_hash, verify_password, b.current or "", u["pw_hash"]):
                 raise HTTPException(403, "the current password is not right")
             try:
                 check_password_strength(b.new or "", u.get("email") or "")
             except ValueError as e:
                 raise HTTPException(422, str(e))
-            users.set_password(uid, await run_in_threadpool(hash_password, b.new), keep_session=request.cookies.get(COOKIE))
+            users.set_password(uid, await run_in_threadpool(slow_hash, hash_password, b.new), keep_session=request.cookies.get(COOKIE))
             return {"password_set": True}
 
         @app.delete("/api/password")
         async def password_remove(b: PasswordSet, request: Request):
             u = users.get(uid) or {}
-            if u.get("pw_hash") and not await run_in_threadpool(verify_password, b.current or "", u["pw_hash"]):
+            if u.get("pw_hash") and not await run_in_threadpool(slow_hash, verify_password, b.current or "", u["pw_hash"]):
                 raise HTTPException(403, "the current password is not right")
             users.set_password(uid, None, keep_session=request.cookies.get(COOKIE))
             return {"password_set": False}
@@ -846,8 +879,11 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             try:
                 for k, v in body.items():
                     cfg.validate(k, v)
+                moved = "rh_mcp_url" in body and str(body["rh_mcp_url"]).strip() != (cfg.get(db, "rh_mcp_url") or "")
                 for k, v in body.items():
                     cfg.put(db, k, v)
+                if moved:
+                    forget_rh_signin()                     # never send this server's tokens to another one
             except ValueError as e:
                 raise HTTPException(422, str(e))
             return settings_get()
@@ -990,6 +1026,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 del hooks_known[k]
             import shutil
             shutil.rmtree(os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), ignore_errors=True)
+            shutil.rmtree(os.path.join(data_dir, "people", f"{safe_id(uid)}-imports"), ignore_errors=True)
             if d:
                 d.conn.close()
             try:
@@ -1026,6 +1063,10 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             out["savings"] = {"total": ext["savings_total"], "free": ext["savings_free"], "earmarked": ext["savings_earmarked"]}
         if "goals" in share:
             out["goals"] = [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"]
+        for key, acct in (("robinhood_main", "rh:main"), ("robinhood_agent", "rh:agent")):
+            if key in share:
+                a = db.one("SELECT balance, updated FROM accounts WHERE id=?", (acct,))
+                out[key] = {"value": a["balance"], "as_of": a["updated"]} if a else None
         if "spending" in share:
             fc = ledger.spending_forecast(db, t)
             out["spending"] = {"so_far": fc["spent_so_far"], "projected": fc["projected"], "income_avg": fc["income_avg"], "left_after": fc["left_after_projected"]}
@@ -1166,7 +1207,21 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         return {"signed_in": True, "email": me_["email"]}
 
     pw_throttle = Throttle()
+    ip_throttle = Throttle()
+    ip_throttle.FREE = 30                                     # a household behind one address still gets plenty of tries
     dummy_hash = hash_password("not a real password, only for timing")
+    scrypt_slots = threading.BoundedSemaphore(3)          # each password check uses ~128 MB on purpose: a few at a time, never dozens
+
+    def slow_hash(fn, *a):
+        if not scrypt_slots.acquire(timeout=5):
+            raise HTTPException(429, "busy; try again in a moment", headers={"Retry-After": "5"})
+        try:
+            return fn(*a)
+        finally:
+            scrypt_slots.release()
+
+    def client_ip(request: Request) -> str:
+        return "ip:" + (request.client.host if request.client else "?")
 
     class PasswordIn(BaseModel):
         email: str
@@ -1175,12 +1230,14 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     @front.post("/auth/password")
     async def auth_password(b: PasswordIn, request: Request, response: Response):
         """Sign in with your Firefly III email and the Coinpile password you set (Settings, Firefly III). It only opens Coinpile."""
-        key = "pw:" + b.email.strip().lower()[:200]
+        key, ip = "pw:" + b.email.strip().lower()[:200], client_ip(request)
         pw_throttle.check(key)
+        ip_throttle.check(ip)                                  # many names from one place is guessing too
         u = users.by_email(b.email)
-        ok = await run_in_threadpool(verify_password, b.password, (u or {}).get("pw_hash") or dummy_hash)    # the same work whether or not the person exists
+        ok = await run_in_threadpool(slow_hash, verify_password, b.password, (u or {}).get("pw_hash") or dummy_hash)    # the same work whether or not the person exists
         if not (u and u.get("pw_hash") and ok):
             pw_throttle.fail(key)
+            ip_throttle.fail(ip)
             raise HTTPException(401, "wrong email or password")
         pw_throttle.ok(key)
         signed_in(response, request, u["id"])
@@ -1195,6 +1252,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     async def auth_password_reset(b: ResetIn, request: Request, response: Response):
         """Forgot the Coinpile password: a Firefly III Personal Access Token proves who you are again; then the new password is set.
         Every other browser is signed out, and the token becomes the one Coinpile reads Firefly III with."""
+        ip_throttle.check(client_ip(request))
         if not ff_url:
             raise HTTPException(503, "Coinpile does not know your Firefly III address yet (set FIREFLY_URL)")
         try:
@@ -1207,12 +1265,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         try:
             me_ = await run_in_threadpool(lambda: firefly.Firefly(ff_url, tok, firefly_transport).me())
         except firefly.TokenRefused:
+            ip_throttle.fail(client_ip(request))
             raise HTTPException(401, "Firefly III did not accept that token")
         except firefly.FireflyError as e:
             raise HTTPException(502, str(e))
         users.save(me_["id"], me_["email"], "pat", tok)
         users.ensure_handle(me_["id"])
-        users.set_password(me_["id"], await run_in_threadpool(hash_password, b.new))
+        users.set_password(me_["id"], await run_in_threadpool(slow_hash, hash_password, b.new))
+        try:                                                   # someone who had your session may have made API tokens: a reset ends those too
+            with person_db(me_["id"]).tx() as c:
+                c.execute("UPDATE api_tokens SET revoked=1 WHERE revoked=0")
+        except KeyError:
+            pass
         pw_throttle.ok("pw:" + (me_["email"] or "").lower())
         signed_in(response, request, me_["id"])
         refresh_soon(me_["id"])
@@ -1226,13 +1290,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         uid = users.session_user(request.cookies.get(COOKIE))
         if error or not got or got[0] != uid:
             return RedirectResponse("/?robinhood=failed#settings", 302)
-        db = person_db(uid)
         try:
-            meta = json.loads(cfg.get(db, "rh_mcp_meta"))
-            d = await run_in_threadpool(mcp.exchange, meta, cfg.get(db, "rh_mcp_client"),
-                                        {"grant_type": "authorization_code", "code": code, "redirect_uri": meta["redirect"], "code_verifier": got[1]}, mcp_transport)
+            db = person_db(uid)
+        except KeyError:
+            return RedirectResponse("/?robinhood=failed#settings", 302)
+        _, verifier, _, meta, client = got
+        try:
+            d = await run_in_threadpool(mcp.exchange, meta, client,
+                                        {"grant_type": "authorization_code", "code": code, "redirect_uri": meta["redirect"], "code_verifier": verifier}, mcp_transport)
         except (mcp.MCPError, ValueError, KeyError):
             return RedirectResponse("/?robinhood=refused#settings", 302)
+        cfg.set_value(db, "rh_mcp_client", client)
+        cfg.set_value(db, "rh_mcp_meta", json.dumps(meta))
         robinhood.Robinhood(db, "", None, "", mcp_transport).save_tokens(d)
         refresh_soon(uid)
         return RedirectResponse("/?robinhood=connected#investments", 302)

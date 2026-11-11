@@ -21,37 +21,41 @@ def _num(v):
         return None
 
 
-def _find(d, keys):
+def _find(d, keys, depth: int = 0):
     """The first of `keys` anywhere in a nested answer (the server's exact layout is not published, so look for the usual names)."""
+    if depth > 12:
+        return None
     if isinstance(d, dict):
         for k in keys:
             if k in d and _num(d[k]) is not None:
                 return _num(d[k])
         for v in d.values():
-            x = _find(v, keys)
+            x = _find(v, keys, depth + 1)
             if x is not None:
                 return x
     if isinstance(d, list):
         for v in d:
-            x = _find(v, keys)
+            x = _find(v, keys, depth + 1)
             if x is not None:
                 return x
     return None
 
 
-def _rows(d) -> list[dict]:
+def _rows(d, depth: int = 0) -> list[dict]:
     """The longest list of objects in an answer: that is the positions."""
     best = []
+    if depth > 12:
+        return best
     if isinstance(d, list) and d and all(isinstance(x, dict) for x in d):
         best = d
     if isinstance(d, dict):
         for v in d.values():
-            r = _rows(v)
+            r = _rows(v, depth + 1)
             if len(r) > len(best):
                 best = r
     elif isinstance(d, list):
         for v in d:
-            r = _rows(v)
+            r = _rows(v, depth + 1)
             if len(r) > len(best):
                 best = r
     return best
@@ -108,7 +112,7 @@ class Robinhood:
             return ""
         import time
         exp = float(cfg.get(self.db, "rh_mcp_expires") or 0)
-        if exp and exp - time.time() < 120 and cfg.get(self.db, "rh_mcp_refresh") and cfg.get(self.db, "rh_mcp_meta"):
+        if exp and exp - time.time() < 120 and cfg.get(self.db, "rh_mcp_refresh") and cfg.get(self.db, "rh_mcp_meta"):    # mcp.exchange raises only MCPError
             import json
             d = mcp.exchange(json.loads(cfg.get(self.db, "rh_mcp_meta")), cfg.get(self.db, "rh_mcp_client"),
                              {"grant_type": "refresh_token", "refresh_token": cfg.get(self.db, "rh_mcp_refresh")}, self.mcp_transport)
@@ -128,7 +132,10 @@ class Robinhood:
         return mcp.Client(cfg.get(self.db, "rh_mcp_url") or MCP_URL, tok, self.mcp_transport, READ_TOOLS) if tok else None
 
     def fetch_mcp(self):
-        c = self.mcp_client()
+        try:
+            c = self.mcp_client()
+        except mcp.MCPError as e:
+            return {"error": str(e), "source": "robinhood-mcp"}
         if not c:
             return None
         out = {"source": "robinhood-mcp", "as_of": sync.now()}

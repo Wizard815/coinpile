@@ -729,3 +729,37 @@ def test_data_files_are_readable_by_coinpile_only(tmp_path):
     signed_in(app(tmp_path, world()))
     for f in [tmp_path / "users.db", *(tmp_path / "people").glob("*.db")]:
         assert stat.S_IMODE(f.stat().st_mode) == 0o600, f
+
+
+def test_audit2_regressions(tmp_path):
+    from coinpile import mcp, security, webhooks as wh
+    from tests.fake_mcp import FakeRobinhood, MCP
+    # sign-in addresses from an MCP server must be https; only plainly read-only scopes are asked for
+    with pytest.raises(mcp.MCPError):
+        mcp._https("javascript:alert(1)", "sign-in")
+    assert mcp.read_scopes(["read", "account:read", "trading:read_write", "orders.readwrite", "trade", "positions.read"]) == ["read", "account:read", "positions.read"]
+    # a flood of junk names never frees a locked-out one
+    t = security.Throttle()
+    t.MAX_KEYS = 50
+    for _ in range(10):
+        t.fail("pw:victim")
+    for i in range(200):
+        t.fail(f"pw:junk{i}")
+    assert t.wait_for("pw:victim") > 0
+    # changing the MCP address forgets the old server's tokens
+    rh = FakeRobinhood()
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), mcp_transport=rh.transport(),
+                       webhook_transport=httpx.MockTransport(lambda r: httpx.Response(200)), today=lambda: TODAY, public_url="http://testserver")
+    c = signed_in(a)
+    c.put("/api/settings", json={"rh_mcp_url": MCP})
+    c.get(rh.approve(c.post("/api/robinhood/connect").json()["url"]).split("testserver", 1)[1])
+    assert c.get("/api/status").json()["robinhood"]["mcp"] is True
+    c.put("/api/settings", json={"rh_mcp_url": "https://other.example.com/mcp"})
+    assert c.get("/api/status").json()["robinhood"]["mcp"] is False
+    # pausing a webhook keeps its name
+    h = c.post("/api/webhooks", json={"name": "My HA", "url": "https://hooks.example.com/x", "events": ["refresh.done"]}).json()
+    assert c.put(f"/api/webhooks/{h['id']}", json={"active": False}).json()["name"] == "My HA"
+    # a password reset also ends API tokens made before it
+    tok = c.post("/api/tokens", json={"name": "HA", "scopes": ["summary"]}).json()["token"]
+    assert TestClient(a).post("/auth/password/reset", json={"token": ALICE, "new": "a fresh long phrase"}).status_code == 200
+    assert TestClient(a).get("/api/v1/me/summary", headers={"Authorization": "Bearer " + tok}).status_code == 401
