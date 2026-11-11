@@ -250,6 +250,22 @@ def savings_summary(db, today: date) -> dict:
             "maturing_soon": maturing, "by_kind": {k: round(sum(i["balance"] for i in items if i["kind"] == k), 2) for k in sorted({i["kind"] for i in items})}}
 
 
+# ------------------------------------------------------------------ investments (stocks, crypto, brokerage: Robinhood and anything else, by hand or linked to an account)
+def investments_view(db, row: dict) -> dict:
+    bal = row["balance"] or 0.0
+    if row.get("account_id"):
+        a = db.one("SELECT balance, my_share FROM accounts WHERE id=?", (row["account_id"],))
+        if a and a["balance"] is not None:
+            bal = mine(a)
+    return {**row, "balance": round(bal, 2), "linked": bool(row.get("account_id"))}
+
+
+def investments_summary(db) -> dict:
+    items = [investments_view(db, r) for r in db.all("SELECT * FROM investments WHERE active=1 ORDER BY kind, name")]
+    total = round(sum(i["balance"] for i in items), 2)
+    return {"items": items, "total": total, "by_kind": {k: round(sum(i["balance"] for i in items if i["kind"] == k), 2) for k in sorted({i["kind"] for i in items})}}
+
+
 # ------------------------------------------------------------------ net worth, projection, alerts
 def net_worth(db, today: date | None = None) -> float:
     total = 0.0
@@ -257,6 +273,8 @@ def net_worth(db, today: date | None = None) -> float:
         total += mine(a) * (-1 if a["kind"] in OUT_KINDS else 1)
     for s in db.all("SELECT * FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')"):
         total += s["balance"] or 0                       # savings linked to an account are already counted via that account
+    for i in db.all("SELECT * FROM investments WHERE active=1 AND (account_id IS NULL OR account_id='')"):
+        total += i["balance"] or 0                        # investments linked to an account are already counted via that account
     return round(total, 2)
 
 

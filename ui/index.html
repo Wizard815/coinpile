@@ -479,6 +479,7 @@ async function viewSubs(root, rerender) {
 
 /* ================================ SAVINGS: where the money is, and what it is for ================================ */
 const SK = [["savings", "Savings account"], ["cd", "Certificate of deposit"], ["money_market", "Money market"], ["bond", "Bond / I-bond"], ["hsa", "HSA"], ["529", "529 plan"], ["cash", "Cash"], ["other", "Other"]];
+const IK = [["brokerage", "Brokerage"], ["stock", "Stocks"], ["crypto", "Crypto"], ["retirement", "Retirement"], ["other", "Other"]];
 const PRIO = [[1, "High"], [2, "Normal"], [3, "Low"]];
 const goalCard = (g, v, rerender, lk = { me: "", links: [] }) => {
   const peers = lk.links.filter((l) => l.status === "active").map((l) => l.peer);
@@ -690,7 +691,7 @@ function bubble(m) {
     m.trace?.length ? h("details", { class: "trace" }, h("summary", {}, `Looked at: ${[...new Set(m.trace.map((t) => t.tool))].join(", ")}`), m.trace.map((t) => h("div", { class: "small mono muted" }, `${t.ok ? "✓" : "✗"} ${t.tool}(${JSON.stringify(t.args)})`))) : null);
 }
 
-/* ================================ ROBINHOOD ================================ */
+/* ================================ INVESTMENTS (stocks, crypto, brokerage; Robinhood lives here too) ================================ */
 function portfolio(title, badge, d) {
   if (!d || d.error) return h("div", { class: "panel" }, h("h3", {}, title), h("p", { class: "muted" }, d?.error || "Not configured."));
   const eq = d.balances && (d.balances.equity ?? d.balances.net_transfers);
@@ -698,9 +699,27 @@ function portfolio(title, badge, d) {
     d.errors ? h("p", { class: "neg small" }, "Partial data: " + d.errors.join(", ")) : null,
     Array.isArray(d.positions) && d.positions.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Symbol"), h("th", { class: "r" }, "Shares"), h("th", { class: "r" }, "Value / cost"))), h("tbody", {}, d.positions.map((p) => h("tr", {}, h("td", { class: "mono" }, p.symbol), h("td", { class: "num r" }, p.quantity), h("td", { class: "num r" }, usd(p.equity ?? p.net_cost)))))) : h("p", { class: "muted small" }, "No positions reported."));
 }
-async function viewRobinhood(root) {
-  const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
-  add(root, h("div", { class: "two" }, portfolio("Main account", "read-only", m), portfolio("Agent account", "read-only", a)), h("p", { class: "muted small" }, "Choose where the main account's data comes from under Settings > Robinhood. Nothing on this page can place a trade."));
+async function viewInvestments(root, rerender) {
+  const [v, accts, m, a] = await Promise.all([api("/api/investments"), api("/api/accounts"), api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
+  const ep = S.edit?.inv ?? null, e = ep ? v.items.find((i) => i.id === ep) : null;
+  add(root,
+    h("div", { class: "panel scroll" }, h("h3", {}, "Investments"), h("p", { class: "muted small" }, "Link an account that already shows up elsewhere (a brokerage account Plaid only reports a dollar total for, a retirement account, anything Firefly III syncs) so it counts here too, or add one by hand."),
+      v.items.length ? h("table", {}, h("thead", {}, h("tr", {}, ["Name", "Type", "Balance", ""].map((x, i) => h("th", { class: i === 2 ? "r" : "" }, x)))),
+        h("tbody", {}, v.items.map((i) => h("tr", {}, h("td", {}, i.name, h("div", { class: "muted small" }, i.institution)), h("td", { class: "small" }, (IK.find(([k]) => k === i.kind) || [0, i.kind])[1], i.linked ? h("span", { class: "pill t" }, "linked") : null),
+          h("td", { class: "num r" }, usd(i.balance)),
+          h("td", { class: "r", style: "white-space:nowrap" }, h("button", { class: "btn sm", onclick: () => { S.edit = { inv: i.id }; rerender(); window.scrollTo(0, 0); } }, "Edit"), " ",
+            h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/investments/${i.id}`, { method: "DELETE" }); rerender(); }) }, "Remove"))))) ,
+        h("tfoot", {}, h("tr", {}, h("td", {}, h("b", {}, "Total")), h("td", {}), h("td", { class: "num r" }, h("b", {}, usd(v.total))), h("td", {})))) : h("p", { class: "muted" }, "No investments yet.")),
+    h("div", { class: "panel" }, h("h3", {}, e ? "Edit investment" : "Add an investment"), h("p", { class: "muted small" }, "Follow an existing account's balance, or type one by hand (handy before a connector like FolioFox is wired up)."),
+      h("form", { class: "subform", onsubmit: async (ev) => { ev.preventDefault();
+        const body = { name: val("iv-name"), kind: val("iv-kind"), institution: val("iv-inst"), balance: num("iv-bal") ?? 0, account_id: val("iv-acct") || null, notes: "", active: true };
+        try { await api(e ? `/api/investments/${e.id}` : "/api/investments", send(e ? "PUT" : "POST", body)); S.edit = null; toast("Saved"); rerender(); } catch (err) { fail(err); } } },
+        field("iv-name", "Name", e?.name, { required: true }), select("iv-kind", "Type", IK, e?.kind ?? "brokerage"), field("iv-inst", "Institution", e?.institution),
+        select("iv-acct", "Follow an account's balance", [["", "None, I type the balance"], ...accts.map((a2) => [a2.id, `${a2.institution} · ${an(a2)}`])], e?.account_id ?? ""),
+        field("iv-bal", "Balance (if not following an account)", e?.balance, { type: "number", step: "0.01", min: "0" }),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, e ? "Save" : "Add"), e ? h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel") : null))),
+    h("div", { class: "two" }, portfolio("Robinhood main", "read-only", m), portfolio("Robinhood agent", "read-only", a)),
+    h("p", { class: "muted small" }, "Robinhood above is an uploaded activity report or the optional agent connector (Settings > Robinhood) — read-only, and separate from the linked accounts above. Nothing on this page can place a trade."));
 }
 
 /* ================================ SETTINGS (tabs) ================================ */
@@ -992,7 +1011,7 @@ async function tabSharing(root, rerender) {
 }
 
 /* ================================ SHELL ================================ */
-const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["planner", "Budgets & notes", viewPlanner], ["agent", "Agent", viewAgent], ["robinhood", "Robinhood", viewRobinhood], ["settings", "Settings", viewSettings]];
+const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["planner", "Budgets & notes", viewPlanner], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["settings", "Settings", viewSettings]];
 /* ---------- movable panels: order is remembered per tab in this browser ---------- */
 function layoutKey() { return "gb_layout_" + S.tab + (S.tab === "settings" ? ":" + S.settingsTab : "") + (S.acct ? ":acct" : ""); }
 function blocksOf(main) {

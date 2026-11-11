@@ -68,6 +68,16 @@ class SavingsIn(BaseModel):
     active: bool = True
 
 
+class InvestmentIn(BaseModel):
+    name: str
+    kind: str = "brokerage"
+    institution: str = ""
+    balance: float = 0
+    account_id: str | None = None          # follow an existing account's balance instead of typing one (e.g. a Robinhood account Plaid only reports a dollar total for)
+    notes: str = ""
+    active: bool = True
+
+
 class NoteIn(BaseModel):
     title: str
     body: str = ""
@@ -75,6 +85,7 @@ class NoteIn(BaseModel):
 
 
 KINDS = {"cash", "credit", "investment", "loan"}
+INVESTMENT_KINDS = {"brokerage", "stock", "crypto", "retirement", "other"}
 SAVINGS_KINDS = {"savings", "cd", "money_market", "bond", "hsa", "529", "cash", "other"}
 
 
@@ -162,7 +173,9 @@ def register(app, ctx):
         # savings you keep by hand (a CD, a jar) count in net worth too: from the day they were opened, at their current value
         manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
         extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
-        return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]
+        # unlinked investments count in net worth too, from the start (no "opened" date to walk forward from)
+        inv_extra = sum(i["balance"] or 0 for i in store.all("SELECT balance FROM investments WHERE active=1 AND (account_id IS NULL OR account_id='')"))
+        return [{"date": d, "net_worth": round(v + extra(d) + inv_extra, 2)} for d, v in by_day.items()]
 
     @app.get("/api/events")
     def events(request: Request, limit: int = 50):
@@ -214,6 +227,7 @@ def register(app, ctx):
         return {"account": a, "last_30_days": {"in": recent["sum_in"], "out": recent["sum_out"], "count": recent["total"]},
                 "subscriptions": [s for s in ledger.subscriptions(store, today) if s["account_id"] == aid],
                 "savings": [ledger.savings_view(store, s, today) for s in store.all("SELECT * FROM savings WHERE account_id=?", (aid,))],
+                "investments": [ledger.investments_view(store, i) for i in store.all("SELECT * FROM investments WHERE account_id=?", (aid,))],
                 "history": [{"ts": r["ts"], "balance": r["balance"]} for r in store.all("SELECT ts,balance FROM snapshots WHERE account_id=? ORDER BY ts", (aid,))],
                 "alerts": [x for x in ledger.alerts(store, today) if x.get("account_id") == aid]}
 
@@ -274,6 +288,7 @@ def register(app, ctx):
         with store.tx() as c:
             c.execute("UPDATE subscriptions SET account_id=NULL WHERE account_id=?", (aid,))
             c.execute("UPDATE savings SET account_id=NULL WHERE account_id=?", (aid,))
+            c.execute("UPDATE investments SET account_id=NULL WHERE account_id=?", (aid,))
             for t in ("transactions", "snapshots", "holdings"):
                 c.execute(f"DELETE FROM {t} WHERE account_id=?", (aid,))
             c.execute("DELETE FROM accounts WHERE id=?", (aid,))
@@ -633,6 +648,52 @@ def register(app, ctx):
         with store.tx() as c:
             c.execute("DELETE FROM savings WHERE id=?", (sid,))
         return {"deleted": sid}
+
+    # ------------------------------------------------------------ investments (Robinhood and anything else: stocks, crypto, retirement, by hand or linked to an account)
+    def check_investment(i: InvestmentIn):
+        if not i.name.strip():
+            bad("name required")
+        if i.kind not in INVESTMENT_KINDS:
+            bad(f"kind must be one of {sorted(INVESTMENT_KINDS)}")
+        if i.balance < 0:
+            bad("balance must be >= 0")
+        if i.account_id and not store.one("SELECT 1 FROM accounts WHERE id=?", (i.account_id,)):
+            bad("account_id does not exist", 404)
+
+    IC = "name,kind,institution,balance,account_id,notes,active"
+
+    def iv(i: InvestmentIn):
+        return (i.name.strip(), i.kind, i.institution, i.balance, i.account_id or None, i.notes, int(i.active))
+
+    @app.get("/api/investments")
+    def investments(request: Request):
+        auth(request)
+        return ledger.investments_summary(store)
+
+    @app.post("/api/investments")
+    def investments_add(request: Request, i: InvestmentIn):
+        auth(request)
+        check_investment(i)
+        with store.tx() as c:
+            cur = c.execute(f"INSERT INTO investments({IC}) VALUES({','.join('?' * 7)})", iv(i))
+        return ledger.investments_view(store, store.one("SELECT * FROM investments WHERE id=?", (cur.lastrowid,)))
+
+    @app.put("/api/investments/{iid}")
+    def investments_update(request: Request, iid: int, i: InvestmentIn):
+        auth(request)
+        check_investment(i)
+        with store.tx() as c:
+            cur = c.execute(f"UPDATE investments SET {','.join(f'{k}=?' for k in IC.split(','))} WHERE id=?", iv(i) + (iid,))
+        if not cur.rowcount:
+            bad("not found", 404)
+        return ledger.investments_view(store, store.one("SELECT * FROM investments WHERE id=?", (iid,)))
+
+    @app.delete("/api/investments/{iid}")
+    def investments_delete(request: Request, iid: int):
+        auth(request)
+        with store.tx() as c:
+            c.execute("DELETE FROM investments WHERE id=?", (iid,))
+        return {"deleted": iid}
 
     # ------------------------------------------------------------ planner: notes + budgets
     @app.get("/api/notes")
