@@ -11,7 +11,7 @@ import re
 import secrets
 import threading
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -22,13 +22,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_links, api_money, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import agent, api_links, api_money, importers, robinhood, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"share", "refresh_minutes", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"share", "rh_main_source", "refresh_minutes", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
 
 
@@ -175,7 +175,7 @@ def same_origin(scope) -> bool:
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
                caldav_transport=None, notify_transport=None, today=None, background: bool = False, client_id: str | None = None,
-               public_firefly_url: str | None = None, public_url: str | None = None):
+               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None):
     ff_url = (firefly_url or os.environ.get("FIREFLY_URL", "")).rstrip("/")
     ff_public = (public_firefly_url or os.environ.get("FIREFLY_PUBLIC_URL", "") or ff_url).rstrip("/")
     client_id = client_id or os.environ.get("FIREFLY_CLIENT_ID", "")
@@ -250,6 +250,12 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         db = person_db(uid)
         try:
             out = firefly.refresh(db, ff_for(uid), today(), full)
+            try:
+                person_app(uid)                                     # makes sure this person's Robinhood reader exists
+                rh_ = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport)
+                out["robinhood"] = rh_.snapshot(cfg.get(db, "rh_main_source") or "auto")
+            except Exception:
+                pass
             cfg.set_value(db, "ff_last_error", "")
             if links.active_peers(db):
                 flush_for(uid)                    # balances of accounts shared with someone go to them
@@ -342,6 +348,61 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
                                  link_flush=link_flush, link_people=users.handles)
         ctx.llm_transport = llm_transport
+
+        rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport)
+
+        @app.get("/api/robinhood/main")
+        def rh_main():
+            return rh.main(cfg.get(db, "rh_main_source") or "auto") or {"error": "no Robinhood data yet: upload an activity report on the Robinhood tab"}
+
+        @app.get("/api/robinhood/agent")
+        def rh_agent():
+            return rh.fetch("agent") or {"error": "the rh-agent connector is not set up (RH_AGENT_URL)"}
+
+        @app.post("/api/robinhood/csv-upload")
+        async def rh_csv(request: Request):
+            raw = await request.body()
+            if len(raw) > 5_000_000:
+                raise HTTPException(413, "file too large")
+            try:
+                saved = rh.save_csv(raw)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            rh.snapshot(cfg.get(db, "rh_main_source") or "auto")
+            return {"saved": saved}
+
+        ctx.robinhood = rh
+
+        # CSV imports, as in Goblin Bank: into accounts you keep in Coinpile only. Firefly III is never written to.
+        @app.post("/api/import/bank-csv")
+        async def import_bank_csv(request: Request, account_id: str, flip: bool = False):
+            """A CSV from a bank's website, into an account you added in Coinpile (an account from Firefly III gets its transactions from Firefly III)."""
+            a = db.one("SELECT source FROM accounts WHERE id=?", (account_id,))
+            if not a:
+                raise HTTPException(404, "account not found")
+            if a["source"] != "manual":
+                raise HTTPException(409, "that account comes from Firefly III: import into it in Firefly III (its Data Importer), or add an account in Coinpile for this")
+            raw = await request.body()
+            if len(raw) > 5_000_000:
+                raise HTTPException(413, "file too large")
+            try:
+                rows, bal = importers.parse_bank(raw.decode("utf-8", "replace"), flip)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            return {"rows": len(rows), "added": importers.store_bank(db, account_id, rows, bal), "balance": bal}
+
+        @app.post("/api/import/csv")
+        async def import_csv(request: Request, provider: str | None = None):
+            """A PayPal, Venmo or Cash App export: each becomes its own account in Coinpile. Importing an overlapping file again never doubles anything."""
+            raw = await request.body()
+            if len(raw) > 5_000_000:
+                raise HTTPException(413, "file too large")
+            try:
+                prov, rows = importers.parse(raw.decode("utf-8", "replace"), provider)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            return {"provider": prov, "rows": len(rows), "added": importers.store(db, prov, rows)}
+
         api_money.register(app, ctx)
         api_plan.register(app, ctx)
         agent.register(app, ctx)
@@ -354,7 +415,9 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                                 "last_error": cfg.get(db, "ff_last_error") or None, "refresh_minutes": int(float(cfg.get(db, "refresh_minutes") or 10)),
                                 "accounts": db.one("SELECT COUNT(*) n FROM accounts WHERE source='firefly'")["n"], "transactions": db.one("SELECT COUNT(*) n FROM transactions WHERE source='firefly'")["n"]},
                     "connector": {"configured": bool(cfg.get(db, "connector_url") and cfg.get(db, "connector_name") and cfg.get(db, "connector_token"))},
-                    "caldav_configured": bool(cfg.get(db, "caldav_url"))}
+                    "caldav_configured": bool(cfg.get(db, "caldav_url")),
+                    "robinhood": {"agent": ctx.robinhood.probe("agent"), "csv": "built-in", "live": ctx.robinhood.probe("live"),
+                                  "csv_files": sorted(os.listdir(ctx.robinhood.csv_dir)) if os.path.isdir(ctx.robinhood.csv_dir) else []}}
 
         @app.post("/api/refresh")
         async def refresh_now(full: bool = False):
