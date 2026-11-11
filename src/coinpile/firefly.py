@@ -239,13 +239,13 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
     params = {"end": end.isoformat(), "type": "all"}
     if start:
         params["start"] = start.isoformat()
-    cats = set()
+    cats: dict[str, set] = {}
     groups = list(ff.pages("/transactions", **params))           # read everything first: the person's database is not held while Firefly III answers
     with db.tx() as c:
         for g in groups:
             for r in tx_rows(g, mine, primary):
                 seen.add(r["id"])
-                cats.add(r["category"])
+                cats.setdefault(r["category"], set()).add("in" if r["amount"] > 0 and (r["type"] or "").lower() == "deposit" else "out")
                 c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill)
                              VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?,?,?,?)
                              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,date=excluded.date,name=excluded.name,amount=excluded.amount,
@@ -265,8 +265,9 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
         removed = [x["id"] for x in db.all(q, tuple(a)) if x["id"] not in seen]
         for tid in removed:
             c.execute("DELETE FROM transactions WHERE id=?", (tid,))
-        for cat in cats:
-            c.execute("INSERT OR IGNORE INTO categories(name,kind,builtin) VALUES(?,?,0)", (cat, "income" if cat == "Income" else "transfer" if cat == "Transfer" else "expense"))
+        for cat, ways in cats.items():                  # a new category only ever seen on deposits (Salary, Dividends...) is income, not spending
+            kind = "income" if cat == "Income" or ways == {"in"} else "transfer" if cat == "Transfer" else "expense"
+            c.execute("INSERT OR IGNORE INTO categories(name,kind,builtin) VALUES(?,?,0)", (cat, kind))
     return {"transactions": n, "removed": len(removed)}
 
 

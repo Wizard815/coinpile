@@ -249,3 +249,15 @@ def test_net_worth_history_ends_at_todays_net_worth_after_an_account_is_removed(
     h = c.get("/api/history").json()
     assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
     assert {x["date"]: x["net_worth"] for x in h}["2026-01-02"] == 500
+
+
+def test_a_firefly_income_category_counts_as_income():
+    ff = card_world()
+    for i, d in enumerate(("2026-07-01", "2026-08-01", "2026-09-01", "2026-10-01", "2026-11-01")):
+        ff.tx("1", 200 + i, "deposit", 2500, "ACME PAYROLL", 90, 1, d, "Salary")
+    ff.tx("1", 210, "withdrawal", 40, "Pharmacy", 1, 91, "2026-10-09", "Health stuff")
+    db = read(ff)
+    kinds = {r["name"]: r["kind"] for r in db.all("SELECT name, kind FROM categories")}
+    assert kinds["Salary"] == "income" and kinds["Health stuff"] == "expense"
+    f = ledger.spending_forecast(db, TODAY)
+    assert f["income_avg"] == 2500 and f["income_source"] == "history"
