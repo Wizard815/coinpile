@@ -103,8 +103,9 @@ def test_sign_in_with_a_token_and_each_person_sees_only_their_own(tmp_path):
     assert alice.post("/auth/logout").status_code == 200 and alice.get("/api/overview").status_code == 401
 
 
-def test_what_belongs_to_firefly_iii_is_changed_there_not_here(tmp_path):
-    c = signed_in(app(tmp_path, world()))
+def test_coinpile_never_changes_firefly_iii(tmp_path):
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
     assert c.put("/api/transactions/ff:3/category", json={"category": "Food"}).status_code == 409
     sid = c.get("/api/subscriptions").json()["items"][0]["id"]
     assert c.delete(f"/api/subscriptions/{sid}").status_code == 409
@@ -112,6 +113,7 @@ def test_what_belongs_to_firefly_iii_is_changed_there_not_here(tmp_path):
     assert c.put("/api/accounts/ff:1", json={"nickname": "Bills"}).status_code == 200                                   # a nickname is Coinpile's own
     assert c.post("/api/goals", json={"name": "Car", "target": 1000}).status_code == 200
     assert c.post("/api/refresh").status_code == 200 and c.get("/api/accounts/ff:1").json()["account"]["nickname"] == "Bills"     # and survives a refresh
+    assert {m for m, _, _ in ff.calls} == {"GET"}                                                                   # only ever reads
 
 
 def test_a_change_from_another_site_is_refused(tmp_path):
@@ -299,3 +301,45 @@ def test_money_in_firefly_piggy_banks_is_not_free(tmp_path):
     g = c.post("/api/goals", json={"name": "Car", "target": 10000, "auto_allocate": True}).json()
     assert g["allocated"] == 4600                                                                                  # a goal can take only what is really free
     assert c.get("/api/afford?amount=100").json()["free_savings"] == 0
+
+
+RH = """Activity Date,Process Date,Settle Date,Instrument,Description,Trans Code,Quantity,Price,Amount
+1/2/2026,1/2/2026,1/4/2026,AAPL,Apple,Buy,10,$100.00,($1000.00)
+1/3/2026,1/3/2026,1/5/2026,AAPL,Apple,Sell,4,$110.00,$440.00
+1/1/2026,1/1/2026,1/1/2026,,ACH Deposit,ACH,,,"$2,000.00"
+"""
+
+
+def test_robinhood_lives_in_coinpile(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    before = c.get("/api/overview").json()["net_worth"]
+    assert "error" in c.get("/api/robinhood/main").json()
+    assert c.post("/api/robinhood/csv-upload", content="not,a,report").status_code == 422
+    assert c.post("/api/robinhood/csv-upload", content=RH).status_code == 200
+    m = c.get("/api/robinhood/main").json()
+    assert {p["symbol"]: p["quantity"] for p in m["positions"]}["AAPL"] == 6
+    assert c.get("/api/status").json()["robinhood"]["csv_files"]
+    # an activity report has no account value in it, so it does not invent one; a connector that reports one (live, agent) adds an investment account
+    assert not any(a["id"] == "rh:main" for a in c.get("/api/accounts").json()) and c.get("/api/overview").json()["net_worth"] == before
+
+
+def test_bank_and_paypal_csvs_go_into_coinpile_accounts_never_into_firefly(tmp_path):
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
+    pp = 'Date,Time,TimeZone,Name,Type,Status,Currency,Gross,Fee,Net,Transaction ID\n11/02/2026,10:00:00,PST,Etsy Shop,Payment,Completed,USD,-25.00,0.00,-25.00,7AB12345\n'
+    r = c.post("/api/import/csv", content=pp).json()
+    assert r["provider"] == "paypal" and r["added"] == 1 and c.post("/api/import/csv", content=pp).json()["added"] == 0
+    jar = c.post("/api/accounts", json={"name": "Cash jar", "kind": "cash", "balance": 20}).json()
+    csv = "Date,Description,Amount\n2026-11-01,GAS STATION,-40.00\n"
+    assert c.post(f"/api/import/bank-csv?account_id={jar['id']}", content=csv).json()["added"] == 1
+    assert c.post("/api/import/bank-csv?account_id=ff:1", content=csv).status_code == 409
+    assert {m for m, _, _ in ff.calls} == {"GET"}
+
+
+def test_a_robinhood_connector_with_a_value_adds_an_investment_account(tmp_path, monkeypatch):
+    monkeypatch.setenv("RH_AGENT_URL", "http://rh-agent:8000")
+    rh = httpx.MockTransport(lambda req: httpx.Response(200, json={"data": {"equity": 1234.5} if req.url.path == "/balances" else [], "as_of": "2026-11-10T00:00:00+00:00", "source": "mcp"}))
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), robinhood_transport=rh, today=lambda: TODAY)
+    c = signed_in(a)
+    acct = next(x for x in c.get("/api/accounts").json() if x["id"] == "rh:agent")
+    assert acct["kind"] == "investment" and acct["balance"] == 1234.5 and acct["source"] == "robinhood"
