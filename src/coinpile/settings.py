@@ -22,6 +22,7 @@ SPEC = {
     # Coinpile: the Plaid connector this person's banks go through (optional), and bookkeeping for the Firefly III copy
     "connector_url": ("str", False, "CONNECTOR_URL"), "connector_name": ("str", False, ""), "connector_token": ("str", True, ""),
     "refresh_minutes": ("int", False, "REFRESH_MINUTES"),
+    "wh_cursor": ("str", False, ""),
     "ff_webhook_secret": ("str", True, ""), "ff_hook_key": ("str", False, ""), "ff_last_hook": ("str", False, ""),
     "ff_send_goals": ("onoff", False, ""), "ff_send_bills": ("onoff", False, ""), "ff_send_categories": ("onoff", False, ""), "ff_send_accounts": ("onoff", False, ""), "ff_last_refresh": ("str", False, ""), "ff_last_full": ("str", False, ""), "ff_last_error": ("str", False, ""),
     # Plaid cost guard. Rates are YOURS to enter: Plaid shows them in its dashboard, not in any public price list.

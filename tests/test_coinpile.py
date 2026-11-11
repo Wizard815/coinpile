@@ -505,3 +505,81 @@ def test_the_connector_name_cannot_steer_the_path(tmp_path):
     c = signed_in(app(tmp_path, world(), connector_transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
     c.put("/api/settings", json={"connector_url": "http://connector:8000", "connector_name": "../admin/p/bob", "connector_token": "a long enough password"})
     assert "lowercase" in c.get("/api/banks").json()["detail"]
+
+
+def hook_receiver(status=200):
+    got = []
+
+    def h(req: httpx.Request):
+        got.append({"url": str(req.url), "event": req.headers.get("coinpile-event"), "sig": req.headers.get("coinpile-signature"), "body": req.content})
+        return httpx.Response(status)
+    return httpx.MockTransport(h), got
+
+
+def test_coinpile_sends_signed_webhooks_for_what_happens(tmp_path):
+    from coinpile import webhooks
+    ff = world()
+    t, got = hook_receiver()
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=ff.transport(), webhook_transport=t, today=lambda: TODAY)
+    c = signed_in(a)
+    assert c.post("/api/webhooks", json={"name": "HA", "url": "ftp://x", "events": ["transaction.new"]}).status_code == 422
+    assert c.post("/api/webhooks", json={"name": "HA", "url": "http://127.0.0.1:8123/api/webhook/x", "events": ["transaction.new"]}).status_code == 422     # not the server itself
+    h = c.post("/api/webhooks", json={"name": "Home Assistant", "url": "http://ha.local:8123/api/webhook/coinpile", "events": ["transaction.new", "balance.changed", "goal.changed", "refresh.done"]}).json()
+    assert h["secret"].startswith("whsec_") and "secret" not in c.get("/api/webhooks").text
+    # the test button
+    assert c.post(f"/api/webhooks/{h['id']}/test").json() == {"ok": True, "status": "200"}
+    m = json.loads(got[-1]["body"])
+    assert m["event"] == "test" and m["person"] == "alice" and webhooks.verify(h["secret"], got[-1]["body"], got[-1]["sig"])
+    assert not webhooks.verify("whsec_wrong", got[-1]["body"], got[-1]["sig"])
+    # what already happened before the webhook existed is not sent; a new transaction is
+    got.clear()
+    ff.tx("1", 80, "withdrawal", 12.5, "PIZZA PLACE", 1, 97, "2026-11-10", "Food")
+    ff.data["1"]["accounts"][0]["attributes"]["current_balance"] = "1188.00"
+    c.post("/api/refresh")
+    events = [json.loads(g["body"]) for g in got]
+    tx = next(e for e in events if e["event"] == "transaction.new")
+    assert tx["data"]["name"] == "PIZZA PLACE" and tx["data"]["amount"] == -12.5 and tx["data"]["account"]["institution"] == "Huntington"
+    assert any(e["event"] == "balance.changed" and e["data"]["balance"] == 1188.0 for e in events), [e["data"] for e in events if e["event"] == "balance.changed"]
+    assert any(e["event"] == "refresh.done" for e in events) and all(webhooks.verify(h["secret"], g["body"], g["sig"]) for g in got)
+    assert sum(1 for e in events if e["event"] == "transaction.new") == 1                   # the old ones were not replayed
+    got.clear()
+    c.post("/api/refresh")
+    assert not [g for g in got if g["event"] == "transaction.new"]                           # nothing new, nothing sent
+    g = c.post("/api/goals", json={"name": "Trip", "target": 900}).json()
+    for _ in range(40):
+        if any(x["event"] == "goal.changed" for x in got):
+            break
+        __import__("time").sleep(0.05)
+    assert json.loads(next(x for x in got if x["event"] == "goal.changed")["body"])["data"]["name"] == "Trip"
+
+
+def test_a_webhook_without_details_sends_no_names_or_amounts(tmp_path):
+    ff = world()
+    t, got = hook_receiver()
+    c = signed_in(web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=ff.transport(), webhook_transport=t, today=lambda: TODAY))
+    c.post("/api/webhooks", json={"name": "Lamp", "url": "https://hooks.example.com/x", "events": ["transaction.new"], "detail": False})
+    ff.tx("1", 81, "withdrawal", 99.99, "SECRET SHOP", 1, 98, "2026-11-10")
+    c.post("/api/refresh")
+    body = got[-1]["body"].decode()
+    assert "SECRET SHOP" not in body and "99.99" not in body and json.loads(body)["data"] == {"account_kind": "cash", "direction": "out"}
+
+
+def test_failed_webhooks_are_retried_then_given_up(tmp_path, monkeypatch):
+    from coinpile import webhooks
+    import time as _t
+    ff = world()
+    t, got = hook_receiver(status=500)
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=ff.transport(), webhook_transport=t, today=lambda: TODAY)
+    c = signed_in(a)
+    h = c.post("/api/webhooks", json={"url": "https://hooks.example.com/x", "events": ["refresh.done"]}).json()
+    assert c.post(f"/api/webhooks/{h['id']}/test").json() == {"ok": False, "status": "500"}
+    db = a.person_db("1")
+    clock = [_t.time()]
+    monkeypatch.setattr(webhooks.time, "time", lambda: clock[0])
+    for _ in range(10):
+        clock[0] += 13 * 3600
+        webhooks.deliver(db, t)
+    row = db.one("SELECT tries, done FROM webhook_outbox WHERE event='test'")
+    assert row == {"tries": len(webhooks.RETRY_MINUTES) + 1, "done": 2} and len(got) == len(webhooks.RETRY_MINUTES) + 1
+    assert c.get(f"/api/webhooks/{h['id']}/deliveries").json()[0]["status"] == "500"
+    assert c.get("/api/webhooks").json()["items"][0]["last_status"] == "500"

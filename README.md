@@ -137,6 +137,28 @@ FIREFLY_URL=http://127.0.0.1:8080 DATA_DIR=./data UI_DIR=./ui PYTHONPATH=src uvi
 
 The tests use a stand-in for Firefly III's API (`tests/fake_firefly.py`) and a scripted model (`devtools/fake_llm.py`).
 
+## Webhooks (Coinpile tells other apps)
+
+Settings, Webhooks: add an address and choose what to send. Coinpile POSTs a small JSON message when it happens:
+
+| Event | When |
+|---|---|
+| `transaction.new` | a new transaction (from Firefly III, a CSV import, or added by hand) |
+| `balance.changed` | an account's balance moved |
+| `bill.due` | a bill or subscription is due within its reminder days |
+| `alert.new` | something needs attention (overdrawn, under your minimum, a missed payment, a CD maturing) |
+| `goal.changed` | a goal was added, funded, changed or closed |
+| `refresh.done` | Coinpile finished reading Firefly III (with net worth) |
+
+```json
+{"id": "89112a21...", "event": "transaction.new", "at": "2026-11-11T10:00:00+00:00", "person": "alice",
+ "data": {"account": {"id": "ff:1", "name": "Everyday Checking", "institution": "Huntington", "kind": "cash"}, "date": "2026-11-11", "name": "TACO TRUCK", "amount": -18.4, "currency": "USD", "category": "Food"}}
+```
+
+Every message carries `Coinpile-Event` and `Coinpile-Signature: t=<unix time>,v1=<hex HMAC-SHA256 of "<t>.<body>">` (the secret is shown once when you add the webhook). Untick "Include details" to send only the event, without names or amounts. Failed deliveries are retried after 1, 5, 30, 120 and 720 minutes. Only what happens after you add a webhook is sent.
+
+Home Assistant: use a `webhook` trigger with the id from the address (`/api/webhook/<id>`); the message is in `trigger.json`.
+
 ## Home Assistant
 
 Settings, Home Assistant & API: make a token that may read `summary` (and `refresh` for an on-demand read of Firefly III). Coinpile shows the Home Assistant YAML. Tokens look like `cp_<n>_...` and are read at `/api/v1/me/{summary|ha|bills|alerts|savings|goals|budgets|transactions}`. For the Pondering Orb, make a token with the `orb` scope and tick what it may see.
