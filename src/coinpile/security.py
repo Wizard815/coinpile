@@ -95,7 +95,10 @@ class Throttle:
 
     def fail(self, key: str) -> None:
         if key not in self.state and len(self.state) >= self.MAX_KEYS:
-            self.state.pop(next(iter(self.state)))
+            # make room by dropping an entry that is not locked out (or the one whose lock ends first): a flood of junk names never frees a locked one
+            now = self.clock()
+            free = next((k for k, v in self.state.items() if v[1] <= now), None)
+            self.state.pop(free if free is not None else min(self.state, key=lambda k: self.state[k][1]))
         s = self.state.setdefault(key, [0, 0.0])
         s[0] += 1
         if s[0] > self.FREE:
