@@ -261,3 +261,16 @@ def test_a_firefly_income_category_counts_as_income():
     assert kinds["Salary"] == "income" and kinds["Health stuff"] == "expense"
     f = ledger.spending_forecast(db, TODAY)
     assert f["income_avg"] == 2500 and f["income_source"] == "history"
+
+
+def test_a_bill_paid_under_its_own_category_is_not_forecast_twice():
+    ff = card_world()
+    ff.data["1"]["bills"].append({"type": "bills", "id": "1", "attributes": {"name": "Rent", "amount_avg": "1500", "repeat_freq": "monthly", "skip": 0, "date": "2026-01-25T00:00:00+00:00",
+                                                                             "pay_dates": ["2026-11-25T00:00:00+00:00"], "active": True, "currency_code": "USD"}})
+    for i, d in enumerate(("2026-07-25", "2026-08-25", "2026-09-25", "2026-10-25")):
+        ff.tx("1", 300 + i, "withdrawal", 1500, "Landlord", 1, 98, d, "Housing")
+        ff.data["1"]["groups"][-1]["attributes"]["transactions"][0].update(bill_id="1", bill_name="Rent")
+    db = read(ff)
+    assert db.one("SELECT category FROM subscriptions WHERE name='Rent'")["category"] == "Housing"
+    f = {c["category"]: c for c in ledger.spending_forecast(db, TODAY)["categories"]}
+    assert f["Housing"]["forecast"] == 1500 and "Subscriptions" not in f
