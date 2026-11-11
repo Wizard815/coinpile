@@ -51,6 +51,16 @@ def _allocs(db):
     return db.all("SELECT a.* FROM allocations a JOIN goals g ON g.id=a.goal_id WHERE g.status='active' AND a.amount>0")
 
 
+def _piggies(db) -> list[dict]:
+    """Active piggy banks as last read from Firefly III (only the part held on an account Coinpile counts as savings is subtracted from free money)."""
+    import json
+    try:
+        rows = db.all("SELECT data FROM ff_piggy ORDER BY id")
+    except Exception:
+        return []
+    return [p for p in (json.loads(r["data"]) for r in rows) if p.get("active", True)]
+
+
 def goals_view(db, today: date) -> dict:
     pl = places(db, today)
     total = round(sum(p["balance"] for p in pl), 2)
@@ -60,7 +70,16 @@ def goals_view(db, today: date) -> dict:
         by_goal.setdefault(a["goal_id"], []).append(a)
         if a["place"]:
             pinned[a["place"]] = pinned.get(a["place"], 0) + a["amount"]
-    allocated = round(sum(a["amount"] for a in allocs), 2)
+    piggies = _piggies(db)                     # Firefly III piggy banks: money already set aside inside an account, so it is not free either
+    keys = {p["key"] for p in pl}
+    for pg in piggies:
+        for x in pg["accounts"]:
+            k = "a:" + x["account_id"]
+            if k in keys and x["amount"] > 0:
+                pinned[k] = pinned.get(k, 0) + x["amount"]
+                pg["counted"] = round(pg.get("counted", 0) + x["amount"], 2)
+    in_piggies = round(sum(pg.get("counted", 0) for pg in piggies), 2)
+    allocated = round(sum(a["amount"] for a in allocs) + in_piggies, 2)
     free = round(total - allocated, 2)
     for p in pl:
         p["earmarked"] = round(pinned.get(p["key"], 0), 2)
@@ -84,7 +103,8 @@ def goals_view(db, today: date) -> dict:
         items.append(v)
     links.decorate(db, items)
     active = [i for i in items if i["status"] == "active" and i.get("shared_state") != "offered"]
-    return {"items": items, "places": pl, "total": total, "allocated": allocated, "free": free, "overallocated": free < -0.005,
+    return {"items": items, "places": pl, "total": total, "allocated": allocated, "free": free, "overallocated": free < -0.005, "in_piggy_banks": in_piggies,
+            "piggy_banks": [{"name": pg["name"], "target": pg["target"], "current": pg["current"], "counted": pg.get("counted", 0), "target_date": pg["target_date"]} for pg in piggies],
             "needed": round(sum(i["shortfall"] for i in active), 2), "pinned": {k: round(v, 2) for k, v in pinned.items()}}
 
 

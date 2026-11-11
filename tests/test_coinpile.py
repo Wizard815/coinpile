@@ -217,3 +217,85 @@ def test_the_agent_answers_from_the_firefly_iii_copy(tmp_path):
     assert [s["name"] for s in got["list_subscriptions"]] == ["Rent"] and got["savings_summary"]["total_savings"] == 5000
     assert any("netflix" in s["name"].lower() for s in got["find_recurring_payments"])                                 # the subscription catcher works on Firefly III data
     assert got["write_note"]["saved"] and c.get("/api/notes").json()[0]["author"] == "agent"
+
+
+def test_net_worth_has_a_past_from_firefly_iii(tmp_path):
+    from tests.fake_firefly import add_history
+    ff = world()
+    add_history(ff, "1", 1, {"2026-01-01": "0", "2026-01-02": "500", "2026-01-03": "500", "2026-06-01": "1200.50"})
+    add_history(ff, "1", 5, {"2026-01-01": "0", "2026-03-01": "-250"})                    # a card: owed, so it lowers net worth
+    c = signed_in(app(tmp_path, ff))
+    h = {x["date"]: x["net_worth"] for x in c.get("/api/history").json()}
+    assert h["2026-01-02"] == 500 and h["2026-03-01"] == 250 and h["2026-06-01"] == 950.5 and "2026-01-01" not in h
+    c.post("/api/refresh?full=true")                                                      # reading it again does not double it
+    assert {x["date"]: x["net_worth"] for x in c.get("/api/history").json()}["2026-06-01"] == 950.5
+
+
+def test_home_assistant_tokens_read_only_what_they_may(tmp_path):
+    a = app(tmp_path, world())
+    c = signed_in(a)
+    t = c.post("/api/tokens", json={"name": "Home Assistant", "scopes": ["summary", "refresh"]}).json()
+    assert t["token"].startswith("cp_1_")
+    ha = TestClient(a)                                                                           # no browser session: only the token
+    A = {"Authorization": "Bearer " + t["token"]}
+    s = ha.get("/api/v1/me/summary", headers=A).json()
+    assert s["net_worth"] == round(1200.5 + 5000 - 250 - 9000, 2) and s["subscriptions_monthly"] == 1500 and s["read_from_firefly_at"]
+    flat = ha.get("/api/v1/me/ha", headers=A).json()
+    assert all(not isinstance(v, (dict, list)) for v in flat.values()) and flat["next_bill_name"] == "Rent"
+    assert ha.get("/api/v1/me/transactions", headers=A).status_code == 403                       # not granted
+    assert ha.get("/api/v1/me/summary?refresh=1", headers=A).json()["refreshed"] is True
+    assert ha.get("/api/v1/me/summary", headers={"Authorization": "Bearer cp_1_wrong"}).status_code == 401
+    assert ha.get("/api/v1/me/summary", headers={"Authorization": "Bearer cp_99_" + "x" * 40}).status_code == 401
+    assert ha.get("/api/overview", headers=A).status_code == 401                                 # a token is never a login
+    assert ha.get("/api/v1/summary", headers=A).status_code == 403                               # the Orb needs its own scope
+    orb = c.post("/api/tokens", json={"name": "Orb", "scopes": ["orb"]}).json()["token"]
+    c.put("/api/settings", json={"share": ["net_worth", "bill_list"]})
+    o = ha.get("/api/v1/summary", headers={"Authorization": "Bearer " + orb}).json()["goblins"]["alice"]
+    assert set(o) == {"name", "net_worth", "bill_list"} and o["bill_list"][0]["name"] == "Rent"
+    c.delete(f"/api/tokens/{t['id']}")
+    assert ha.get("/api/v1/me/summary", headers=A).status_code == 401
+    assert t["token"].encode() not in (tmp_path / "people" / "1.db").read_bytes()               # only a hash is kept
+
+
+def test_two_coinpile_people_link_and_share_a_firefly_account_and_a_goal(tmp_path):
+    import time
+    a = app(tmp_path, world())
+    alice, bob = signed_in(a, ALICE), signed_in(a, BOB)
+    assert alice.get("/api/links/people").json()["people"] == ["bob"]
+    assert alice.post("/api/links", json={"peer": "bob"}).status_code == 200
+    assert bob.get("/api/requests").json()["links"] == ["alice"]
+    assert bob.post("/api/links/alice/accept", json={}).status_code == 200
+    def wait(cond):
+        for _ in range(40):
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+    assert wait(lambda: alice.get("/api/links").json()["links"][0]["status"] == "active")
+    # alice lets bob see her Firefly III checking account; nothing else
+    assert alice.put("/api/links/bob/shares", json={"kind": "account", "ref": "ff:1", "on": True}).status_code == 200
+    assert wait(lambda: bob.get("/api/sharing").json()[0]["from_them"])
+    seen = bob.get("/api/sharing").json()[0]["from_them"]
+    assert [(x["ref"], x["name"], x["balance"]) for x in seen] == [("ff:1", "Everyday Checking", 1200.5)]
+    assert "Axos" not in bob.get("/api/sharing").text and "KROGER" not in bob.get("/api/sharing").text            # never other accounts or transactions
+    # a shared goal, with money set aside on both sides
+    g = alice.post("/api/goals", json={"name": "Trip", "target": 3000}).json()
+    assert alice.post(f"/api/goals/{g['id']}/share", json={"peers": ["bob"]}).status_code == 200
+    assert wait(lambda: bob.get("/api/requests").json()["goals"])
+    bg = bob.get("/api/requests").json()["goals"][0]
+    assert bob.post(f"/api/goals/{bg['id']}/accept", json={}).status_code == 200
+    assert alice.post(f"/api/goals/{g['id']}/notes", json={"text": "Flights are cheaper in May"}).status_code == 200
+    assert wait(lambda: "Flights are cheaper in May" in bob.get("/api/goals").text)
+    # stopping the share takes the account away again
+    alice.put("/api/links/bob/shares", json={"kind": "account", "ref": "ff:1", "on": False})
+    assert wait(lambda: not bob.get("/api/sharing").json()[0]["from_them"])
+
+
+def test_money_in_firefly_piggy_banks_is_not_free(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    v = c.get("/api/goals").json()
+    assert v["total"] == 5000 and v["in_piggy_banks"] == 400 and v["allocated"] == 400 and v["free"] == 4600     # Vacation holds 400 of the savings account
+    assert v["places"][0]["earmarked"] == 400 and v["piggy_banks"][0]["name"] == "Vacation"
+    g = c.post("/api/goals", json={"name": "Car", "target": 10000, "auto_allocate": True}).json()
+    assert g["allocated"] == 4600                                                                                  # a goal can take only what is really free
+    assert c.get("/api/afford?amount=100").json()["free_savings"] == 0

@@ -36,6 +36,11 @@ class FakeFirefly:
                 rows = [g for g in d["groups"] if (not q.get("start") or g["attributes"]["transactions"][0]["date"][:10] >= q["start"]) and g["attributes"]["transactions"][0]["date"][:10] <= q["end"]]
             elif p == "/bills":
                 rows = d["bills"]
+            elif p == "/chart/account/overview":
+                aid = q.get("accounts[]")
+                pts = getattr(self, "history", {}).get((u["id"], aid), {})
+                name = next((a["attributes"]["name"] for a in d["accounts"] if a["id"] == aid), "?")
+                return httpx.Response(200, json=[{"label": name, "currency_code": "USD", "period": "1D", "entries": {k + "T00:00:00+00:00": v for k, v in pts.items()}}])
             elif p == "/piggy-banks":
                 rows = d["piggies"]
             else:
@@ -44,3 +49,9 @@ class FakeFirefly:
             chunk = rows[(page - 1) * per: page * per]
             return httpx.Response(200, json={"data": chunk, "meta": {"pagination": {"total": len(rows), "total_pages": max(1, -(-len(rows) // per)), "current_page": page}}})
         return httpx.MockTransport(h)
+
+
+def add_history(ff, uid, account_id, points: dict):
+    """Day -> balance, as Firefly III's /chart/account/overview gives it for one account."""
+    ff.history = getattr(ff, "history", {})
+    ff.history[(uid, str(account_id))] = points
