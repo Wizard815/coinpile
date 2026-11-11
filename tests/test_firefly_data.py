@@ -231,3 +231,21 @@ def test_a_firefly_bill_is_not_suggested_again_even_under_another_name(tmp_path)
     assert names == []
     scan = c.post("/api/subscriptions/scan", json={}).json()
     assert scan["found"] == []
+
+
+# ---------------------------------------------------------------- net worth history
+def test_net_worth_history_ends_at_todays_net_worth_after_an_account_is_removed(tmp_path):
+    ff = world()
+    add_history(ff, "1", 1, {"2026-01-02": "500", "2026-11-10": "1200.50"})
+    add_history(ff, "1", 3, {"2026-01-02": "5000", "2026-11-10": "5000"})
+    ff.acct("1", 9, "Kids' account", balance="400", include_net_worth=False)
+    add_history(ff, "1", 9, {"2026-01-02": "400"})
+    c = signed_in(app(tmp_path, ff))
+    c.post("/api/refresh?full=true")
+    h = c.get("/api/history").json()
+    assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
+    del ff.data["1"]["accounts"][1]                                                     # the savings account is removed in Firefly III
+    c.post("/api/refresh?full=true")
+    h = c.get("/api/history").json()
+    assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
+    assert {x["date"]: x["net_worth"] for x in h}["2026-01-02"] == 500

@@ -149,12 +149,15 @@ def register(app, ctx):
     def history(request: Request):
         """Daily net worth built from balance snapshots (last known balance carried forward)."""
         auth(request)
-        kinds = {a["id"]: a["kind"] for a in store.all("SELECT id,kind FROM accounts")}
-        shares = {a["id"]: (100.0 if a["my_share"] is None else a["my_share"]) / 100 for a in store.all("SELECT id,my_share FROM accounts")}
+        # Only accounts that count today (as net worth does): a removed account, or one left out of net worth in Firefly III, must not be carried forward.
+        accts = {a["id"]: a for a in store.all("SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0")}
         sign = {"credit": -1, "loan": -1}
         last, by_day = {}, {}
         for r in store.all("SELECT * FROM snapshots ORDER BY ts"):
-            last[r["account_id"]] = r["balance"] * shares.get(r["account_id"], 1.0) * sign.get(kinds.get(r["account_id"], "cash"), 1)
+            a = accts.get(r["account_id"])
+            if not a or r["balance"] is None:
+                continue
+            last[r["account_id"]] = r["balance"] * (100.0 if a["my_share"] is None else a["my_share"]) / 100 * sign.get(a["kind"], 1)
             by_day[r["ts"][:10]] = round(sum(last.values()), 2)
         return [{"date": d, "net_worth": v} for d, v in by_day.items()]
 
