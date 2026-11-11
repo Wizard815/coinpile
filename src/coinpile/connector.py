@@ -57,10 +57,27 @@ class Connector:
         st = self.call("GET", "api/status")
         ff = self.call("GET", "api/firefly/status")
         items = [{"item_id": it.get("item_id"), "institution": it.get("institution"), "status": it.get("status"), "last_sync": it.get("last_sync"),
-                  "webhook_live": it.get("webhook_live"), "schedule": it.get("schedule"),
+                  "webhook_live": it.get("webhook_live"), "schedule": it.get("schedule"), "schedule_effective": it.get("schedule_effective"),
+                  "recurring": it.get("recurring"), "recurring_effective": it.get("recurring_effective"), "calls_per_day": it.get("calls_per_day"),
                   "accounts": [{"name": a.get("nickname") or a.get("name"), "mask": a.get("mask")} for a in it.get("accounts", [])]} for it in (st.get("plaid") or {}).get("items", [])]
         return {"items": items, "plaid_configured": (st.get("plaid") or {}).get("configured"), "plaid_env": (st.get("plaid") or {}).get("env"),
                 "firefly": {k: ff.get(k) for k in ("configured", "sent", "waiting", "failed", "awaiting_approval", "last_ok", "last_error")}}
+
+    def _item(self, item_id: str) -> str:
+        from urllib.parse import quote
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", item_id or ""):
+            raise ConnectorError("not a bank link id")
+        return quote(item_id, safe="")
+
+    def set_item(self, item_id: str, patch: dict) -> dict:
+        return self.call("PUT", f"api/plaid/items/{self._item(item_id)}", patch)
+
+    def unlink(self, item_id: str) -> dict:
+        return self.call("DELETE", f"api/plaid/items/{self._item(item_id)}")
+
+    def usage(self) -> dict:
+        u = self.call("GET", "api/plaid/usage")
+        return {k: u.get(k) for k in ("month", "calls_month", "calls_today", "daily_cap", "items", "est_monthly_cost", "budget", "over_budget", "room_for_items", "per_item", "webhook_banks", "webhook_set")}
 
     def pull(self) -> dict:
         return self.call("POST", "sync", {})

@@ -683,16 +683,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.get("/api/notify/status")
         def notify_status():
             last = db.one("SELECT MAX(sent) s, COUNT(*) n FROM notified")
-            return {"configured": bool(cfg.get(db, "notify_url")), "main": bool(cfg.get(db, "notify_url")), "cds": False,
-                    "min_severity": cfg.get(db, "notify_min_severity") or "warning", "last_sent": last["s"], "tracked": last["n"]}
+            return {"configured": bool(cfg.get(db, "notify_url") or cfg.get(db, "notify_url_cds")), "main": bool(cfg.get(db, "notify_url")), "cds": bool(cfg.get(db, "notify_url_cds")),
+                    "min_severity": cfg.get(db, "notify_min_severity") or "warning", "min_severity_cds": cfg.get(db, "notify_min_severity_cds") or "info", "last_sent": last["s"], "tracked": last["n"]}
 
         @app.post("/api/notify/test")
-        def notify_test():
-            url = cfg.get(db, "notify_url")
+        def notify_test(route: str = "main"):
+            if route not in ("main", "cds"):
+                raise HTTPException(422, "route must be main or cds")
+            url = (cfg.get(db, "notify_url_cds") or cfg.get(db, "notify_url")) if route == "cds" else cfg.get(db, "notify_url")
             if not url:
                 raise HTTPException(503, "Add your Mattermost webhook address first")
             try:
-                notify.post(url, {"text": ":coin: **Coinpile**: notifications are working.", "username": "Coinpile", "icon_emoji": ":coin:"}, notify_transport)
+                notify.post(url, {"text": ":coin: **Coinpile**: notifications are working" + (" for CDs and bonds." if route == "cds" else "."), "username": "Coinpile", "icon_emoji": ":coin:"}, notify_transport)
             except httpx.HTTPStatusError as e:
                 return {"ok": False, "detail": f"the webhook answered {e.response.status_code}"}
             except httpx.HTTPError as e:
@@ -722,6 +724,25 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.get("/api/banks")
         async def banks():
             return await run_in_threadpool(conn_call, lambda: connector().banks())
+
+        class BankPatch(BaseModel):
+            schedule: str | None = None
+            recurring: str | None = None
+
+        @app.put("/api/banks/{item_id}")
+        async def bank_set(item_id: str, b: BankPatch):
+            """When the connector asks this bank, and whether Plaid's (paid) recurring detection runs for it."""
+            patch = {k: v for k, v in b.model_dump().items() if v is not None}
+            return await run_in_threadpool(conn_call, lambda: connector().set_item(item_id, patch))
+
+        @app.delete("/api/banks/{item_id}")
+        async def bank_unlink(item_id: str):
+            await run_in_threadpool(conn_call, lambda: connector().unlink(item_id))
+            return {"unlinked": item_id, "note": "What is already in Firefly III stays there."}
+
+        @app.get("/api/banks/usage")
+        async def bank_usage():
+            return await run_in_threadpool(conn_call, lambda: connector().usage())
 
         @app.post("/api/banks/pull")
         async def banks_pull():
