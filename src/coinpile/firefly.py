@@ -169,6 +169,7 @@ def sync_accounts(db, ff: Firefly) -> dict[str, dict]:
         gone = [x["id"] for x in db.all("SELECT id FROM accounts WHERE source='firefly'") if x["id"][3:] not in rows]
         for aid in gone:                                                     # removed or closed in Firefly III
             c.execute("DELETE FROM transactions WHERE account_id=?", (aid,))
+            c.execute("DELETE FROM snapshots WHERE account_id=?", (aid,))
             c.execute("DELETE FROM accounts WHERE id=?", (aid,))
     for r in rows.values():
         sync.record_balance(db, r["id"], r["name"], r["balance"], r["kind"])
