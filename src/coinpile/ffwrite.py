@@ -91,7 +91,7 @@ class Writer:
         try:
             source, rows = importers.parse(text)                 # a PayPal, Venmo or Cash App export
             bal = None
-        except ValueError:
+        except importers.UnknownFormat:                          # a bad row in one of those is reported as it is, not retried as a bank file
             source = "bank"
             rows, bal = importers.parse_bank(text, flip)
         added = skipped = 0

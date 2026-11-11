@@ -15,6 +15,10 @@ AMOUNT = re.compile(r"^(?P<lp>\()?\s*(?P<s1>[-+\u2212])?\s*(?:[A-Z]{3}|[$€£¥
                     r"(?P<n>\d[\d.,'\s\u00a0\u202f]*)\s*(?:[A-Z]{3}|[$€£¥₹]|kr|zł|CHF)?\s*(?P<s3>[-+\u2212])?\s*(?P<rp>\))?\s*(?P<crdr>CR|DR|Cr|Dr|cr|dr)?$")
 
 
+class UnknownFormat(ValueError):
+    """Not a PayPal, Venmo or Cash App export (it may still be a bank's own CSV)."""
+
+
 def _num(s: str) -> float:
     """'$1,234.50', '-12.00', '$-12.00', '(12.00)', '12.00-', '12.00 DR', '1.234,56', '12,50 €' -> a signed number. An empty cell is 0.
     Anything else is not a number (ValueError, reported as a bad file). With both separators the last one is the decimal mark; a lone comma
@@ -87,7 +91,7 @@ def parse(text: str, provider: str | None = None) -> tuple[str, list[dict]]:
         return provider or "unknown", []
     prov = provider or detect(list(rows[0].keys()))
     if not prov:
-        raise ValueError("unrecognized CSV format (expected PayPal, Venmo or Cash App export)")
+        raise UnknownFormat("unrecognized CSV format (expected PayPal, Venmo or Cash App export)")
     out = []
     for n, r in enumerate(rows, start=2):
         r = {k.strip(): (v or "").strip() if isinstance(v, str) else "" for k, v in r.items() if isinstance(k, str) and k}
