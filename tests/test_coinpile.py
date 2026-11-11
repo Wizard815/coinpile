@@ -318,6 +318,7 @@ def test_robinhood_lives_in_coinpile(tmp_path):
     assert c.post("/api/robinhood/csv-upload", content=RH).status_code == 200
     m = c.get("/api/robinhood/main").json()
     assert {p["symbol"]: p["quantity"] for p in m["positions"]}["AAPL"] == 6
+    assert m["monthly"][0] == {"month": "2026-01", "deposits": 2000.0, "bought": 1000.0, "sold": 440.0, "dividends": 0.0, "fees": 0.0, "trades": 2}
     assert c.get("/api/status").json()["robinhood"]["csv_files"]
     # an activity report has no account value in it, so it does not invent one; a connector that reports one (live, agent) adds an investment account
     assert not any(a["id"] == "rh:main" for a in c.get("/api/accounts").json()) and c.get("/api/overview").json()["net_worth"] == before

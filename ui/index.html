@@ -717,12 +717,24 @@ async function viewInvestments(root, rerender) {
         select("iv-cat", "As", [["Investment", "Investment"], ["Retirement", "Retirement"]], "Investment"),
         h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Track it"))) : null),
     ...inv.providers.map((p) => h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, p.name), h("span", { class: "pill " + (p.connected ? "t" : p.available ? "" : "b") }, p.connected ? "connected" : p.available ? "not set up" : "planned")),
-      h("p", { class: "muted small" }, p.how), p.id === "robinhood" ? h("div", { id: "rh-box" }) : null)));
+      h("p", { class: "muted small", style: "margin:0" }, p.how + (p.id === "robinhood" ? ". An activity report has no prices, so it shows shares, cost and money moved, not value over time; a live connector adds value." : "")), p.id === "robinhood" ? h("div", { id: "rh-box" }) : null)));
   const box = $("#rh-box");
   if (box && inv.providers.find((p) => p.id === "robinhood")?.connected) {
     const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
-    box.replaceChildren(h("div", { class: "two" }, portfolio("Main account", "read-only", m), portfolio("Agent account", "read-only", a)));
+    box.replaceChildren(...[rhCompact("Main account", m), a && !a.error ? rhCompact("Agent account", a) : null].filter(Boolean));
   } else if (box) box.replaceChildren(h("p", { class: "muted small" }, "Upload a Robinhood activity report under Settings, Robinhood to see positions here."));
+}
+function rhCompact(title, d) {
+  if (!d || d.error) return h("p", { class: "muted small" }, title + ": " + (d?.error || "nothing yet"));
+  const pos = d.positions || [], cost = pos.reduce((t, p) => t + (Number(p.net_cost) || 0), 0), eq = d.balances?.equity, months = d.monthly || [];
+  const div = months.reduce((t, m) => t + (m.dividends || 0), 0), dep = d.balances?.net_transfers;
+  return h("div", { style: "display:grid;gap:4px;margin-top:6px" },
+    h("div", { class: "small" }, h("b", {}, title), " · ", `${pos.length} position${pos.length === 1 ? "" : "s"}`, eq != null ? ` · worth ${usd(Number(eq))}` : "", ` · cost ${usd(cost)}`,
+      dep != null ? ` · deposited ${usd(dep)}` : "", div ? ` · dividends ${usd(div)}` : "", d.as_of ? h("span", { class: "muted" }, ` · ${d.source || ""} ${ago(d.as_of)}`) : null),
+    pos.length ? h("details", {}, h("summary", { class: "small" }, "Positions"), h("table", { class: "small" }, h("tbody", {}, pos.map((p) => h("tr", {}, h("td", { class: "mono" }, p.symbol), h("td", { class: "r num" }, String(p.quantity)), h("td", { class: "r num" }, p.equity != null ? usd(p.equity) : usd(p.net_cost))))))) : null,
+    months.length ? h("details", {}, h("summary", { class: "small" }, "By month"), h("div", { class: "scroll" }, h("table", { class: "small" }, h("thead", {}, h("tr", {}, ["Month", "Deposited", "Bought", "Sold", "Dividends"].map((x, i) => h("th", i ? { class: "r" } : {}, x)))),
+      h("tbody", {}, months.slice(0, 24).map((m) => h("tr", {}, h("td", {}, m.month), h("td", { class: "r num" }, usd(m.deposits)), h("td", { class: "r num" }, usd(m.bought)), h("td", { class: "r num" }, usd(m.sold)), h("td", { class: "r num" }, usd(m.dividends)))))))) : null,
+  );
 }
 async function viewRobinhood(root) {
   const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);

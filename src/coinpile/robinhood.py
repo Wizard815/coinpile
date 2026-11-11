@@ -40,7 +40,7 @@ class Robinhood:
             if not (os.path.isdir(self.csv_dir) and os.listdir(self.csv_dir)):
                 return None
             con = CsvConnector(self.csv_dir)
-            for ep in ("balances", "positions", "history"):
+            for ep in ("balances", "positions", "monthly"):
                 try:
                     out[ep] = getattr(con, ep)()
                     out["as_of"], out["source"] = now_iso(), con.name
