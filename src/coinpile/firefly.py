@@ -312,6 +312,11 @@ def sync_bills(db, ff: Firefly, today: date) -> int:
     seen = set()
     primary = cfg.get(db, "currency") or None
     bills = list(ff.pages("/bills", start=today.isoformat(), end=(today + timedelta(days=400)).isoformat()))
+    # The category its payments carry in Firefly III (Rent paid as Housing): so a forecast does not expect the bill under Subscriptions as well
+    paid_as = {}
+    for r in db.all("SELECT t.ff_bill, t.category, COUNT(*) n FROM transactions t JOIN categories k ON k.name=t.category WHERE coalesce(t.ff_bill,'') != '' AND t.amount < 0 "
+                    "AND k.kind = 'expense' GROUP BY t.ff_bill, t.category ORDER BY n"):
+        paid_as[r["ff_bill"]] = r["category"]
     with db.tx() as c:
         for b in bills:
             row = bill_row(b, today, primary)
@@ -319,12 +324,13 @@ def sync_bills(db, ff: Firefly, today: date) -> int:
                 continue
             key = f"ff-bill:{b['id']}"
             seen.add(key)
+            cat = paid_as.get(str(b["id"]))
             c.execute("""INSERT INTO subscriptions(name,amount,currency,cycle,every,unit,next_date,active,end_date,notes,native_amount,native_currency,source,plaid_stream_id,category,created)
-                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'firefly',?,'Subscriptions',?)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'firefly',?,coalesce(?,'Subscriptions'),?)
                          ON CONFLICT(plaid_stream_id) DO UPDATE SET name=excluded.name,amount=excluded.amount,currency=excluded.currency,cycle=excluded.cycle,
                          every=excluded.every,unit=excluded.unit,next_date=excluded.next_date,active=excluded.active,end_date=excluded.end_date,notes=excluded.notes,
-                         native_amount=excluded.native_amount,native_currency=excluded.native_currency""",
-                      row + (key, sync.now()))
+                         native_amount=excluded.native_amount,native_currency=excluded.native_currency,category=coalesce(?,subscriptions.category)""",
+                      row + (key, cat, sync.now(), cat))
         for r in db.all("SELECT id, plaid_stream_id k FROM subscriptions WHERE source='firefly'"):
             if r["k"] not in seen:
                 c.execute("DELETE FROM subscriptions WHERE id=?", (r["id"],))
