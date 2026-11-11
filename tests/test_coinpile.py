@@ -634,3 +634,39 @@ def test_net_worth_history_ends_at_net_worth_with_savings_kept_by_hand(tmp_path)
     c.post("/api/savings", json={"name": "CD", "kind": "cd", "balance": 5000, "apy": 4, "opened": "2026-01-01"})
     h = c.get("/api/history").json()
     assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
+
+
+def test_a_coinpile_password_signs_in_and_can_be_reset_with_a_token(tmp_path):
+    a = app(tmp_path, world())
+    c = signed_in(a)
+    anon = TestClient(a)
+    assert anon.post("/auth/password", json={"email": "alice@example.com", "password": "whatever-it-is"}).status_code == 401      # none set yet
+    assert c.put("/api/password", json={"new": "short"}).status_code == 422
+    assert c.put("/api/password", json={"new": "a long kitchen table"}).json() == {"password_set": True}
+    assert c.get("/auth/me").json()["has_password"] is True
+    raw = (tmp_path / "users.db").read_bytes()
+    assert b"a long kitchen table" not in raw and b"scrypt$" in raw                                            # only a salted hash is kept
+    # sign in with it, in a fresh browser (email is not case sensitive)
+    b = TestClient(a)
+    assert b.post("/auth/password", json={"email": "Alice@Example.com", "password": "a long kitchen table"}).status_code == 200
+    assert b.get("/api/overview").status_code == 200
+    # a wrong guess, again and again, is slowed down
+    w = TestClient(a)
+    codes = [w.post("/auth/password", json={"email": "alice@example.com", "password": f"wrong guess {i}"}).status_code for i in range(8)]
+    assert codes[:5] == [401] * 5 and 429 in codes
+    # changing it needs the current one, and signs out other browsers
+    assert c.put("/api/password", json={"new": "another long phrase", "current": "nope"}).status_code == 403
+    assert c.put("/api/password", json={"new": "another long phrase", "current": "a long kitchen table"}).status_code == 200
+    assert b.get("/api/overview").status_code == 401 and c.get("/api/overview").status_code == 200
+    # forgot it: a Personal Access Token proves who you are, and the new password is set
+    f = TestClient(a)
+    assert f.post("/auth/password/reset", json={"token": "not-a-real-token-" + "z" * 20, "new": "brand new long phrase"}).status_code == 401
+    assert f.post("/auth/password/reset", json={"token": ALICE, "new": "brand new long phrase"}).json()["password_set"] is True
+    assert c.get("/api/overview").status_code == 401                                                           # every other browser is signed out
+    assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "brand new long phrase"}).status_code == 200
+    assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "another long phrase"}).status_code == 401
+    # removing it, and forgetting the person, both clear it
+    assert f.request("DELETE", "/api/password", json={"current": "brand new long phrase"}).json() == {"password_set": False}
+    f.put("/api/password", json={"new": "one more long phrase"})
+    f.post("/api/forget")
+    assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "one more long phrase"}).status_code == 401

@@ -743,6 +743,15 @@ async function tabFirefly(root, rerender) {
       h("form", { class: "row", onsubmit: (e) => { e.preventDefault(); saveCfg({ refresh_minutes: val("rf-min") }, rerender); } },
         select("rf-min", "Read Firefly III every", [["5", "5 minutes"], ["10", "10 minutes"], ["30", "30 minutes"], ["60", "hour"], ["0", "only when I press the button"]], String(cfg.refresh_minutes ?? "10")),
         h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Save")))),
+    h("div", { class: "panel" }, h("h3", {}, "Coinpile password"),
+      h("p", { class: "muted small" }, f.has_password ? "You can sign in with your Firefly III email and this password. It opens Coinpile only; Firefly III is still read with your token. Forgot it? Sign out and use Forgot your Coinpile password on the sign-in page." : "Set a password to sign in to Coinpile with your Firefly III email, without pasting the token again. It opens Coinpile only. Only a salted hash of it is kept."),
+      h("form", { class: "row", onsubmit: async (e) => { e.preventDefault(); if (val("cp-new") !== val("cp-new2")) return toast("The new passwords do not match");
+          try { await api("/api/password", send("PUT", { new: val("cp-new"), current: f.has_password ? val("cp-cur") : null })); toast(f.has_password ? "Password changed. Other browsers are signed out." : "Password set"); rerender(); } catch (err) { fail(err); } } },
+        f.has_password ? field("cp-cur", "Current password", "", { type: "password", autocomplete: "current-password", required: true }) : null,
+        field("cp-new", f.has_password ? "New password" : "Password", "", { type: "password", autocomplete: "new-password", minlength: "12", required: true }),
+        field("cp-new2", "Type it again", "", { type: "password", autocomplete: "new-password", minlength: "12", required: true }),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, f.has_password ? "Change password" : "Set password"),
+          f.has_password ? h("button", { class: "btn danger", type: "button", onclick: async () => { if (!val("cp-cur")) return toast("Type the current password first"); try { await api("/api/password", send("DELETE", { current: val("cp-cur") })); toast("Password removed"); rerender(); } catch (err) { fail(err); } } }, "Remove password") : null))),
     h("div", { class: "panel" }, h("h3", {}, "Leave"),
       h("p", { class: "muted small" }, "Sign out ends this browser's session. Forget me also stops reading your Firefly III and deletes everything Coinpile keeps for you (goals, notes, chats). Firefly III itself is not touched."),
       h("div", { class: "chips" }, h("button", { class: "btn", onclick: async () => { await fetch("/auth/logout", { method: "POST", credentials: "same-origin" }); location.reload(); } }, "Sign out"),
@@ -1102,15 +1111,33 @@ async function login() {
     h("h2", {}, "Coinpile"), h("p", { class: "muted" }, "A simple view of your Firefly III, with an agent you can ask about your money."),
     why ? h("p", { class: "neg small" }, why) : null,
     me.configured === false ? h("p", { class: "neg small" }, "Coinpile does not know your Firefly III address yet: set FIREFLY_URL on the container.") : null,
-    me.oauth ? h("a", { class: "btn primary", href: "/auth/firefly", style: "text-align:center;text-decoration:none" }, "Sign in with Firefly III") : null,
-    h("details", { open: !me.oauth }, h("summary", { class: "small" }, me.oauth ? "Or use a Personal Access Token" : "Sign in with a Personal Access Token"),
+    h("form", { style: "display:grid;gap:10px", onsubmit: async (e) => { e.preventDefault();
+        try { const r = await fetch("/auth/password", { method: "POST", credentials: "same-origin", headers: JSONH, body: JSON.stringify({ email: $("#lg-email").value.trim(), password: $("#lg-pw").value }) }); const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(r.status === 429 ? (j.detail || "Too many attempts, wait a little") : "Wrong email or password");
+          history.replaceState(null, "", location.pathname); boot(); } catch (err) { toast(err.message); } } },
+      h("label", {}, "Firefly III email", h("input", { id: "lg-email", type: "email", autocomplete: "username", required: true })),
+      h("label", {}, "Coinpile password", h("input", { id: "lg-pw", type: "password", autocomplete: "current-password", required: true })),
+      h("button", { class: "btn primary", type: "submit" }, "Sign in")),
+    h("p", { class: "muted small", style: "margin:0" }, "No Coinpile password yet? Sign in once with Firefly III below, then set one under Settings, Firefly III."),
+    me.oauth ? h("a", { class: "btn", href: "/auth/firefly", style: "text-align:center;text-decoration:none" }, "Sign in with Firefly III") : null,
+    h("details", {}, h("summary", { class: "small" }, me.oauth ? "Or use a Personal Access Token" : "Sign in with a Personal Access Token"),
       h("p", { class: "muted small" }, `In Firefly III (${me.firefly || "your Firefly III"}): Options, Profile, OAuth, Personal Access Tokens, Create new token. Paste it here. It is kept encrypted and only used to read your Firefly III.`),
       h("form", { style: "display:grid;gap:10px", onsubmit: async (e) => { e.preventDefault();
         try { const r = await fetch("/auth/token", { method: "POST", credentials: "same-origin", headers: JSONH, body: JSON.stringify({ token: $("#pat").value.trim() }) }); const j = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : "Sign-in failed");
           toast("Signed in. Reading your Firefly III..."); history.replaceState(null, "", location.pathname); boot(); } catch (err) { toast(err.message); } } },
         h("textarea", { id: "pat", rows: 3, required: true, placeholder: "eyJ0eXAiOiJKV1Qi...", autocomplete: "off", spellcheck: "false" }),
-        h("button", { class: "btn" + (me.oauth ? "" : " primary"), type: "submit" }, "Sign in")))));
+        h("button", { class: "btn", type: "submit" }, "Sign in with the token"))),
+    h("details", {}, h("summary", { class: "small" }, "Forgot your Coinpile password?"),
+      h("p", { class: "muted small" }, "Make a Personal Access Token in Firefly III (Options, Profile, OAuth, Personal Access Tokens) to prove it is you, then choose a new Coinpile password. Every other browser is signed out."),
+      h("form", { style: "display:grid;gap:10px", onsubmit: async (e) => { e.preventDefault(); if ($("#rs-new").value !== $("#rs-new2").value) return toast("The new passwords do not match");
+        try { const r = await fetch("/auth/password/reset", { method: "POST", credentials: "same-origin", headers: JSONH, body: JSON.stringify({ token: $("#rs-tok").value.trim(), new: $("#rs-new").value }) }); const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : "Could not reset it");
+          toast("New password set. You are signed in."); history.replaceState(null, "", location.pathname); boot(); } catch (err) { toast(err.message); } } },
+        h("textarea", { id: "rs-tok", rows: 3, required: true, placeholder: "Personal Access Token", autocomplete: "off", spellcheck: "false" }),
+        h("label", {}, "New Coinpile password", h("input", { id: "rs-new", type: "password", autocomplete: "new-password", minlength: "12", required: true })),
+        h("label", {}, "Type it again", h("input", { id: "rs-new2", type: "password", autocomplete: "new-password", minlength: "12", required: true })),
+        h("button", { class: "btn", type: "submit" }, "Set the new password")))));
 }
 async function boot() {
   const want = location.hash.slice(1); if (TABS.some((t) => t[0] === want)) S.tab = want;
