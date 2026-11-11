@@ -634,3 +634,33 @@ def test_net_worth_history_ends_at_net_worth_with_savings_kept_by_hand(tmp_path)
     c.post("/api/savings", json={"name": "CD", "kind": "cd", "balance": 5000, "apy": 4, "opened": "2026-01-01"})
     h = c.get("/api/history").json()
     assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
+
+
+def test_investments_can_follow_an_existing_account_without_double_counting_net_worth(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    before = c.get("/api/overview").json()["net_worth"]
+    r = c.post("/api/investments", json={"name": "Robinhood", "kind": "brokerage", "account_id": "ff:1"})
+    assert r.status_code == 200, r.text
+    inv = r.json()
+    assert inv["linked"] and inv["balance"] == 1200.5                                 # follows ff:1's balance, not a typed one
+    assert c.get("/api/overview").json()["net_worth"] == before                       # already counted via the account; not added again
+    assert any(i["id"] == inv["id"] for i in c.get("/api/accounts/ff:1").json()["investments"])
+
+
+def test_investments_kept_by_hand_count_in_net_worth_and_a_bad_kind_is_rejected(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    before = c.get("/api/overview").json()["net_worth"]
+    r = c.post("/api/investments", json={"name": "Coinbase", "kind": "crypto", "balance": 300})
+    assert r.status_code == 200, r.text
+    assert c.get("/api/overview").json()["net_worth"] == round(before + 300, 2)
+    assert c.post("/api/investments", json={"name": "x", "kind": "not-a-kind", "balance": 1}).status_code == 422
+    assert c.get("/api/investments").json()["total"] == 300
+
+
+def test_deleting_a_manual_account_unlinks_its_investment_instead_of_breaking(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    aid = c.post("/api/accounts", json={"name": "Side brokerage", "kind": "investment", "balance": 900, "coinpile_only": True}).json()["id"]
+    inv = c.post("/api/investments", json={"name": "Side brokerage", "account_id": aid}).json()
+    assert c.delete(f"/api/accounts/{aid}").status_code == 200
+    again = next(i for i in c.get("/api/investments").json()["items"] if i["id"] == inv["id"])
+    assert again["account_id"] is None and again["balance"] == 0
