@@ -223,7 +223,7 @@ function demoApi(path, opts) {
   if (m !== "GET") { if (path.startsWith("/api/agent/chat")) return Promise.resolve(DEMO.chat); throw new Error("Sample preview: changes are not saved"); }
   if (p === "/api/transactions") return Promise.resolve(filterTx(DEMO.transactions, P));
   if (p === "/api/upcoming") return Promise.resolve(DEMO["/api/upcoming?days=" + Math.min(Math.max(+P.get("days") || 30, 1), 120)] || DEMO["/api/upcoming?days=365"]);
-  if (p.startsWith("/api/accounts/")) return Promise.resolve(DEMO["/api/accounts/" + p.split("/")[3]]);
+  if (p.startsWith("/api/accounts/")) return Promise.resolve(DEMO["/api/accounts/" + decodeURIComponent(p.split("/")[3])]);
   const hit = DEMO[path] ?? DEMO[p];
   return hit === undefined ? Promise.reject(new Error("not in sample: " + path)) : Promise.resolve(hit);
 }
@@ -301,7 +301,7 @@ async function viewOverview(root, rerender) {
     h("div", { class: "grid wide", "data-title": "Key numbers" }, kpi("Net worth", usd(o.net_worth), o.savings_total ? `savings ${usd(o.savings_total)}, ${usd(o.savings_free)} free` : `${o.accounts.length} accounts`), kpi("Owed on cards", usd(owed), "Credit + loans", "neg"),
       kpi("Subscriptions / month", usd(o.subscriptions_monthly), usd(o.subscriptions_monthly * 12) + " a year"), kpi(`Bills, next ${up.days} days`, usd(up.total), `${up.count} payments${up.others_total ? " · others pay " + usd(up.others_total) : ""}`)),
     pinnedPanel(allAcc, rerender),
-    h("div", { class: "panel wide" }, h("div", { class: "bar" }, h("h3", {}, "Net worth, last 30 days")), spark(hist)),
+    h("div", { class: "panel wide" }, h("div", { class: "bar" }, h("h3", {}, "Net worth" + (hist.length ? ` since ${hist[0].date}` : ""))), spark(hist)),
     h("div", { class: "panel" }, h("h3", {}, "Where the money sits"), h("div", { class: "comp" }, Object.entries(o.by_kind).map(([k, v]) => h("i", { style: `width:${(Math.abs(v) / gross) * 100}%;background:${(KIND[k] || ["", "var(--muted)"])[1]}`, title: `${(KIND[k] || [k])[0]} ${usd(v)}` }))),
       h("div", { class: "legend" }, Object.entries(o.by_kind).map(([k, v]) => h("span", {}, h("b", { style: "background:" + (KIND[k] || ["", "var(--muted)"])[1] }), `${(KIND[k] || [k])[0]} ${usd(v)}`)))),
     h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, `Bills in the next ${up.days} days`),

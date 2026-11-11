@@ -627,3 +627,10 @@ def test_a_closed_firefly_account_keeps_its_history_but_not_its_net_worth(tmp_pa
     a = next(x for x in c.get("/api/accounts").json() if x["id"] == "ff:3")
     assert a["name"].endswith("(closed)") and c.get("/api/overview").json()["net_worth"] == round(before - 5000, 2)
     assert any(t["account_id"] == "ff:3" for t in c.get("/api/transactions?limit=100").json()["items"])           # the transfer into it is still there
+
+
+def test_net_worth_history_ends_at_net_worth_with_savings_kept_by_hand(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    c.post("/api/savings", json={"name": "CD", "kind": "cd", "balance": 5000, "apy": 4, "opened": "2026-01-01"})
+    h = c.get("/api/history").json()
+    assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
