@@ -722,3 +722,10 @@ def test_robinhood_mcp_signs_in_on_robinhood_and_only_ever_reads(tmp_path, monke
     with pytest.raises(PermissionError):
         cl.call("place_equity_order", {"symbol": "NVDA", "quantity": 1})
     assert c.post("/api/robinhood/disconnect").json() == {"connected": False} and not any(x["id"] == "rh:agent" for x in c.get("/api/investments").json()["accounts"])
+
+
+def test_data_files_are_readable_by_coinpile_only(tmp_path):
+    import stat
+    signed_in(app(tmp_path, world()))
+    for f in [tmp_path / "users.db", *(tmp_path / "people").glob("*.db")]:
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f

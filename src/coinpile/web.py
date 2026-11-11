@@ -66,6 +66,10 @@ class Users:
         import sqlite3
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.db.conn = sqlite3.connect(path, check_same_thread=False)
+        try:
+            os.chmod(path, 0o600)                            # password hashes and encrypted tokens: readable by Coinpile only
+        except OSError:
+            pass
         self.db.conn.row_factory = sqlite3.Row
         self.db.lock = threading.RLock()
         with self.db.tx() as c:
