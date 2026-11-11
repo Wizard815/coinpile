@@ -763,7 +763,18 @@ async function tabBanks(root, rerender) {
     b.items.length ? h("div", { style: "margin-top:12px;display:grid;gap:10px" }, b.items.map((it) => h("div", { class: "card" },
       h("div", { class: "bar" }, h("b", {}, it.institution || "Bank"), h("span", { class: "small muted" }, it.status ? h("span", { class: "pill r" }, it.status === "error" ? "sign in again" : it.status) : null, it.webhook_live ? h("span", { class: "pill t" }, "live updates") : null, ` ${it.last_sync ? "last checked " + ago(new Date(it.last_sync * 1000).toISOString()) : "not checked yet"}`)),
       h("div", { class: "small muted" }, it.accounts.map((a) => a.name + (a.mask ? " ••" + a.mask : "")).join(", ")),
-      h("div", { class: "chips", style: "margin-top:6px" }, h("button", { class: "btn sm", onclick: async () => { try { await openLink(it.item_id, rerender); } catch (e) { fail(e); } } }, "Fix the sign-in (relink)"))))) : h("p", { class: "muted small" }, "No bank linked yet.")));
+      h("div", { class: "chips", style: "margin-top:6px" },
+        h("select", { "aria-label": "How often", onchange: async (e) => { try { await api("/api/banks/" + encodeURIComponent(it.item_id), send("PUT", { schedule: e.target.value })); toast("Saved"); } catch (err) { fail(err); } } },
+          [["auto", "Automatic" + (it.schedule_effective ? ` (${it.schedule_effective})` : "")], ["15m", "Every 15 minutes"], ["3h", "Every 3 hours"], ["daily", "Daily"], ["weekly", "Weekly"], ["biweekly", "Every 2 weeks"], ["monthly", "Monthly"], ["manual", "Only when pulled"]]
+            .map(([v, t]) => h("option", { value: v, selected: (it.schedule || "auto") === v }, t))),
+        h("select", { "aria-label": "Plaid recurring detection", title: "Plaid's recurring-payment detection costs extra per bank per month", onchange: async (e) => { try { await api("/api/banks/" + encodeURIComponent(it.item_id), send("PUT", { recurring: e.target.value })); toast("Saved"); } catch (err) { fail(err); } } },
+          [["auto", "Recurring: automatic"], ["on", "Recurring: on"], ["off", "Recurring: off"]].map(([v, t]) => h("option", { value: v, selected: (it.recurring || "auto") === v }, t))),
+        h("button", { class: "btn sm", onclick: async () => { try { await openLink(it.item_id, rerender); } catch (e) { fail(e); } } }, "Fix the sign-in (relink)"),
+        h("button", { class: "btn sm danger", onclick: sure(null, `Unlink ${it.institution}? On a Plaid free plan the link slot is NOT given back. To fix a sign-in use relink. What is in Firefly III stays.`, async () => { try { await api("/api/banks/" + encodeURIComponent(it.item_id), { method: "DELETE" }); toast("Unlinked"); rerender(); } catch (e) { fail(e); } }) }, "Unlink")),
+      it.calls_per_day != null ? h("div", { class: "small muted" }, `about ${it.calls_per_day} Plaid calls a day`) : null))) : h("p", { class: "muted small" }, "No bank linked yet.")));
+  try { const u = await api("/api/banks/usage"); add(root, h("div", { class: "panel" }, h("h3", {}, "Plaid this month"),
+    h("p", { class: "muted small" }, `${u.items ?? 0} bank${u.items === 1 ? "" : "s"} linked, about ${usd(u.est_monthly_cost || 0)} a month` + (u.budget ? ` of your ${usd(u.budget)} budget` + (u.room_for_items != null ? `, room for ${u.room_for_items} more` : "") : "") + `. ${u.calls_today ?? 0} of ${u.daily_cap ?? "?"} calls today, ${u.calls_month ?? 0} this month.` + (u.webhook_set ? ` ${u.webhook_banks ?? 0} bank(s) send live updates.` : "")),
+    u.over_budget ? h("p", { class: "neg small" }, "Over the monthly budget: new links are refused until a bank is unlinked or the admin raises the budget.") : null)); } catch {}
 }
 async function openLink(itemId, rerender, resume) {
   await loadPlaid();
