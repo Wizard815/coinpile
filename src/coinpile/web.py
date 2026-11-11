@@ -22,13 +22,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_money, api_plan, connector as conn, feed, firefly, notify, settings as cfg
+from coinpile import agent, api_links, api_money, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"refresh_minutes", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"share", "refresh_minutes", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
 
 
@@ -68,6 +68,8 @@ class Users:
         with self.db.tx() as c:
             c.executescript("""CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT, kind TEXT, token_enc TEXT, refresh_enc TEXT, expires REAL, created TEXT, last_seen TEXT, problem TEXT);
                                CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires REAL NOT NULL);""")
+            if "handle" not in [r[1] for r in c.execute("PRAGMA table_info(users)")]:
+                c.execute("ALTER TABLE users ADD COLUMN handle TEXT")
 
     def save(self, uid: str, email: str, kind: str, token: str, refresh: str | None = None, expires: float | None = None) -> None:
         from coinpile import crypto
@@ -76,6 +78,28 @@ class Users:
                          ON CONFLICT(id) DO UPDATE SET email=excluded.email,kind=excluded.kind,token_enc=excluded.token_enc,refresh_enc=excluded.refresh_enc,
                          expires=excluded.expires,last_seen=excluded.last_seen,problem=NULL""",
                       (uid, email, kind, crypto.encrypt(token), crypto.encrypt(refresh) if refresh else None, expires))
+
+    def ensure_handle(self, uid: str) -> str:
+        """The name other people see and link to: the start of the Firefly III email, made unique."""
+        u = self.get(uid) or {}
+        if u.get("handle"):
+            return u["handle"]
+        base = re.sub(r"[^a-z0-9_-]", "", (u.get("email") or "").split("@")[0].lower())[:24] or "person"
+        if not base[0].isalnum():
+            base = "p" + base
+        h, taken = base, {r["handle"] for r in self.db.all("SELECT handle FROM users WHERE handle IS NOT NULL AND id<>?", (uid,))}
+        if h in taken:
+            h = f"{base[:20]}-{re.sub(r'[^a-z0-9]', '', uid.lower())[:8] or secrets.token_hex(2)}"
+        with self.db.tx() as c:
+            c.execute("UPDATE users SET handle=? WHERE id=?", (h, uid))
+        return h
+
+    def by_handle(self, handle: str) -> str | None:
+        r = self.db.one("SELECT id FROM users WHERE handle=?", (handle,))
+        return r["id"] if r else None
+
+    def handles(self) -> list[str]:
+        return [r["handle"] for r in self.db.all("SELECT handle FROM users WHERE handle IS NOT NULL ORDER BY handle")]
 
     def get(self, uid: str) -> dict | None:
         return self.db.one("SELECT * FROM users WHERE id=?", (uid,))
@@ -129,7 +153,7 @@ class Dispatch:
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
-        if scope["type"] == "http" and (path.startswith("/api/") or path == "/subscriptions.ics"):
+        if scope["type"] == "http" and (path.startswith("/api/") and not path.startswith("/api/v1/") or path == "/subscriptions.ics"):
             uid = self.users.session_user(cookie_of(scope))
             if not uid:
                 return await JSONResponse({"detail": "sign in first"}, 401)(scope, receive, send)
@@ -177,13 +201,24 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     front = FastAPI(title="Coinpile", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     http = httpx.Client(timeout=30, transport=firefly_transport)
 
+    def safe_id(uid: str) -> str:
+        return re.sub(r"[^A-Za-z0-9-]", "-", uid)
+
+    flushers: dict = {}
+
+    def flush_for(other: str) -> None:
+        try:
+            person_app(other)                     # builds their side if nobody opened it since the start
+            flushers[other]()
+        except Exception:
+            pass
+
     made = threading.RLock()                 # one database object (one connection, one lock) per person, however many threads ask at once
 
     def person_db(uid: str) -> DB:
         with made:
             if uid not in dbs:
-                safe = re.sub(r"[^A-Za-z0-9_-]", "_", uid)
-                dbs[uid] = DB(os.path.join(data_dir, "people", f"{safe}.db"))
+                dbs[uid] = DB(os.path.join(data_dir, "people", f"{safe_id(uid)}.db"))
             return dbs[uid]
 
     # ---------------- Firefly III tokens
@@ -216,6 +251,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         try:
             out = firefly.refresh(db, ff_for(uid), today(), full)
             cfg.set_value(db, "ff_last_error", "")
+            if links.active_peers(db):
+                flush_for(uid)                    # balances of accounts shared with someone go to them
             users.problem(uid, None)
             try:
                 if cfg.get(db, "notify_url"):
@@ -278,12 +315,37 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         db = person_db(uid)
         app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
         who = lambda: (users.get(uid) or {}).get("email", "")
-        ctx = api_money.make_ctx(db, lambda request: None, today, name=who(), caldav_transport=caldav_transport, shared_changed=lambda *a, **k: None,
-                                 link_flush=lambda: 0, link_people=lambda: [])
+        me = users.ensure_handle(uid)
+
+        def link_send(peer: str, kind: str, payload: dict) -> bool:
+            """Linked people live in this same Coinpile, so a message is handed straight to the other person's data. Whether the two are linked is that side's call."""
+            other = users.by_handle(peer)
+            if not other or other == uid:
+                return False
+            r = links.receive(person_db(other), peer, me, kind, payload)
+            if r.get("ok"):
+                threading.Thread(target=lambda: flush_for(other), daemon=True).start()       # their answer (if any) goes back on its own
+            return True
+
+        def link_flush() -> int:
+            return links.flush(db, link_send)
+
+        def shared_changed(gid: int | None = None, edited: bool = False) -> None:
+            try:
+                links.bump(db, me, gid) if edited and gid else links.push(db, me)
+                links.push_accounts(db)
+                link_flush()
+            except Exception:
+                pass
+
+        flushers[uid] = shared_changed
+        ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
+                                 link_flush=link_flush, link_people=users.handles)
         ctx.llm_transport = llm_transport
         api_money.register(app, ctx)
         api_plan.register(app, ctx)
         agent.register(app, ctx)
+        api_links.register(app, ctx)
 
         @app.get("/api/status")
         def status():
@@ -303,13 +365,37 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             except firefly.FireflyError as e:
                 raise HTTPException(502, str(e))
 
-        @app.get("/api/links")                     # the old screens ask about family links; Coinpile has none
-        def links_none():
-            return {"me": who(), "links": [], "waiting": 0}
+        class TokenNew(BaseModel):
+            name: str
+            scopes: list[str]
 
-        @app.get("/api/sharing")
-        def sharing_none():
-            return []
+        @app.get("/api/tokens")
+        def tokens():
+            return {"items": [{**t, "scopes": t["scopes"].split(",")} for t in db.all("SELECT id,name,scopes,created,last_used,revoked FROM api_tokens ORDER BY revoked, id DESC")],
+                    "scopes": external.SCOPES}
+
+        @app.post("/api/tokens")
+        def token_new(b: TokenNew):
+            bad = [x for x in b.scopes if x not in external.SCOPES]
+            if not b.name.strip() or not b.scopes or bad:
+                raise HTTPException(422, "a name and at least one valid scope are required" + (f" (unknown: {', '.join(bad)})" if bad else ""))
+            tok = external.new_token(safe_id(uid))
+            with db.tx() as c:
+                cur = c.execute("INSERT INTO api_tokens(name,token_hash,scopes,created) VALUES(?,?,?,?)", (b.name.strip()[:60], sha(tok), ",".join(sorted(set(b.scopes))), sync.now()))
+            return {"id": cur.lastrowid, "name": b.name.strip(), "scopes": sorted(set(b.scopes)), "token": tok, "note": "Copy it now. It is not shown again."}
+
+        @app.delete("/api/tokens/{tid}")
+        def token_revoke(tid: int):
+            with db.tx() as c:
+                cur = c.execute("UPDATE api_tokens SET revoked=1 WHERE id=?", (tid,))
+            if not cur.rowcount:
+                raise HTTPException(404, "not found")
+            return {"revoked": tid}
+
+        @app.get("/api/summary")
+        def summary_preview():
+            """What the Pondering Orb would see (Settings, Home Assistant & API, Preview)."""
+            return orb_summary(uid)
 
         @app.get("/api/piggy-banks")
         def piggy_banks():
@@ -435,14 +521,91 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             d = dbs.pop(uid, None)
             if d:
                 d.conn.close()
-            safe = re.sub(r"[^A-Za-z0-9_-]", "_", uid)
             try:
-                os.remove(os.path.join(data_dir, "people", f"{safe}.db"))
+                os.remove(os.path.join(data_dir, "people", f"{safe_id(uid)}.db"))
             except FileNotFoundError:
                 pass
             return {"forgotten": True}
 
         return app
+
+    # ---------------- read-only API for Home Assistant, scripts and the Pondering Orb (scoped tokens, never a login)
+    limiter = external.Limiter(int(os.environ.get("API_RATE_PER_MIN", "30")))
+    last_api_refresh: dict[str, float] = {}
+
+    def orb_summary(uid: str) -> dict:
+        """Only what this person ticked under Settings, Home Assistant & API. Never transactions."""
+        db, t = person_db(uid), today()
+        share = set(cfg.get_list(db, "share"))
+        out = {"name": ((users.get(uid) or {}).get("email") or "").split("@")[0]}
+        ext = external.summary(db, t) if share & {"bills", "alerts", "savings", "goals"} else {}
+        if "net_worth" in share:
+            out["net_worth"] = ledger.net_worth(db)
+        if "subscriptions" in share:
+            out["subscriptions_monthly"] = round(sum(s["monthly"] for s in ledger.subscriptions(db, t)), 2)
+        if "bills" in share:
+            out["bills"] = {"next_7d": ext["bills_7d"], "next_30d": ext["bills_30d"], "next": ext["next_bill"]}
+        if "alerts" in share:
+            out["alerts"] = {"total": ext["alerts_total"], "critical": ext["alerts_critical"], "warning": ext["alerts_warning"]}
+        if "bill_list" in share:
+            out["bill_list"] = [{"date": i["date"], "name": i["name"], "amount": i["amount"], "category": i["category"]} for i in ledger.upcoming(db, 30, t)["items"][:60]]
+        if "alert_list" in share:
+            out["alert_list"] = [{"severity": a["severity"], "kind": a["kind"], "title": a["title"], "detail": a.get("detail", ""), **({"date": a["date"]} if a.get("date") else {})} for a in ledger.alerts(db, t)][:30]
+        if "savings" in share:
+            out["savings"] = {"total": ext["savings_total"], "free": ext["savings_free"], "earmarked": ext["savings_earmarked"]}
+        if "goals" in share:
+            out["goals"] = [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"]
+        if "spending" in share:
+            fc = ledger.spending_forecast(db, t)
+            out["spending"] = {"so_far": fc["spent_so_far"], "projected": fc["projected"], "income_avg": fc["income_avg"], "left_after": fc["left_after_projected"]}
+        return out
+
+    def token_holder(request: Request, resource: str):
+        tok = request.headers.get("authorization", "").removeprefix("Bearer ").strip()
+        key = external.person_of(tok)
+        uid = next((u["id"] for u in users.all() if safe_id(u["id"]) == key), None) if key else None
+        if not uid:
+            raise HTTPException(401, "invalid token")                          # the same answer for an unknown person and a wrong secret
+        db = person_db(uid)
+        row, err = external.authenticate(db, tok, resource, sync.now())
+        if err:
+            raise HTTPException(*err)
+        if not limiter.ok((uid, row["id"])):
+            raise HTTPException(429, "too many requests: slow down (limit %d a minute)" % limiter.n)
+        return uid, db, row
+
+    @front.get("/api/v1/summary")
+    def orb(request: Request):
+        """For the Pondering Orb (its 'goblinbank' widget): a token with the 'orb' scope reads that person's shared summary."""
+        uid, _, _ = token_holder(request, "orb")
+        s = orb_summary(uid)
+        return {"goblins": {s["name"] or "me": s}}
+
+    @front.get("/api/v1/me")
+    @front.get("/api/v1/me/{resource:path}")
+    async def me_api(request: Request, resource: str = ""):
+        res = resource.strip("/")
+        uid, db, row = token_holder(request, res)
+        refreshed = False
+        if request.query_params.get("refresh") in ("1", "true", "yes"):
+            if "refresh" not in row["scopes"].split(","):
+                raise HTTPException(403, "this token does not have the 'refresh' scope")
+            if time.time() - last_api_refresh.get(uid, 0) >= external.REFRESH_MIN_SECONDS:
+                last_api_refresh[uid] = time.time()
+                try:
+                    await run_in_threadpool(refresh, uid)
+                    refreshed = True
+                except firefly.FireflyError:
+                    pass
+        if not res:
+            return {"person": (users.get(uid) or {}).get("email"), "token": row["name"], "resources": sorted(r for r, sc in external.RESOURCES.items() if sc in row["scopes"].split(","))}
+        try:
+            out = external.data(db, res, today(), {k: v for k, v in request.query_params.items() if k != "refresh"})
+        except (ValueError, KeyError):
+            raise HTTPException(422, "bad parameter")
+        if isinstance(out, dict):
+            out["read_from_firefly_at"], out["refreshed"] = cfg.get(db, "ff_last_refresh") or None, refreshed
+        return out
 
     # ---------------- signing in
     def signed_in(response: Response, request: Request, uid: str) -> None:
@@ -479,6 +642,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         except firefly.FireflyError as e:
             raise HTTPException(502, str(e))
         users.save(me_["id"], me_["email"], "pat", tok)
+        users.ensure_handle(me_["id"])
         signed_in(response, request, me_["id"])
         refresh_soon(me_["id"])
         log.info("someone signed in with a token")
@@ -518,6 +682,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         except firefly.FireflyError:
             return RedirectResponse("/?signin=refused", 302)
         users.save(me_["id"], me_["email"], "oauth", d["access_token"], d.get("refresh_token"), time.time() + int(d.get("expires_in", 3600)))
+        users.ensure_handle(me_["id"])
         resp = RedirectResponse("/", 302)
         signed_in(resp, request, me_["id"])
         refresh_soon(me_["id"])

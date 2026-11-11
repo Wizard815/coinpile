@@ -230,6 +230,39 @@ def piggies(db) -> list[dict]:
     return [json.loads(r["data"]) for r in db.all("SELECT data FROM ff_piggy ORDER BY id")]
 
 
+# ---------------------------------------------------------------- balance history (for the net worth chart)
+HISTORY_DAYS = 730
+MARK = "T23:59:59Z"          # backfilled day-end balances carry this; live snapshots use the +00:00 form, so a re-read replaces only its own rows
+
+
+def sync_history(db, ff: Firefly, accounts: dict, today: date, days: int = HISTORY_DAYS) -> int:
+    """Firefly III knows every account's balance on every day. Keep one row per account per day the balance changed, so net worth has a past from the first day."""
+    start, n = today - timedelta(days=days), 0
+    for fid, a in accounts.items():
+        try:
+            sets = ff.get("/chart/account/overview", start=start.isoformat(), end=today.isoformat(), period="1D", **{"accounts[]": fid})
+        except FireflyError:
+            continue                                         # an older Firefly III without this chart: the chart simply starts today
+        if not sets:
+            continue
+        entries = sets[0].get("entries") or {}
+        rows, prev = [], None
+        for day, v in sorted(entries.items() if isinstance(entries, dict) else []):
+            bal = _num(v)
+            bal = -bal if a["kind"] == "credit" else abs(bal) if a["kind"] == "loan" else bal
+            bal = round(bal, 2)
+            if prev is None and bal == 0:
+                continue                                     # before the account existed
+            if bal != prev:
+                rows.append((str(day)[:10] + MARK, a["id"], bal))
+                prev = bal
+        with db.tx() as c:
+            c.execute("DELETE FROM snapshots WHERE account_id=? AND ts LIKE ?", (a["id"], "%" + MARK))
+            c.executemany("INSERT INTO snapshots VALUES(?,?,?)", rows)
+        n += len(rows)
+    return n
+
+
 # ---------------------------------------------------------------- one refresh
 FULL_EVERY = 24 * 3600
 
@@ -244,6 +277,8 @@ def refresh(db, ff: Firefly, today: date, full: bool = False, now: float | None 
     start = None if full else today - timedelta(days=120)
     tx = sync_transactions(db, ff, accounts, start, today + timedelta(days=30))
     out = {"accounts": len(accounts), **tx, "subscriptions": sync_bills(db, ff, today), "piggy_banks": sync_piggies(db, ff), "full": full}
+    if full:
+        out["history_points"] = sync_history(db, ff, accounts, today)
     cfg.set_value(db, "ff_last_refresh", sync.now())
     if full:
         cfg.set_value(db, "ff_last_full", str(now))
