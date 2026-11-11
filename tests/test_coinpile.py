@@ -113,7 +113,7 @@ def test_coinpile_never_changes_firefly_iii(tmp_path):
     assert c.put("/api/accounts/ff:1", json={"nickname": "Bills"}).status_code == 200                                   # a nickname is Coinpile's own
     assert c.post("/api/goals", json={"name": "Car", "target": 1000}).status_code == 200
     assert c.post("/api/refresh").status_code == 200 and c.get("/api/accounts/ff:1").json()["account"]["nickname"] == "Bills"     # and survives a refresh
-    assert {m for m, _, _ in ff.calls} == {"GET"}                                                                   # only ever reads
+    assert {m for m, _, _ in ff.calls} == {"GET"}                                                                   # only ever reads (nothing is switched on)
 
 
 def test_a_change_from_another_site_is_refused(tmp_path):
@@ -343,3 +343,83 @@ def test_a_robinhood_connector_with_a_value_adds_an_investment_account(tmp_path,
     c = signed_in(a)
     acct = next(x for x in c.get("/api/accounts").json() if x["id"] == "rh:agent")
     assert acct["kind"] == "investment" and acct["balance"] == 1234.5 and acct["source"] == "robinhood"
+
+
+def test_nothing_is_sent_to_firefly_iii_until_each_part_is_switched_on(tmp_path):
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
+    assert c.get("/api/status").json()["sends"] == {"piggies": False, "bills": False, "categories": False, "accounts": False}
+    g = c.post("/api/goals", json={"name": "Roof", "target": 3000}).json()
+    c.post(f"/api/goals/{g['id']}/allocate", json={"place": "a:ff:3", "amount": 1000})
+    c.post("/api/subscriptions", json={"name": "Hulu", "amount": 9.99, "next_date": "2026-11-25", "cycle": "monthly"})
+    assert c.put("/api/transactions/ff:3/category", json={"category": "Food"}).status_code == 409
+    assert c.post("/api/transactions", json={"account_id": "ff:1", "date": "2026-11-09", "name": "x", "amount": -1}).status_code == 409
+    assert c.post("/api/accounts", json={"name": "Jar", "kind": "cash", "balance": 5}).json()["source"] == "manual"
+    assert not getattr(ff, "writes", [])
+
+
+def test_switched_on_parts_go_into_firefly_iii(tmp_path):
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
+    c.put("/api/settings", json={"ff_send_goals": "on", "ff_send_bills": "on", "ff_send_categories": "on", "ff_send_accounts": "on"})
+    # goals -> piggy banks, and the money is not counted twice
+    g = c.post("/api/goals", json={"name": "Roof", "target": 3000}).json()
+    c.post(f"/api/goals/{g['id']}/allocate", json={"place": "a:ff:3", "amount": 1000})
+    pig = next(p for p in ff.data["1"]["piggies"] if p["attributes"]["name"] == "Roof")
+    assert pig["attributes"]["accounts"] == [{"account_id": "3", "name": "x", "current_amount": "1000.00"}] and pig["attributes"]["target_amount"] == "3000.00"
+    c.post("/api/refresh")
+    v = c.get("/api/goals").json()
+    assert v["in_piggy_banks"] == 400 and v["allocated"] == 1400 and v["free"] == 3600                # Vacation (Firefly III's own) + Roof (the goal itself), once each
+    ff.piggy_update_breaks = True                                                                     # Firefly III 6.7's piggy-bank amount bug: replaced instead
+    c.post(f"/api/goals/{g['id']}/allocate", json={"place": "a:ff:3", "amount": 1500})
+    assert [p["attributes"]["accounts"][0]["current_amount"] for p in ff.data["1"]["piggies"] if p["attributes"]["name"] == "Roof"] == ["1500.00"]
+    c.post(f"/api/goals/{g['id']}/close", json={})
+    assert "Roof" not in [p["attributes"]["name"] for p in ff.data["1"]["piggies"]] and "Vacation" in [p["attributes"]["name"] for p in ff.data["1"]["piggies"]]
+    # subscriptions -> bills (Coinpile's own extras stay), editing and deleting follow; daily stays in Coinpile
+    s = c.post("/api/subscriptions", json={"name": "Spotify", "amount": 11.99, "next_date": "2026-11-20", "cycle": "monthly", "notify_days": 5}).json()
+    bill = next(b for b in ff.data["1"]["bills"] if b["attributes"]["name"] == "Spotify")
+    assert s["source"] == "firefly" and bill["attributes"]["repeat_freq"] == "monthly"
+    c.put(f"/api/subscriptions/{s['id']}", json={"name": "Spotify", "amount": 16.99, "next_date": "2026-11-20", "cycle": "monthly", "notify_days": 5})
+    assert bill["attributes"]["amount_min"] == "16.99"
+    c.post("/api/refresh")
+    mine = [x for x in c.get("/api/subscriptions").json()["items"] if x["name"] == "Spotify"]
+    assert len(mine) == 1 and mine[0]["notify_days"] == 5
+    assert c.post("/api/subscriptions", json={"name": "Parking", "amount": 2, "next_date": "2026-11-12", "every": 1, "unit": "day"}).json()["source"] == "manual"
+    c.delete(f"/api/subscriptions/{s['id']}")
+    assert "Spotify" not in [b["attributes"]["name"] for b in ff.data["1"]["bills"]]
+    # categories, with a Firefly III rule
+    assert c.put("/api/transactions/ff:3/category", json={"category": "Food", "make_rule": True}).json()["in_firefly"]
+    assert ff.data["1"]["groups"][2]["attributes"]["transactions"][0]["category_name"] == "Food" and ff.data["1"]["rules"][0]["actions"][0]["value"] == "Food"
+    # accounts, transactions, a bank CSV twice
+    acc = c.post("/api/accounts", json={"name": "Everyday", "institution": "Ally", "kind": "cash", "balance": 100}).json()
+    assert acc["id"].startswith("ff:") and ff.data["1"]["accounts"][-1]["attributes"]["name"] == "Ally - Everyday"
+    assert c.post("/api/accounts", json={"name": "Jar", "kind": "cash", "coinpile_only": True}).json()["source"] == "manual"
+    assert c.post("/api/transactions", json={"account_id": acc["id"], "date": "2026-11-09", "name": "Coffee", "amount": -4.5}).json()["id"].startswith("ff:")
+    csv = "Date,Description,Amount\n2026-11-01,GAS STATION,-40.00\n2026-11-02,GAS STATION,-40.00\n"
+    one = c.post(f"/api/import/bank-csv?account_id={acc['id']}", content=csv).json()
+    two = c.post(f"/api/import/bank-csv?account_id={acc['id']}", content=csv).json()
+    assert (one["added"], two["added"], two["already_there"]) == (2, 0, 2)
+
+
+def test_a_signed_firefly_webhook_makes_coinpile_read_at_once(tmp_path):
+    import hashlib, hmac, time as _t
+    ff = world()
+    a = app(tmp_path, ff)
+    c = signed_in(a)
+    url = c.get("/api/firefly/webhook").json()["url"]
+    path = url.split("testserver", 1)[1]
+    c.put("/api/settings", json={"ff_webhook_secret": "whsec-123"})
+    body = b'{"trigger":"STORE_TRANSACTION","content":{}}'
+    ts = int(_t.time())
+    sig = hmac.new(b"whsec-123", f"{ts}.".encode() + body, hashlib.sha3_256).hexdigest()
+    hook = TestClient(a)                                                                         # Firefly III has no Coinpile session
+    assert hook.post(path, content=body, headers={"Signature": f"t={ts},v1=deadbeef"}).status_code == 401
+    assert hook.post(path, content=body, headers={"Signature": f"t={ts - 3600},v1=" + hmac.new(b"whsec-123", f"{ts - 3600}.".encode() + body, hashlib.sha3_256).hexdigest()}).status_code == 401
+    assert hook.post("/hooks/firefly/not-a-key", content=body, headers={"Signature": f"t={ts},v1={sig}"}).status_code == 404
+    ff.tx("1", 60, "withdrawal", 7.25, "WEBHOOK LUNCH", 1, 95, "2026-11-10")
+    assert hook.post(path, content=body, headers={"Signature": f"t={ts},v1={sig}"}).status_code == 200
+    for _ in range(80):
+        if c.get("/api/transactions?q=webhook").json()["items"]:
+            break
+        _t.sleep(0.1)
+    assert c.get("/api/transactions?q=webhook").json()["items"][0]["amount"] == -7.25 and c.get("/api/firefly/webhook").json()["last"]

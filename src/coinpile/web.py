@@ -4,6 +4,7 @@ Sign in with your Firefly III account (its "Sign in with Firefly III" OAuth page
 local copy and their own Coinpile data (goals, notes, chats). Firefly III stays the source of truth: Coinpile reads it every few minutes.
 The Plaid connector, if you use one, can be driven from here too (see your banks, pull now, link a bank)."""
 import base64
+import hmac
 import hashlib
 import json
 import os
@@ -22,13 +23,13 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_links, api_money, importers, robinhood, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import agent, api_links, api_money, ffwrite, importers, robinhood, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"share", "rh_main_source", "refresh_minutes", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"share", "rh_main_source", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
 
 
@@ -337,17 +338,35 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             return links.flush(db, link_send)
 
         def shared_changed(gid: int | None = None, edited: bool = False) -> None:
+            """Something about goals changed: tell linked people, and (if switched on) keep the goals' Firefly III piggy banks in step."""
             try:
                 links.bump(db, me, gid) if edited and gid else links.push(db, me)
                 links.push_accounts(db)
                 link_flush()
             except Exception:
                 pass
+            if ctx.writer.on("piggies"):
+                try:
+                    ctx.writer.sync_goals()
+                    cfg.set_value(db, "ff_last_error", "")
+                except firefly.FireflyError as e:
+                    cfg.set_value(db, "ff_last_error", f"piggy banks: {e}")
 
         flushers[uid] = shared_changed
         ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
                                  link_flush=link_flush, link_people=users.handles)
         ctx.llm_transport = llm_transport
+
+        def read_back() -> None:
+            """After a change in Firefly III: read the recent part of it again so the screens show what Firefly III now holds."""
+            with locks.setdefault(uid, threading.Lock()):
+                f = ff_for(uid)
+                accts = firefly.sync_accounts(db, f)
+                firefly.sync_transactions(db, f, accts, today() - timedelta(days=120), today() + timedelta(days=30))
+                firefly.sync_bills(db, f, today())
+                firefly.sync_piggies(db, f)
+
+        ctx.writer = ffwrite.Writer(db, lambda: ff_for(uid), read_back, today)
 
         rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport)
 
@@ -380,11 +399,20 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             a = db.one("SELECT source FROM accounts WHERE id=?", (account_id,))
             if not a:
                 raise HTTPException(404, "account not found")
-            if a["source"] != "manual":
-                raise HTTPException(409, "that account comes from Firefly III: import into it in Firefly III (its Data Importer), or add an account in Coinpile for this")
             raw = await request.body()
             if len(raw) > 5_000_000:
                 raise HTTPException(413, "file too large")
+            if a["source"] == "firefly":
+                if not ctx.writer.on("accounts"):
+                    raise HTTPException(409, "that account comes from Firefly III: import into it there, switch on sending to Firefly III in Settings, Firefly III, or add an account in Coinpile for this")
+                try:
+                    return await run_in_threadpool(ctx.writer.import_csv, account_id, raw.decode("utf-8", "replace"), flip)
+                except ValueError as e:
+                    raise HTTPException(422, str(e))
+                except firefly.FireflyError as e:
+                    raise HTTPException(502, str(e))
+            if a["source"] != "manual":
+                raise HTTPException(409, "import into an account you added in Coinpile")
             try:
                 rows, bal = importers.parse_bank(raw.decode("utf-8", "replace"), flip)
             except ValueError as e:
@@ -414,6 +442,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             return {"firefly": {"address": ff_public, "email": u.get("email"), "signed_in_with": u.get("kind"), "last_refresh": cfg.get(db, "ff_last_refresh") or None,
                                 "last_error": cfg.get(db, "ff_last_error") or None, "refresh_minutes": int(float(cfg.get(db, "refresh_minutes") or 10)),
                                 "accounts": db.one("SELECT COUNT(*) n FROM accounts WHERE source='firefly'")["n"], "transactions": db.one("SELECT COUNT(*) n FROM transactions WHERE source='firefly'")["n"]},
+                    "sends": {k: cfg.get(db, v) == "on" for k, v in ffwrite.PARTS.items()},
                     "connector": {"configured": bool(cfg.get(db, "connector_url") and cfg.get(db, "connector_name") and cfg.get(db, "connector_token"))},
                     "caldav_configured": bool(cfg.get(db, "caldav_url")),
                     "robinhood": {"agent": ctx.robinhood.probe("agent"), "csv": "built-in", "live": ctx.robinhood.probe("live"),
@@ -459,6 +488,22 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         def summary_preview():
             """What the Pondering Orb would see (Settings, Home Assistant & API, Preview)."""
             return orb_summary(uid)
+
+        @app.get("/api/firefly/webhook")
+        def webhook_info(request: Request):
+            base = my_url or str(request.base_url).rstrip("/")
+            return {"url": f"{base}/hooks/firefly/{hook_key(uid)}", "secret_set": bool(cfg.get(db, "ff_webhook_secret")), "last": cfg.get(db, "ff_last_hook") or None}
+
+        @app.post("/api/firefly/sync-goals")
+        async def sync_goals_now():
+            if not ctx.writer.on("piggies"):
+                raise HTTPException(409, "switch on sending goals to Firefly III first")
+            try:
+                r = await run_in_threadpool(ctx.writer.sync_goals)
+                await run_in_threadpool(firefly.sync_piggies, db, ff_for(uid))
+                return r
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
 
         @app.get("/api/piggy-banks")
         def piggy_banks():
@@ -669,6 +714,40 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         if isinstance(out, dict):
             out["read_from_firefly_at"], out["refreshed"] = cfg.get(db, "ff_last_refresh") or None, refreshed
         return out
+
+    # ---------------- Firefly III webhooks: Firefly III tells Coinpile the moment a transaction is made, changed or deleted
+    def hook_key(uid: str) -> str:
+        db = person_db(uid)
+        k = cfg.get(db, "ff_hook_key")
+        if not k:
+            k = secrets.token_urlsafe(18)
+            cfg.set_value(db, "ff_hook_key", k)
+        return k
+
+    hook_seen: dict[str, float] = {}
+
+    @front.post("/hooks/firefly/{key}")
+    async def firefly_hook(key: str, request: Request):
+        """Signed by Firefly III with the webhook's secret: header Signature: t=<time>,v1=<HMAC-SHA3-256 of "<time>.<body>">. Anything else is ignored."""
+        uid = next((u["id"] for u in users.all() if cfg.get(person_db(u["id"]), "ff_hook_key") == key), None)
+        body = await request.body()
+        if not uid or len(body) > 2_000_000:
+            raise HTTPException(404, "unknown hook")
+        db = person_db(uid)
+        secret = cfg.get(db, "ff_webhook_secret")
+        parts = dict(p.split("=", 1) for p in request.headers.get("signature", "").split(",") if "=" in p)
+        try:
+            t = int(parts.get("t", "0"))
+        except ValueError:
+            t = 0
+        want = hmac.new(secret.encode(), f"{t}.".encode() + body, hashlib.sha3_256).hexdigest() if secret else ""
+        if not secret or not hmac.compare_digest(want, parts.get("v1", "")) or abs(time.time() - t) > 600:
+            raise HTTPException(401, "bad signature")
+        cfg.set_value(db, "ff_last_hook", sync.now())
+        if time.time() - hook_seen.get(uid, 0) > 5:                   # a burst (a CSV import in Firefly III) becomes one read
+            hook_seen[uid] = time.time()
+            threading.Timer(3.0, lambda: refresh_soon(uid)).start()
+        return {"ok": True}
 
     # ---------------- signing in
     def signed_in(response: Response, request: Request, uid: str) -> None:

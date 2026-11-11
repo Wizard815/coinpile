@@ -81,7 +81,9 @@ def register(app, ctx):
     @app.post("/api/goals")
     def goal_add(request: Request, g: GoalIn):
         auth(request)
-        return run(plan.add_goal, store, g.name, g.target, ctx.today(), g.deadline, g.priority, g.monthly, g.note, g.auto_allocate)
+        r = run(plan.add_goal, store, g.name, g.target, ctx.today(), g.deadline, g.priority, g.monthly, g.note, g.auto_allocate)
+        ctx.shared_changed()
+        return r
 
     @app.put("/api/goals/{gid}")
     def goal_update(request: Request, gid: int, g: GoalPatch):

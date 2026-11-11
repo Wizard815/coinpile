@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS snapshots(ts TEXT, account_id TEXT, balance REAL);
 CREATE TABLE IF NOT EXISTS events(  -- the money-movement log that feeds the Atom/RSS feed
   id TEXT PRIMARY KEY, ts TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, amount REAL, account_id TEXT, detail TEXT);
 CREATE INDEX IF NOT EXISTS ev_ts ON events(ts DESC);
-CREATE TABLE IF NOT EXISTS ff_piggy(id TEXT PRIMARY KEY, data TEXT NOT NULL);   -- Firefly III piggy banks, as last read
+CREATE TABLE IF NOT EXISTS ff_piggy(id TEXT PRIMARY KEY, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS ff_goal_piggy(goal_id INTEGER PRIMARY KEY, piggy_id TEXT NOT NULL, sig TEXT);   -- goals sent to Firefly III as piggy banks   -- Firefly III piggy banks, as last read
 """
 
 
@@ -62,7 +63,7 @@ COLUMNS = {  # added after the first release: (table, column) -> DDL fragment
     ("subscriptions", "account_id"): "TEXT", ("subscriptions", "payment_method"): "TEXT DEFAULT ''",
     ("subscriptions", "payer"): "TEXT DEFAULT 'me'", ("subscriptions", "payer_name"): "TEXT DEFAULT ''",
     ("subscriptions", "notify_days"): "INTEGER DEFAULT 3", ("subscriptions", "end_date"): "TEXT", ("subscriptions", "created"): "TEXT", ("subscriptions", "match_key"): "TEXT", ("incomes", "match_key"): "TEXT",
-    ("transactions", "plaid_category"): "TEXT", ("transactions", "category_locked"): "INTEGER DEFAULT 0", ("transactions", "notes"): "TEXT DEFAULT ''",
+    ("transactions", "plaid_category"): "TEXT", ("transactions", "category_locked"): "INTEGER DEFAULT 0", ("transactions", "notes"): "TEXT DEFAULT ''", ("transactions", "ff_group"): "TEXT",
     ("accounts", "min_balance"): "REAL", ("accounts", "subtype"): "TEXT", ("accounts", "savings_pool"): "INTEGER", ("accounts", "mask"): "TEXT", ("plaid_items", "last_sync"): "REAL", ("plaid_items", "last_slow"): "REAL", ("plaid_items", "schedule"): "TEXT", ("plaid_items", "category"): "TEXT", ("accounts", "category"): "TEXT", ("plaid_items", "last_hook"): "REAL", ("plaid_items", "status"): "TEXT", ("plaid_items", "status_detail"): "TEXT", ("plaid_items", "hook_url"): "TEXT", ("plaid_items", "recurring"): "TEXT", ("accounts", "joint_with"): "TEXT", ("accounts", "my_share"): "REAL", ("goals", "shared_id"): "TEXT", ("goals", "members"): "TEXT", ("goals", "shared_state"): "TEXT", ("goals", "rev"): "INTEGER DEFAULT 0", ("goals", "edited_by"): "TEXT", ("goals", "sent_sig"): "TEXT", ("accounts", "nickname"): "TEXT", ("accounts", "pinned"): "INTEGER DEFAULT 0", ("providers", "context_tokens"): "INTEGER DEFAULT 8192",
 }
 DEFAULT_CATEGORIES = [("Income", "income"), ("Food", "expense"), ("Groceries", "expense"), ("Clothes", "expense"), ("Fun", "expense"), ("Games", "expense"),

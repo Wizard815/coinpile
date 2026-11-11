@@ -41,6 +41,26 @@ class Firefly:
         except ValueError:
             raise FireflyError("Firefly III sent something that is not JSON: is this the right address?")
 
+    def send(self, method: str, path: str, body: dict | None = None) -> dict:
+        """A change in Firefly III: only for the parts the person switched on, and only because of something they did in Coinpile (see ffwrite.py)."""
+        try:
+            r = self.c.request(method, self.base + path, json=body, headers={"Content-Type": "application/json"})
+        except httpx.HTTPError as e:
+            raise FireflyError(f"could not reach Firefly III ({type(e).__name__})")
+        if r.status_code in (401, 403):
+            raise TokenRefused("Firefly III refused the change: sign in again.")
+        if r.status_code == 204 or not r.content:
+            return {}
+        try:
+            d = r.json()
+        except ValueError:
+            d = {}
+        if r.status_code >= 400:
+            errs = d.get("errors") or {}
+            first = next((v[0] for v in errs.values() if v), None) if isinstance(errs, dict) else None
+            raise FireflyError(f"Firefly III did not accept it ({r.status_code}): {first or d.get('message') or ''}".rstrip(": "))
+        return d
+
     def pages(self, path: str, **params):
         page = 1
         while True:
@@ -134,7 +154,7 @@ def tx_rows(group: dict, mine: set[str]) -> list[dict]:
         src, dst = str(s.get("source_id") or ""), str(s.get("destination_id") or "")
         both = src in mine and dst in mine
         cat = s.get("category_name") or ("Transfer" if both or (s.get("type") or "").lower() == "reconciliation" else None)
-        base = {"date": str(s["date"])[:10], "currency": s.get("currency_code") or "USD", "notes": s.get("notes") or "", "type": s.get("type")}
+        base = {"date": str(s["date"])[:10], "currency": s.get("currency_code") or "USD", "notes": s.get("notes") or "", "type": s.get("type"), "group": str(group["id"])}
         if src in mine:
             out.append({**base, "id": f"ff:{jid}" + (":out" if both else ""), "account_id": f"ff:{src}", "amount": -amt,
                         "name": s.get("description") or s.get("destination_name") or "", "category": cat or "Misc"})
@@ -158,10 +178,10 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
             for r in tx_rows(g, mine):
                 seen.add(r["id"])
                 cats.add(r["category"])
-                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes) VALUES(?,?,?,?,?,?,?,0,'firefly',1,?)
+                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group) VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?)
                              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,date=excluded.date,name=excluded.name,amount=excluded.amount,
-                             currency=excluded.currency,category=excluded.category,notes=excluded.notes""",
-                          (r["id"], r["account_id"], r["date"], r["name"][:255], r["amount"], r["currency"], r["category"], r["notes"]))
+                             currency=excluded.currency,category=excluded.category,notes=excluded.notes,ff_group=excluded.ff_group""",
+                          (r["id"], r["account_id"], r["date"], r["name"][:255], r["amount"], r["currency"], r["category"], r["notes"], r["group"]))
                 if r["id"] not in known and r["date"] >= recent:          # new and recent: it goes in the "latest movement" list and the feed
                     inst = (accounts.get(r["account_id"][3:]) or {}).get("institution", "")
                     c.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (f"tx:{r['id']}", f"{r['date']}T00:00:00+00:00", "transaction",
