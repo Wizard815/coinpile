@@ -103,43 +103,73 @@ def _num(v) -> float:
         return 0.0
 
 
-def account_row(a: dict) -> dict | None:
-    at = a["attributes"]
+def _pc(at: dict, field: str, own: str | None, primary: str | None) -> tuple[float, str | None, bool]:
+    """A money field of a Firefly III object in the person's primary currency when Firefly III gave it (its pc_* twin).
+    Returns (value, the currency that value is in, whether it was converted). Without a pc_* value (the person has "convert to primary"
+    off) the value stays in the object's own currency."""
+    if primary and own and own != primary and at.get("pc_" + field) not in (None, ""):
+        return _num(at.get("pc_" + field)), primary, True
+    return _num(at.get(field)), own or primary, False
+
+
+def account_row(a: dict, primary: str | None = None) -> dict | None:
+    at = a.get("attributes") or {}
     if not at.get("active", True):
         return None
-    inst, name, mask = split_name(at["name"])
-    if at["type"] == "asset":
+    primary = at.get("primary_currency_code") or primary
+    own = at.get("currency_code") or primary or "USD"          # an account with no currency of its own is kept in the primary currency
+    inst, name, mask = split_name(at.get("name") or f"Account {a.get('id')}")
+    typ = at.get("type")
+    if typ == "asset":
         kind, subtype = ROLE.get(at.get("account_role") or "", ("cash", "checking"))
-        bal = _num(at.get("current_balance"))
+        bal, cur, conv = _pc(at, "current_balance", own, primary)
+        nat = _num(at.get("current_balance"))
         if kind == "credit":
-            bal = -bal                                   # Firefly III: owed on a card is negative; here a card's balance is what you owe
-    elif at["type"] in ("liabilities", "liability", "loan", "debt", "mortgage"):
+            bal, nat = -bal, -nat                        # Firefly III: owed on a card is negative; here a card's balance is what you owe
+    elif typ in ("liabilities", "liability", "loan", "debt", "mortgage"):
         kind, subtype = "loan", at.get("liability_type") or "loan"
-        bal = abs(_num(at.get("debt_amount")) or _num(at.get("current_balance")))
+        debt, cur, conv = _pc(at, "debt_amount", own, primary)
+        cb, cur2, conv2 = _pc(at, "current_balance", own, primary)
+        if not debt:
+            debt, cur, conv = cb, cur2, conv2
+        bal, nat = abs(debt), abs(_num(at.get("debt_amount")) or _num(at.get("current_balance")))
         if (at.get("liability_direction") or "credit") == "debit":
             kind, subtype = "cash", "owed to you"                # money someone owes you counts for you
     else:
         return None
     return {"id": f"ff:{a['id']}", "ff_id": str(a["id"]), "institution": inst, "name": name, "mask": mask, "kind": kind, "subtype": subtype,
-            "balance": round(bal, 2), "currency": at.get("currency_code") or "USD", "notes": at.get("notes") or ""}
+            "balance": round(bal, 2), "currency": cur or "USD", "own_currency": own,
+            "native_balance": round(nat, 2) if conv else None, "native_currency": own if conv else None,
+            "in_net_worth": 0 if at.get("include_net_worth") is False else 1, "notes": at.get("notes") or ""}
+
+
+def primary_currency(db) -> str:
+    return cfg.get(db, "currency") or "USD"
 
 
 def sync_accounts(db, ff: Firefly) -> dict[str, dict]:
-    rows = {}
+    rows, raw = {}, []
     for t in ("asset", "liabilities"):
-        for a in ff.pages("/accounts", type=t):
-            r = account_row(a)
-            if r:
-                rows[r["ff_id"]] = r
+        raw += list(ff.pages("/accounts", type=t))
+    primary = next((x["attributes"].get("primary_currency_code") for x in raw if (x.get("attributes") or {}).get("primary_currency_code")), None)
+    for a in raw:
+        r = account_row(a, primary)
+        if r:
+            rows[r["ff_id"]] = r
+    if primary:
+        cfg.set_value(db, "currency", primary)
     with db.tx() as c:
         for r in rows.values():
-            c.execute("""INSERT INTO accounts(id,item_id,source,institution,name,kind,balance,currency,updated,subtype,mask) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            c.execute("""INSERT INTO accounts(id,item_id,source,institution,name,kind,balance,currency,updated,subtype,mask,native_balance,native_currency,in_net_worth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                          ON CONFLICT(id) DO UPDATE SET institution=excluded.institution,name=excluded.name,kind=excluded.kind,balance=excluded.balance,
-                         currency=excluded.currency,updated=excluded.updated,subtype=excluded.subtype,mask=excluded.mask""",
-                      (r["id"], None, "firefly", r["institution"], r["name"], r["kind"], r["balance"], r["currency"], sync.now(), r["subtype"], r["mask"]))
+                         currency=excluded.currency,updated=excluded.updated,subtype=excluded.subtype,mask=excluded.mask,native_balance=excluded.native_balance,
+                         native_currency=excluded.native_currency,in_net_worth=excluded.in_net_worth""",
+                      (r["id"], None, "firefly", r["institution"], r["name"], r["kind"], r["balance"], r["currency"], sync.now(), r["subtype"], r["mask"],
+                       r["native_balance"], r["native_currency"], r["in_net_worth"]))
         gone = [x["id"] for x in db.all("SELECT id FROM accounts WHERE source='firefly'") if x["id"][3:] not in rows]
         for aid in gone:                                                     # removed or closed in Firefly III
             c.execute("DELETE FROM transactions WHERE account_id=?", (aid,))
+            c.execute("DELETE FROM snapshots WHERE account_id=?", (aid,))
             c.execute("DELETE FROM accounts WHERE id=?", (aid,))
     for r in rows.values():
         sync.record_balance(db, r["id"], r["name"], r["balance"], r["kind"])
@@ -147,44 +177,82 @@ def sync_accounts(db, ff: Firefly) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------- transactions
-def tx_rows(group: dict, mine: set[str]) -> list[dict]:
+def _leg_money(s: dict, leg_cur: str | None, primary: str | None) -> tuple[float, str | None, float | None, str | None]:
+    """One side of a journal: (amount in the primary currency where Firefly III gave a conversion, its currency, the account's own amount, its currency).
+    Firefly III keeps `amount` in the currency of the journal (the source account's for a withdrawal or transfer, the destination's for a deposit) and,
+    across currencies, `foreign_amount` in the other account's currency."""
+    cur, fcur = s.get("currency_code") or primary, s.get("foreign_currency_code")
+    has_foreign = fcur and s.get("foreign_amount") not in (None, "")
+    if leg_cur and has_foreign and fcur == leg_cur and fcur != cur:
+        nat, ncur, pc = abs(_num(s.get("foreign_amount"))), fcur, s.get("pc_foreign_amount")
+    else:
+        nat, ncur, pc = abs(_num(s.get("amount"))), cur, s.get("pc_amount")
+    if not primary or not ncur or ncur == primary:
+        return nat, ncur or primary, None, None
+    if has_foreign and fcur == primary:
+        return abs(_num(s.get("foreign_amount"))), primary, nat, ncur
+    if cur == primary:
+        return abs(_num(s.get("amount"))), primary, nat, ncur
+    if pc not in (None, ""):
+        return abs(_num(pc)), primary, nat, ncur
+    return nat, ncur, None, None                         # no conversion from Firefly III: kept (and shown) in its own currency
+
+
+def tx_rows(group: dict, mine, primary: str | None = None) -> list[dict]:
+    """The rows one Firefly III transaction group gives: one per split and side that is one of your accounts.
+    `mine` is the set of your Firefly III account ids, or {id: account row} so each side is read in that account's own currency."""
     out = []
-    for s in group["attributes"]["transactions"]:
-        if (s.get("type") or "").lower() in ("opening balance", "liability credit"):
+    for s in (group.get("attributes") or {}).get("transactions") or []:
+        typ = (s.get("type") or "").lower()
+        if typ in ("opening balance", "liability credit"):
             continue                                    # a starting balance, not money that moved: the account balance already holds it
-        jid, amt = s["transaction_journal_id"], abs(_num(s.get("amount")))
+        jid = s["transaction_journal_id"]
         src, dst = str(s.get("source_id") or ""), str(s.get("destination_id") or "")
         both = src in mine and dst in mine
-        cat = s.get("category_name") or ("Transfer" if both or (s.get("type") or "").lower() == "reconciliation" else None)
-        base = {"date": str(s["date"])[:10], "currency": s.get("currency_code") or "USD", "notes": s.get("notes") or "", "type": s.get("type"), "group": str(group["id"])}
-        if src in mine:
-            out.append({**base, "id": f"ff:{jid}" + (":out" if both else ""), "account_id": f"ff:{src}", "amount": -amt,
-                        "name": s.get("description") or s.get("destination_name") or "", "category": cat or "Misc"})
-        if dst in mine:
-            out.append({**base, "id": f"ff:{jid}" + (":in" if both else ""), "account_id": f"ff:{dst}", "amount": amt,
-                        "name": s.get("description") or s.get("source_name") or "", "category": cat or "Income"})
+        # Between two of your own accounts (a transfer, paying a card, paying a loan) the money arriving is never income or spending. The side it
+        # leaves keeps its category only for a withdrawal (Firefly III counts paying a liability as an expense); a transfer is never spending.
+        own_cat = s.get("category_name") or None
+        if both or typ == "transfer":                   # a transfer is between your own accounts even when one of them is closed (not read)
+            out_cat = (own_cat if typ == "withdrawal" else None) or "Transfer"
+        else:
+            out_cat = own_cat or ("Transfer" if typ == "reconciliation" else "Misc")
+        in_cat = "Transfer" if both or typ == "transfer" else own_cat or ("Transfer" if typ == "reconciliation" else "Income")
+        base = {"date": str(s.get("date") or "")[:10], "notes": s.get("notes") or "", "type": s.get("type"), "group": str(group["id"]),
+                "bill": str(s.get("subscription_id") or s.get("bill_id") or "") or None}
+        cur_of = (lambda aid: (mine.get(aid) or {}).get("own_currency")) if isinstance(mine, dict) else (lambda aid: None)
+        for aid, sign, suffix, cat, fallback in ((src, -1, ":out", out_cat, "destination_name"), (dst, 1, ":in", in_cat, "source_name")):
+            if aid not in mine:
+                continue
+            amt, cur, nat, ncur = _leg_money(s, cur_of(aid), primary)
+            out.append({**base, "id": f"ff:{jid}" + (suffix if both else ""), "account_id": f"ff:{aid}", "amount": sign * amt, "currency": cur or "USD",
+                        "native_amount": sign * nat if nat is not None else None, "native_currency": ncur,
+                        "name": s.get("description") or s.get(fallback) or "", "category": cat})
     return out
 
 
 def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: date) -> dict:
     """All transactions between start and end (all of them when start is None). Local rows in that window that Firefly III no longer has are removed."""
-    mine, seen, n = set(accounts), set(), 0
+    mine, seen, n = accounts, set(), 0
+    primary = cfg.get(db, "currency") or None
     known = {r["id"] for r in db.all("SELECT id FROM transactions WHERE source='firefly'")}
     recent = (end - timedelta(days=45)).isoformat()
     params = {"end": end.isoformat(), "type": "all"}
     if start:
         params["start"] = start.isoformat()
-    cats = set()
+    cats: dict[str, set] = {}
     groups = list(ff.pages("/transactions", **params))           # read everything first: the person's database is not held while Firefly III answers
     with db.tx() as c:
         for g in groups:
-            for r in tx_rows(g, mine):
+            for r in tx_rows(g, mine, primary):
                 seen.add(r["id"])
-                cats.add(r["category"])
-                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group) VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?)
+                cats.setdefault(r["category"], set()).add("in" if r["amount"] > 0 and (r["type"] or "").lower() == "deposit" else "out")
+                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill)
+                             VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?,?,?,?)
                              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,date=excluded.date,name=excluded.name,amount=excluded.amount,
-                             currency=excluded.currency,category=excluded.category,notes=excluded.notes,ff_group=excluded.ff_group""",
-                          (r["id"], r["account_id"], r["date"], r["name"][:255], r["amount"], r["currency"], r["category"], r["notes"], r["group"]))
+                             currency=excluded.currency,category=excluded.category,notes=excluded.notes,ff_group=excluded.ff_group,native_amount=excluded.native_amount,
+                             native_currency=excluded.native_currency,ff_bill=excluded.ff_bill""",
+                          (r["id"], r["account_id"], r["date"], r["name"][:255], r["amount"], r["currency"], r["category"], r["notes"], r["group"],
+                           r["native_amount"], r["native_currency"], r["bill"]))
                 if r["id"] not in known and r["date"] >= recent:          # new and recent: it goes in the "latest movement" list and the feed
                     inst = (accounts.get(r["account_id"][3:]) or {}).get("institution", "")
                     c.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (f"tx:{r['id']}", f"{r['date']}T00:00:00+00:00", "transaction",
@@ -197,8 +265,9 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
         removed = [x["id"] for x in db.all(q, tuple(a)) if x["id"] not in seen]
         for tid in removed:
             c.execute("DELETE FROM transactions WHERE id=?", (tid,))
-        for cat in cats:
-            c.execute("INSERT OR IGNORE INTO categories(name,kind,builtin) VALUES(?,?,0)", (cat, "income" if cat == "Income" else "transfer" if cat == "Transfer" else "expense"))
+        for cat, ways in cats.items():                  # a new category only ever seen on deposits (Salary, Dividends...) is income, not spending
+            kind = "income" if cat == "Income" or ways == {"in"} else "transfer" if cat == "Transfer" else "expense"
+            c.execute("INSERT OR IGNORE INTO categories(name,kind,builtin) VALUES(?,?,0)", (cat, kind))
     return {"transactions": n, "removed": len(removed)}
 
 
@@ -206,28 +275,62 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
 FREQ = {"daily": (1, "day"), "weekly": (1, "week"), "monthly": (1, "month"), "quarterly": (3, "month"), "half-year": (6, "month"), "yearly": (1, "year")}
 
 
+def bill_row(b: dict, today: date, primary: str | None = None) -> tuple | None:
+    """A Firefly III bill as a subscription row, or None when it has no name. Missing amounts, dates or frequency fall back to sensible defaults."""
+    at = b.get("attributes") or {}
+    if not at.get("name"):
+        return None
+    every, unit = FREQ.get(at.get("repeat_freq") or "monthly", (1, "month"))
+    try:
+        every *= max(0, int(at.get("skip") or 0)) + 1
+    except (TypeError, ValueError):
+        pass
+    try:
+        anchor = date.fromisoformat(str(at.get("date"))[:10])
+    except ValueError:
+        anchor = today
+    end = str(at.get("end_date"))[:10] if at.get("end_date") else None
+    nxt = next((str(p)[:10] for p in (at.get("pay_dates") or []) if str(p)[:10] >= today.isoformat()), None)
+    if not nxt:
+        n = recur.next_due(anchor, every, unit, today)
+        nxt = (n or anchor).isoformat()
+        if end and nxt > end:
+            nxt = end                                        # an ended bill: its last date, not a date after the end
+    primary = at.get("primary_currency_code") or primary
+    own = at.get("currency_code") or primary or "USD"
+    amt, cur, conv = _pc(at, "amount_avg", own, primary)
+    if not amt:
+        lo, cur, conv = _pc(at, "amount_min", own, primary)
+        hi, _, _ = _pc(at, "amount_max", own, primary)
+        amt = (lo + hi) / 2 if lo and hi else lo or hi
+    nat = abs(_num(at.get("amount_avg")) or (_num(at.get("amount_min")) + _num(at.get("amount_max"))) / 2) if conv else None
+    return (str(at["name"])[:120], round(abs(amt), 2), cur or "USD", recur.label(every, unit), every, unit, nxt, int(bool(at.get("active", True))), end, at.get("notes") or "",
+            round(nat, 2) if nat is not None else None, own if conv else None)
+
+
 def sync_bills(db, ff: Firefly, today: date) -> int:
     seen = set()
+    primary = cfg.get(db, "currency") or None
+    bills = list(ff.pages("/bills", start=today.isoformat(), end=(today + timedelta(days=400)).isoformat()))
+    # The category its payments carry in Firefly III (Rent paid as Housing): so a forecast does not expect the bill under Subscriptions as well
+    paid_as = {}
+    for r in db.all("SELECT t.ff_bill, t.category, COUNT(*) n FROM transactions t JOIN categories k ON k.name=t.category WHERE coalesce(t.ff_bill,'') != '' AND t.amount < 0 "
+                    "AND k.kind = 'expense' GROUP BY t.ff_bill, t.category ORDER BY n"):
+        paid_as[r["ff_bill"]] = r["category"]
     with db.tx() as c:
-        for b in ff.pages("/bills", start=today.isoformat(), end=(today + timedelta(days=400)).isoformat()):
-            at = b["attributes"]
-            every, unit = FREQ.get(at.get("repeat_freq") or "monthly", (1, "month"))
-            every *= int(at.get("skip") or 0) + 1
-            anchor = date.fromisoformat(str(at["date"])[:10])
-            nxt = next((str(p)[:10] for p in (at.get("pay_dates") or []) if str(p)[:10] >= today.isoformat()), None)
-            if not nxt:
-                n = recur.next_due(anchor, every, unit, today)
-                nxt = (n or anchor).isoformat()
-            amt = abs(_num(at.get("amount_avg")) or (_num(at.get("amount_min")) + _num(at.get("amount_max"))) / 2)
+        for b in bills:
+            row = bill_row(b, today, primary)
+            if not row:
+                continue
             key = f"ff-bill:{b['id']}"
             seen.add(key)
-            row = (at["name"][:120], round(amt, 2), at.get("currency_code") or "USD", recur.label(every, unit), every, unit, nxt, int(bool(at.get("active", True))),
-                   (str(at.get("end_date"))[:10] if at.get("end_date") else None), at.get("notes") or "")
-            c.execute("""INSERT INTO subscriptions(name,amount,currency,cycle,every,unit,next_date,active,end_date,notes,source,plaid_stream_id,category,created)
-                         VALUES(?,?,?,?,?,?,?,?,?,?,'firefly',?,'Subscriptions',?)
+            cat = paid_as.get(str(b["id"]))
+            c.execute("""INSERT INTO subscriptions(name,amount,currency,cycle,every,unit,next_date,active,end_date,notes,native_amount,native_currency,source,plaid_stream_id,category,created)
+                         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'firefly',?,coalesce(?,'Subscriptions'),?)
                          ON CONFLICT(plaid_stream_id) DO UPDATE SET name=excluded.name,amount=excluded.amount,currency=excluded.currency,cycle=excluded.cycle,
-                         every=excluded.every,unit=excluded.unit,next_date=excluded.next_date,active=excluded.active,end_date=excluded.end_date,notes=excluded.notes""",
-                      row + (key, sync.now()))
+                         every=excluded.every,unit=excluded.unit,next_date=excluded.next_date,active=excluded.active,end_date=excluded.end_date,notes=excluded.notes,
+                         native_amount=excluded.native_amount,native_currency=excluded.native_currency,category=coalesce(?,subscriptions.category)""",
+                      row + (key, cat, sync.now(), cat))
         for r in db.all("SELECT id, plaid_stream_id k FROM subscriptions WHERE source='firefly'"):
             if r["k"] not in seen:
                 c.execute("DELETE FROM subscriptions WHERE id=?", (r["id"],))
@@ -235,14 +338,24 @@ def sync_bills(db, ff: Firefly, today: date) -> int:
 
 
 # ---------------------------------------------------------------- piggy banks
+def piggy_row(p: dict, primary: str | None = None) -> dict:
+    at = p.get("attributes") or {}
+    primary = at.get("primary_currency_code") or primary
+    own = at.get("currency_code") or primary or "USD"
+    target, cur, _ = _pc(at, "target_amount", own, primary)
+    accts = []
+    for x in at.get("accounts") or []:
+        if not isinstance(x, dict) or not x.get("account_id"):
+            continue
+        accts.append({"account_id": f"ff:{x['account_id']}", "name": x.get("name") or "", "amount": _pc(x, "current_amount", own, primary)[0]})
+    return {"id": str(p["id"]), "name": at.get("name") or f"Piggy bank {p['id']}", "target": target or None, "current": _pc(at, "current_amount", own, primary)[0],
+            "currency": cur or "USD", "target_date": str(at["target_date"])[:10] if at.get("target_date") else None, "active": bool(at.get("active", True)),
+            "accounts": accts, "save_per_month": _pc(at, "save_per_month", own, primary)[0] or None, "notes": at.get("notes") or ""}
+
+
 def sync_piggies(db, ff: Firefly) -> int:
-    rows = []
-    for p in ff.pages("/piggy-banks"):
-        at = p["attributes"]
-        rows.append({"id": str(p["id"]), "name": at["name"], "target": _num(at.get("target_amount")) or None, "current": _num(at.get("current_amount")),
-                     "target_date": str(at["target_date"])[:10] if at.get("target_date") else None, "active": bool(at.get("active", True)),
-                     "accounts": [{"account_id": f"ff:{x['account_id']}", "name": x.get("name"), "amount": _num(x.get("current_amount"))} for x in at.get("accounts") or []],
-                     "save_per_month": _num(at.get("save_per_month")) or None, "notes": at.get("notes") or ""})
+    primary = cfg.get(db, "currency") or None
+    rows = [piggy_row(p, primary) for p in ff.pages("/piggy-banks")]
     with db.tx() as c:
         c.execute("DELETE FROM ff_piggy")
         c.executemany("INSERT INTO ff_piggy(id, data) VALUES(?,?)", [(r["id"], json.dumps(r)) for r in rows])
@@ -268,7 +381,10 @@ def sync_history(db, ff: Firefly, accounts: dict, today: date, days: int = HISTO
             continue                                         # an older Firefly III without this chart: the chart simply starts today
         if not sets:
             continue
-        entries = sets[0].get("entries") or {}
+        ds = sets[0] if isinstance(sets, list) and sets and isinstance(sets[0], dict) else {}
+        entries = ds.get("entries") or {}
+        if a.get("native_currency") and isinstance(ds.get("pc_entries"), dict) and ds["pc_entries"]:
+            entries = ds["pc_entries"]                       # an account in another currency: its history in the primary currency, like its balance
         rows, prev = [], None
         for day, v in sorted(entries.items() if isinstance(entries, dict) else []):
             bal = _num(v)
