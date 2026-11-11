@@ -23,7 +23,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_links, api_money, ffwrite, importers, netguard, robinhood, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import agent, api_links, api_money, ffwrite, importers, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 
@@ -233,7 +233,7 @@ def same_origin(scope) -> bool:
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
                caldav_transport=None, notify_transport=None, today=None, background: bool = False, client_id: str | None = None,
-               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None):
+               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None):
     ff_url = (firefly_url or os.environ.get("FIREFLY_URL", "")).rstrip("/")
     ff_public = (public_firefly_url or os.environ.get("FIREFLY_PUBLIC_URL", "") or ff_url).rstrip("/")
     client_id = client_id or os.environ.get("FIREFLY_CLIENT_ID", "")
@@ -330,6 +330,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     out["notify"] = notify.run(db, today(), (users.get(uid) or {}).get("email", ""), notify_transport)
             except Exception:
                 pass
+            send_hooks(uid, out)
             return out
         except firefly.TokenRefused as e:
             cfg.set_value(db, "ff_last_error", str(e))
@@ -363,15 +364,24 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         from datetime import datetime
         return (time.time() - datetime.fromisoformat(last).timestamp()) >= mins * 60
 
+    def send_hooks(uid: str, refreshed: dict | None = None) -> None:
+        """Queue what changed for this person's webhooks and send what is due. Never breaks the caller."""
+        try:
+            db = person_db(uid)
+            webhooks.collect(db, users.ensure_handle(uid), today(), refreshed)
+            webhooks.deliver(db, webhook_transport)
+        except Exception:
+            pass
+
     def loop():
         while True:
             time.sleep(60)
             for u in users.all():
-                if u.get("problem"):
-                    continue
                 try:
-                    if due(u["id"]):
-                        refresh(u["id"])
+                    if not u.get("problem") and due(u["id"]):
+                        refresh(u["id"])                  # also sends webhooks
+                    else:
+                        send_hooks(u["id"])               # CSV imports, goals, retries
                 except Exception:
                     pass
 
@@ -409,6 +419,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 link_flush()
             except Exception:
                 pass
+            threading.Thread(target=lambda: send_hooks(uid), daemon=True).start()
             if ctx.writer.on("piggies"):
                 try:
                     ctx.writer.sync_goals()
@@ -552,6 +563,57 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         def summary_preview():
             """What the Pondering Orb would see (Settings, Home Assistant & API, Preview)."""
             return orb_summary(uid)
+
+        webhooks.init(db)
+
+        class HookIn(BaseModel):
+            name: str = "Webhook"
+            url: str | None = None
+            events: list[str] | None = None
+            detail: bool | None = None
+            active: bool | None = None
+
+        def hook_err(fn):
+            try:
+                return fn()
+            except KeyError:
+                raise HTTPException(404, "no such webhook")
+            except (ValueError, netguard.Blocked) as e:
+                raise HTTPException(422, str(e))
+
+        @app.get("/api/webhooks")
+        def hooks_list():
+            return {"items": [webhooks.view(r) for r in db.all("SELECT * FROM webhooks ORDER BY id")], "events": webhooks.EVENTS}
+
+        @app.post("/api/webhooks")
+        def hooks_add(b: HookIn):
+            if not b.url or not b.events:
+                raise HTTPException(422, "an address and at least one event are required")
+            r = hook_err(lambda: webhooks.add(db, b.name, b.url, b.events, True if b.detail is None else b.detail))
+            webhooks.collect(db, users.ensure_handle(uid), today())          # from now on: what already happened is not sent
+            return r
+
+        @app.put("/api/webhooks/{hid}")
+        def hooks_update(hid: int, b: HookIn):
+            return hook_err(lambda: webhooks.update(db, hid, **b.model_dump()))
+
+        @app.delete("/api/webhooks/{hid}")
+        def hooks_delete(hid: int):
+            hook_err(lambda: webhooks.remove(db, hid))
+            return {"deleted": hid}
+
+        @app.post("/api/webhooks/{hid}/test")
+        async def hooks_test(hid: int):
+            if not db.one("SELECT 1 FROM webhooks WHERE id=? AND active=1", (hid,)):
+                raise HTTPException(404, "no such webhook (or it is switched off)")
+            webhooks.queue(db, users.ensure_handle(uid), "test", {"message": "Coinpile webhooks are working."}, {"message": "Coinpile webhooks are working."}, only_hook=hid)
+            r = await run_in_threadpool(webhooks.deliver, db, webhook_transport)
+            last = db.one("SELECT status FROM webhook_outbox WHERE hook_id=? ORDER BY id DESC LIMIT 1", (hid,))
+            return {"ok": r["sent"] > 0, "status": (last or {}).get("status")}
+
+        @app.get("/api/webhooks/{hid}/deliveries")
+        def hooks_log(hid: int):
+            return hook_err(lambda: webhooks.deliveries(db, hid) if db.one("SELECT 1 FROM webhooks WHERE id=?", (hid,)) else (_ for _ in ()).throw(KeyError(hid)))
 
         @app.get("/api/firefly/webhook")
         def webhook_info(request: Request):

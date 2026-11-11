@@ -701,11 +701,11 @@ async function viewRobinhood(root) {
 }
 
 /* ================================ SETTINGS (tabs) ================================ */
-const STABS = [["general", "General"], ["firefly", "Firefly III"], ["banks", "Banks"], ["links", "Sharing"], ["models", "Agent models"], ["api", "Home Assistant & API"], ["robinhood", "Robinhood"], ["alerts", "Alerts"], ["categories", "Categories"], ["calendar", "Calendar"]];
+const STABS = [["general", "General"], ["firefly", "Firefly III"], ["banks", "Banks"], ["links", "Sharing"], ["models", "Agent models"], ["api", "Home Assistant & API"], ["webhooks", "Webhooks"], ["robinhood", "Robinhood"], ["alerts", "Alerts"], ["categories", "Categories"], ["calendar", "Calendar"]];
 async function viewSettings(root, rerender) {
   add(root, h("div", { class: "tabs", role: "tablist" }, STABS.map(([id, t]) => h("button", { role: "tab", "aria-selected": id === S.settingsTab, class: id === S.settingsTab ? "on" : "", onclick: () => { S.settingsTab = id; rerender(); } }, t))));
   const body = h("div", { class: "stack" }); add(root, body);
-  await ({ general: tabGeneral, firefly: tabFirefly, banks: tabBanks, links: tabLinks, api: tabSharing, robinhood: tabRobinhood, calendar: tabCalendar, models: tabModels, categories: tabCategories, alerts: tabAlerts }[S.settingsTab] || tabGeneral)(body, rerender);
+  await ({ general: tabGeneral, firefly: tabFirefly, banks: tabBanks, links: tabLinks, api: tabSharing, webhooks: tabWebhooks, robinhood: tabRobinhood, calendar: tabCalendar, models: tabModels, categories: tabCategories, alerts: tabAlerts }[S.settingsTab] || tabGeneral)(body, rerender);
 }
 const saveCfg = async (body, rerender, msg = "Saved") => { try { await api("/api/settings", send("PUT", body)); toast(msg); rerender(); } catch (e) { fail(e); } };
 const withSecret = (body, key, id) => { if (val(id)) body[key] = val(id); return body; };
@@ -927,6 +927,30 @@ async function tabAlerts(root, rerender) {
 /* ---------- Sharing: the Pondering Orb, and API tokens for Home Assistant and scripts ---------- */
 const SHARE_LABELS = { net_worth: "Net worth", subscriptions: "Monthly subscription total", bills: "Bills due: totals for 7 and 30 days, and the next one", bill_list: "Bill list: each upcoming bill with its date, name and amount", alerts: "Alert counts", alert_list: "Alert list: the alert titles (these can name your accounts)", savings: "Savings: total, free, set aside", goals: "Goal names and progress", spending: "Spending: this month so far, projected, average income", robinhood_main: "Robinhood main balance", robinhood_agent: "Robinhood agent balance" };
 const haYaml = (url, tok) => `rest_command:\n  coinpile_refresh:\n    url: "${url}/api/v1/me/ha?refresh=1"\n    method: GET\n    headers:\n      Authorization: "Bearer ${tok}"\n\nrest:\n  - resource: ${url}/api/v1/me/ha\n    scan_interval: 900\n    headers:\n      Authorization: Bearer ${tok}\n    sensor:\n      - name: "Coinpile net worth"\n        value_template: "{{ value_json.net_worth }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile bills next 7 days"\n        value_template: "{{ value_json.bills_7d }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile free savings"\n        value_template: "{{ value_json.savings_free }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile alerts"\n        value_template: "{{ value_json.alerts_total }}"\n      - name: "Coinpile next bill"\n        value_template: "{{ value_json.next_bill_name }} {{ value_json.next_bill_date }}"\n`;
+async function tabWebhooks(root, rerender) {
+  const d = await api("/api/webhooks"), fresh = S.newHook;
+  const evBoxes = (cur, cls) => Object.entries(d.events).map(([k, t]) => h("label", { class: "check" }, h("input", { type: "checkbox", class: cls, value: k, checked: cur.includes(k) }), h("span", {}, h("b", {}, k), " ", h("span", { class: "muted" }, t))));
+  const picked = (cls) => [...document.querySelectorAll("." + cls + ":checked")].map((x) => x.value);
+  add(root,
+    h("div", { class: "panel" }, h("h3", {}, "Webhooks"),
+      h("p", { class: "muted small" }, "When something happens in your money, Coinpile sends a small signed JSON message to an address you choose: Home Assistant, n8n, Node-RED, a chat webhook, your own script. Each message has a Coinpile-Signature header (t=time,v1=HMAC-SHA256 of \"time.body\" with the webhook's secret). Turn off details to send only the event, without names or amounts."),
+      fresh ? h("div", { class: "alert info", style: "display:grid;gap:8px" }, h("b", {}, `Secret for ${fresh.name}. Copy it now, it is not shown again.`), h("div", { class: "url" }, h("code", {}, fresh.secret), h("button", { class: "btn", onclick: () => copy(fresh.secret) }, "Copy")),
+        h("button", { class: "btn sm", onclick: () => { S.newHook = null; rerender(); } }, "I copied it")) : null,
+      d.items.length ? d.items.map((w) => h("div", { class: "card", style: "margin-top:10px" },
+        h("div", { class: "bar" }, h("b", {}, w.name, w.active ? null : h("span", { class: "pill", style: "margin-left:8px" }, "off")), h("span", { class: "small muted" }, w.last_at ? `last ${w.last_status} ${ago(w.last_at)}` : "nothing sent yet")),
+        h("div", { class: "small muted", style: "overflow-wrap:anywhere" }, w.url), h("div", { class: "small" }, w.events.join(", "), w.detail ? "" : " · no details"),
+        h("div", { class: "chips", style: "margin-top:6px" },
+          h("button", { class: "btn sm", onclick: async () => { try { const r = await api(`/api/webhooks/${w.id}/test`, { method: "POST" }); toast(r.ok ? "Delivered" : "Not delivered: " + r.status); rerender(); } catch (e) { fail(e); } } }, "Test"),
+          h("button", { class: "btn sm", onclick: async () => { try { await api(`/api/webhooks/${w.id}`, send("PUT", { active: !w.active })); rerender(); } catch (e) { fail(e); } } }, w.active ? "Switch off" : "Switch on"),
+          h("button", { class: "btn sm", onclick: async () => { try { const l = await api(`/api/webhooks/${w.id}/deliveries`); toast(l.length ? l.slice(0, 5).map((x) => `${x.event} ${x.status || "waiting"}${x.done === 2 ? " (gave up)" : ""}`).join(" · ") : "Nothing sent yet"); } catch (e) { fail(e); } } }, "Recent"),
+          h("button", { class: "btn sm danger", onclick: sure(null, "Sure? Nothing more is sent to it", async () => { await api(`/api/webhooks/${w.id}`, { method: "DELETE" }); rerender(); }) }, "Delete")))) : h("p", { class: "muted" }, "No webhooks yet."),
+      h("form", { style: "display:grid;gap:10px;margin-top:14px", onsubmit: async (e) => { e.preventDefault(); const events = picked("wh-ev"); if (!events.length) return toast("Choose at least one event");
+        try { S.newHook = await api("/api/webhooks", send("POST", { name: val("wh-name"), url: val("wh-url"), events, detail: $("#wh-detail").checked })); rerender(); } catch (err) { fail(err); } } },
+        h("div", { class: "row", style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px" }, field("wh-name", "Name", "", { required: true, placeholder: "Home Assistant" }), field("wh-url", "Address", "", { type: "url", required: true, placeholder: "http://192.168.1.20:8123/api/webhook/coinpile" })),
+        h("div", { class: "small muted" }, "Send when:"), evBoxes(["transaction.new", "bill.due", "alert.new"], "wh-ev"),
+        h("label", { class: "check" }, h("input", { type: "checkbox", id: "wh-detail", checked: true }), "Include details (names and amounts)"),
+        h("div", {}, h("button", { class: "btn primary", type: "submit" }, "Add webhook")))));
+}
 async function tabSharing(root, rerender) {
   const [cfg, tk] = await Promise.all([api("/api/settings"), api("/api/tokens")]);
   const origin = S.demo ? "https://bank.example" : location.origin;
