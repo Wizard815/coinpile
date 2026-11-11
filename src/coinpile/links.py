@@ -262,7 +262,7 @@ def receive(db, me: str, sender: str, kind: str, p: dict) -> dict:
         return {"ignored": "not linked"}
     if kind == "leave":
         g = db.one("SELECT * FROM goals WHERE shared_id=?", (p.get("shared_id"),))
-        if g:
+        if g and sender in json.loads(g["members"] or "[]"):          # only a member can leave (and so make it private here)
             members = [m for m in json.loads(g["members"] or "[]") if m != sender]
             with db.tx() as c:
                 c.execute("DELETE FROM goal_partners WHERE goal_id=? AND peer=?", (g["id"], sender))
@@ -306,6 +306,8 @@ def _receive_goal(db, me: str, sender: str, p: dict) -> dict:
         return {"ignored": "malformed"}
     others = sorted(m for m in members if m != me)
     g = db.one("SELECT * FROM goals WHERE shared_id=?", (sid,))
+    if g and sender not in json.loads(g["members"] or "[]"):
+        return {"ignored": "not a member of that goal"}             # knowing a goal's shared_id is not enough to edit it
     with db.tx() as c:
         if not g:
             cur = c.execute("INSERT INTO goals(name,target,deadline,priority,monthly,note,status,created,closed,shared_id,members,shared_state,rev,edited_by) VALUES(?,?,?,?,0,'',?,?,?,?,?,'offered',?,?)",
@@ -318,12 +320,15 @@ def _receive_goal(db, me: str, sender: str, p: dict) -> dict:
                 c.execute("UPDATE goals SET name=?,target=?,deadline=?,priority=?,status=?,closed=?,members=?,rev=?,edited_by=? WHERE id=?",
                           (name, target, deadline, prio, status_, closed, json.dumps(others), rev, p.get("edited_by") or sender, gid))
         c.execute("INSERT INTO goal_partners(goal_id,peer,amount) VALUES(?,?,?) ON CONFLICT(goal_id,peer) DO UPDATE SET amount=excluded.amount", (gid, sender, contrib))
+        # Each member sends their own notes to everyone, so only the sender's own notes are taken from this message, and they are stored as the
+        # sender's whatever the payload says. A note can be removed only by its author, and only in this goal.
         for n in (p.get("notes") or [])[:MAX_NOTES]:
-            if not (isinstance(n, dict) and isinstance(n.get("id"), str) and len(n["id"]) <= 64 and n.get("author") in members and isinstance(n.get("ts"), str)):
+            if not (isinstance(n, dict) and isinstance(n.get("id"), str) and 1 <= len(n["id"]) <= 64 and n.get("author") == sender and isinstance(n.get("ts"), str)):
                 continue
             text = "" if n.get("deleted") else str(n.get("text", ""))[:2000]
-            c.execute("INSERT INTO goal_notes(id,goal_id,author,ts,text,deleted) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET text=excluded.text, deleted=excluded.deleted WHERE excluded.deleted=1 AND goal_notes.author=excluded.author",
-                      (n["id"], gid, n["author"], n["ts"][:40], text, 1 if n.get("deleted") else 0))
+            c.execute("INSERT INTO goal_notes(id,goal_id,author,ts,text,deleted) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET text=excluded.text, deleted=excluded.deleted "
+                      "WHERE excluded.deleted=1 AND goal_notes.author=excluded.author AND goal_notes.goal_id=excluded.goal_id",
+                      (n["id"], gid, sender, n["ts"][:40], text, 1 if n.get("deleted") else 0))
     return {"ok": True, "goal_id": gid}
 
 
