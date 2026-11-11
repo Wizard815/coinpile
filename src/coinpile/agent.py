@@ -6,6 +6,7 @@ import ipaddress
 import json
 import operator
 import re
+from contextlib import nullcontext
 from datetime import date, timedelta
 from urllib.parse import urlparse
 
@@ -345,6 +346,15 @@ def context_usage(ctx, prov: dict, summary: str, msgs: list[dict], use_tools: bo
     return {"used": used, "limit": limit, "pct": round(used / limit, 3)}
 
 
+CHAT_TIMEOUT = 120          # seconds a model may take for one answer (each call also holds one of the person's outbound slots meanwhile)
+
+
+def outbound(ctx):
+    """One of the person's outbound slots (netguard.Slots) while a model server is being asked; none in plain unit tests."""
+    slots = getattr(ctx, "outbound", None)
+    return slots.hold() if slots else nullcontext()
+
+
 def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8, summary: str = "", use_tools: bool | None = None, extra: str = "") -> dict:
     tools = build_tools(ctx)
     by_name = {n: f for n, _, _, f in tools}
@@ -359,7 +369,7 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
         snap = {n: by_name[n]({}) for n in ("get_overview", "list_accounts", "list_subscriptions", "upcoming_bills", "savings_summary", "find_recurring_payments", "budget_status")}
         system += "\nYou have no tools. Here is a snapshot of the user's data as JSON:\n" + json.dumps(snap, default=str)[:14000]
     msgs, trace = [dict(m) for m in history], []
-    with netguard.client(ctx.llm_transport, timeout=300) as http:
+    with netguard.client(ctx.llm_transport, timeout=CHAT_TIMEOUT) as http:
         for step in range(max_steps):
             out = call(http, prov, key, system, msgs, tools if use_tools else None)
             if not out["tool_calls"]:
@@ -563,7 +573,8 @@ def register(app, ctx):
         if b.kind not in ("openai", "anthropic") or urlparse(b.base_url).scheme not in ("http", "https") or not urlparse(b.base_url).hostname:
             raise HTTPException(422, "pick a server type and a valid address")
         try:
-            found = list_models(b.kind, b.base_url, discover_key(b), ctx.llm_transport)
+            with outbound(ctx):
+                found = list_models(b.kind, b.base_url, discover_key(b), ctx.llm_transport)
         except httpx.HTTPStatusError as e:
             raise HTTPException(502, f"the server answered {e.response.status_code} when asked for its models" + (" (check the API key)" if e.response.status_code in (401, 403) else ""))
         except httpx.HTTPError as e:
@@ -573,7 +584,10 @@ def register(app, ctx):
     @app.post("/api/agent/model-info")
     def model_info(request: Request, b: Discover):
         auth(request)
-        return model_context(b.base_url, b.model or "", ctx.llm_transport) if b.kind == "openai" else {"context_tokens": None}
+        if b.kind != "openai":
+            return {"context_tokens": None}
+        with outbound(ctx):
+            return model_context(b.base_url, b.model or "", ctx.llm_transport)
 
     @app.get("/api/agent/tools")
     def tool_list(request: Request):
@@ -644,7 +658,7 @@ def register(app, ctx):
         prompt = ("Summarize this conversation so you can continue it later. Keep every number, name, decision and open question. Under 250 words.\n\n"
                   + (f"Earlier summary:\n{chat['summary']}\n\n" if chat["summary"] else "") + text)
         call = _call_anthropic if prov["kind"] == "anthropic" else _call_openai
-        with netguard.client(ctx.llm_transport, timeout=300) as http:
+        with netguard.client(ctx.llm_transport, timeout=CHAT_TIMEOUT) as http:
             out = call(http, prov, key, "You write concise, faithful conversation summaries.", [{"role": "user", "content": prompt}], None)
         summary = out["content"].strip()
         if not summary:
@@ -741,6 +755,10 @@ def register(app, ctx):
             raise HTTPException(422, "message is empty")
         row, local = pick_provider(b.provider_id or chat["provider_id"])
         key, use_tools = key_of(row), (bool(row["tools"]) if b.tools is None else b.tools)
+        with outbound(ctx):
+            return say(cid, chat, text, row, local, key, use_tools)
+
+    def say(cid, chat, text, row, local, key, use_tools):
         ts = sync.now()
         with store.tx() as c:
             mid = c.execute("INSERT INTO chat_messages(chat_id,role,content,created) VALUES(?,?,?,?)", (cid, "user", text, ts)).lastrowid
@@ -770,7 +788,8 @@ def register(app, ctx):
         if not chat:
             raise HTTPException(404, "chat not found")
         row, _ = pick_provider(chat["provider_id"])
-        done = model_errors(row, lambda: compact(chat, row, key_of(row), keep=2))
+        with outbound(ctx):
+            done = model_errors(row, lambda: compact(chat, row, key_of(row), keep=2))
         return {**chat_view(cid), "compacted": done}
 
     @app.post("/api/agent/chat")
@@ -781,7 +800,8 @@ def register(app, ctx):
         if not hist or hist[-1]["role"] != "user":
             raise HTTPException(422, "last message must be from the user")
         try:
-            out = run_chat(ctx, row, crypto.decrypt(row["key_enc"]) if row["key_enc"] else "", hist[-30:])
+            with outbound(ctx):
+                out = run_chat(ctx, row, crypto.decrypt(row["key_enc"]) if row["key_enc"] else "", hist[-30:])
         except httpx.HTTPStatusError as e:
             raise HTTPException(502, f"model server answered {e.response.status_code}")
         except httpx.HTTPError as e:

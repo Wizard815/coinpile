@@ -152,8 +152,8 @@ def cookie_of(scope) -> str | None:
 class Dispatch:
     """Everything under /api/ (and the calendar file) belongs to the signed-in person: it is handed to that person's own app, which only sees their database."""
 
-    def __init__(self, front, users: Users, person_app):
-        self.front, self.users, self.person_app = front, users, person_app
+    def __init__(self, front, users: Users, person_app, public_url: str = ""):
+        self.front, self.users, self.person_app, self.public_url = front, users, person_app, public_url
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -180,7 +180,7 @@ class Dispatch:
             uid = self.users.session_user(cookie_of(scope))
             if not uid:
                 return await JSONResponse({"detail": "sign in first"}, 401)(scope, receive, send)
-            if scope["method"] not in ("GET", "HEAD") and not same_origin(scope):
+            if scope["method"] not in ("GET", "HEAD") and not same_origin(scope, self.public_url):
                 return await JSONResponse({"detail": "that request did not come from this site"}, 403)(scope, receive, send)
             return await self.person_app(uid)(scope, receive, send)
         return await self.front(scope, receive, send)
@@ -221,14 +221,27 @@ def with_headers(send):
     return s
 
 
-def same_origin(scope) -> bool:
-    """Changes must come from Coinpile's own page (the cookie is SameSite=Lax as well; this also stops other sites' forms)."""
+def same_origin(scope, public_url: str = "") -> bool:
+    """Changes must come from Coinpile's own page (the cookie is SameSite=Lax as well; this also stops other sites' forms).
+
+    Host and scheme must both match. The scheme of this request is known when a proxy says it (X-Forwarded-Proto), when COINPILE_PUBLIC_URL names
+    this host, or when the connection itself is https; a plain-http connection may be a TLS proxy that said nothing, so then either is accepted."""
     h = {k.decode().lower(): v.decode("latin-1") for k, v in scope.get("headers", [])}
     origin = h.get("origin")
     if not origin:
         return True                                   # not a browser cross-site request (curl, tests): those carry no cookie of ours anyway unless sent on purpose
-    host = h.get("x-forwarded-host") or h.get("host", "")
-    return origin.split("://", 1)[-1].rstrip("/") == host
+    o_scheme, sep, o_host = origin.partition("://")
+    if not sep:
+        return False                                  # "null" (sandboxed frames, file:) and other oddities
+    o_scheme, o_host = o_scheme.lower(), o_host.rstrip("/").lower()
+    host = (h.get("x-forwarded-host") or h.get("host", "")).split(",")[0].strip().lower()
+    if o_host != host:
+        return False
+    pub_scheme, _, pub_host = (public_url or "").lower().partition("://")
+    known = (h.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+             or (pub_scheme if pub_host.split("/")[0] == host else "")
+             or ("https" if scope.get("scheme") == "https" else ""))
+    return o_scheme == known if known else o_scheme in ("http", "https")
 
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
@@ -274,9 +287,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
     made = threading.RLock()                 # one database object (one connection, one lock) per person, however many threads ask at once
 
+    class Forgotten(KeyError):
+        """The person used Forget me: nothing may bring their data back (a late background refresh, a link message, a webhook)."""
+
+    def gone(uid: str) -> bool:
+        u = users.get(uid)
+        return not u or not u["token_enc"]
+
     def person_db(uid: str) -> DB:
         with made:
             if uid not in dbs:
+                if gone(uid):
+                    raise Forgotten(uid)
                 dbs[uid] = DB(os.path.join(data_dir, "people", f"{safe_id(uid)}.db"))
             return dbs[uid]
 
@@ -312,7 +334,16 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         lock = locks.setdefault(uid, threading.Lock())
         if not lock.acquire(timeout=1):
             return {"busy": True}
-        db = person_db(uid)
+        try:
+            if gone(uid):
+                return {"forgotten": True}
+            db = person_db(uid)
+        except Forgotten:
+            lock.release()
+            return {"forgotten": True}
+        except BaseException:
+            lock.release()
+            raise
         try:
             out = firefly.refresh(db, ff_for(uid), today(), full)
             try:
@@ -367,7 +398,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         while True:
             time.sleep(60)
             for u in users.all():
-                if u.get("problem"):
+                if u.get("problem") or gone(u["id"]):          # signed out by Firefly III, or forgotten since the list was read
                     continue
                 try:
                     if due(u["id"]):
@@ -379,6 +410,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     def person_app(uid: str) -> FastAPI:
         with made:
             if uid not in apps:
+                if gone(uid):
+                    raise Forgotten(uid)
                 apps[uid] = build_person_app(uid)
             return apps[uid]
 
@@ -420,6 +453,12 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
                                  link_flush=link_flush, link_people=users.handles)
         ctx.llm_transport = llm_transport
+        outbound = netguard.Slots()                 # this person's share of the worker threads for calls to servers they typed in
+        ctx.outbound = outbound
+
+        @app.exception_handler(netguard.Busy)
+        async def busy(_request, e):
+            return JSONResponse({"detail": str(e)}, 429, headers={"Retry-After": "5"})
 
         def read_back() -> None:
             """After a change in Firefly III: read the recent part of it again so the screens show what Firefly III now holds."""
@@ -601,7 +640,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             url, user, pw = (cfg.get(db, k) for k in ("caldav_url", "caldav_user", "caldav_password"))
             if not url:
                 raise HTTPException(503, "CalDAV is not set up yet (Settings, Calendar)")
-            return feed.push_caldav(db.all("SELECT * FROM subscriptions"), url, user, pw, caldav_transport)
+            with outbound.hold():
+                return feed.push_caldav(db.all("SELECT * FROM subscriptions"), url, user, pw, caldav_transport)
 
         @app.get("/subscriptions.ics")
         def subs_ics():
@@ -613,7 +653,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             if not url:
                 raise HTTPException(503, "CalDAV is not set up yet")
             try:
-                r = netguard.client(caldav_transport, timeout=15, auth=(user, pw)).request("PROPFIND", url, headers={"Depth": "0"})
+                with outbound.hold(), netguard.client(caldav_transport, timeout=15, auth=(user, pw)) as c:
+                    r = c.request("PROPFIND", url, headers={"Depth": "0"})
             except httpx.HTTPError as e:
                 return {"ok": False, "detail": type(e).__name__}
             return {"ok": r.status_code in (200, 207), "status": r.status_code}
@@ -630,7 +671,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             if not url:
                 raise HTTPException(503, "Add your Mattermost webhook address first")
             try:
-                notify.post(url, {"text": ":coin: **Coinpile**: notifications are working.", "username": "Coinpile", "icon_emoji": ":coin:"}, notify_transport)
+                with outbound.hold():
+                    notify.post(url, {"text": ":coin: **Coinpile**: notifications are working.", "username": "Coinpile", "icon_emoji": ":coin:"}, notify_transport)
             except httpx.HTTPStatusError as e:
                 return {"ok": False, "detail": f"the webhook answered {e.response.status_code}"}
             except httpx.HTTPError as e:
@@ -639,7 +681,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         @app.post("/api/notify/run")
         def notify_run():
-            return notify.run(db, today(), who(), notify_transport)
+            with outbound.hold():
+                return notify.run(db, today(), who(), notify_transport)
 
         # the Plaid connector, as this person
         held: dict = {}
@@ -653,7 +696,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         def conn_call(fn):
             try:
-                return fn()
+                with outbound.hold():
+                    return fn()
             except conn.ConnectorError as e:
                 raise HTTPException(502, str(e))
 
@@ -697,14 +741,15 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 link_flush()
             except Exception:
                 pass
-            users.forget(uid)
+            with made:                                      # from here on person_db/person_app refuse this uid, so no late thread recreates the files
+                users.forget(uid)
+                apps.pop(uid, None)
+                d = dbs.pop(uid, None)
             flushers.pop(uid, None)
             for k in [k for k, v in hooks_known.items() if v == uid]:
                 del hooks_known[k]
             import shutil
             shutil.rmtree(os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), ignore_errors=True)
-            apps.pop(uid, None)
-            d = dbs.pop(uid, None)
             if d:
                 d.conn.close()
             try:
@@ -940,7 +985,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     def index():
         return FileResponse(ui / "index.html", headers={"Cache-Control": "no-cache"})
 
-    app = Dispatch(front, users, person_app)
+    app = Dispatch(front, users, person_app, my_url)
     app.refresh = refresh            # for tests
     app.users = users
     app.person_db = person_db
