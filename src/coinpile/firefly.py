@@ -114,8 +114,7 @@ def _pc(at: dict, field: str, own: str | None, primary: str | None) -> tuple[flo
 
 def account_row(a: dict, primary: str | None = None) -> dict | None:
     at = a.get("attributes") or {}
-    if not at.get("active", True):
-        return None
+    closed = at.get("active", True) is False          # kept, so its past spending stays in history and forecasts; it no longer counts toward net worth
     primary = at.get("primary_currency_code") or primary
     own = at.get("currency_code") or primary or "USD"          # an account with no currency of its own is kept in the primary currency
     inst, name, mask = split_name(at.get("name") or f"Account {a.get('id')}")
@@ -137,10 +136,10 @@ def account_row(a: dict, primary: str | None = None) -> dict | None:
             kind, subtype = "cash", "owed to you"                # money someone owes you counts for you
     else:
         return None
-    return {"id": f"ff:{a['id']}", "ff_id": str(a["id"]), "institution": inst, "name": name, "mask": mask, "kind": kind, "subtype": subtype,
+    return {"id": f"ff:{a['id']}", "ff_id": str(a["id"]), "institution": inst, "name": name + (" (closed)" if closed else ""), "mask": mask, "kind": kind, "subtype": subtype,
             "balance": round(bal, 2), "currency": cur or "USD", "own_currency": own,
             "native_balance": round(nat, 2) if conv else None, "native_currency": own if conv else None,
-            "in_net_worth": 0 if at.get("include_net_worth") is False else 1, "notes": at.get("notes") or ""}
+            "in_net_worth": 0 if at.get("include_net_worth") is False or closed else 1, "notes": at.get("notes") or "", "closed": closed}
 
 
 def primary_currency(db) -> str:

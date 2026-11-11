@@ -132,9 +132,19 @@ class Writer:
         fr = bill_freq(int(s.get("every") or 1), s.get("unit") or "month")
         if not fr:
             return None
-        amt = f"{abs(float(s['amount'])):.2f}"
+        native = s.get("native_currency") and s.get("native_amount") is not None
+        if native and s.get("source") == "firefly" and s.get("id"):
+            # a bill in another currency: Coinpile shows it converted; Firefly III keeps its own amount and currency unless the amount was changed here
+            old = s.get("_stored_amount")
+            if old is None or abs(float(old) - float(s["amount"])) < 0.005:
+                amt_v, cur = float(s["native_amount"]), s["native_currency"]
+            else:
+                amt_v, cur = float(s["amount"]), s.get("currency") or "USD"
+        else:
+            amt_v, cur = float(s["amount"]), s.get("currency") or "USD"
+        amt = f"{abs(amt_v):.2f}"
         body = {"name": s["name"][:255], "amount_min": amt, "amount_max": amt, "date": s["next_date"], "repeat_freq": fr[0], "skip": fr[1],
-                "currency_code": s.get("currency") or "USD", "active": bool(s.get("active", 1)), "notes": s.get("notes") or None}
+                "currency_code": cur, "active": bool(s.get("active", 1)), "notes": s.get("notes") or None}
         if s.get("end_date"):
             body["end_date"] = s["end_date"]
         return body
@@ -148,8 +158,10 @@ class Writer:
         with self.db.tx() as c:
             c.execute("UPDATE subscriptions SET source='firefly', plaid_stream_id=? WHERE id=?", (f"ff-bill:{d['data']['id']}", sid))
 
-    def sub_updated(self, sid: int) -> None:
+    def sub_updated(self, sid: int, before: dict | None = None) -> None:
         s = self.db.one("SELECT * FROM subscriptions WHERE id=?", (sid,))
+        if s is not None:
+            s = {**s, "_stored_amount": (before or {}).get("amount")}
         if not s or s["source"] != "firefly":
             return
         body = self._bill_body(s)

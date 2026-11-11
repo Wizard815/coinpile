@@ -172,8 +172,11 @@ def register(app, ctx):
     # ---- income
     def check_income(i: IncomeIn):
         try:
-            every, unit = recur.resolve(i.every, i.unit, i.cycle)
             date.fromisoformat(i.next_date)
+        except (ValueError, TypeError):
+            raise HTTPException(422, "next_date must be a date (YYYY-MM-DD)")
+        try:
+            every, unit = recur.resolve(i.every, i.unit, i.cycle)
         except ValueError as e:
             raise HTTPException(422, str(e))
         if i.amount <= 0 or not i.name.strip():
