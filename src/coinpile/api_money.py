@@ -467,7 +467,18 @@ def register(app, ctx):
             with store.tx() as c:
                 c.execute("UPDATE subscriptions SET notes=trim(coalesce(notes,'') || ' ' || ?) WHERE id=?", (f"(not in Firefly III: {e})", sid))
 
-    ctx.create_sub = create_sub
+    def create_sub_from_agent(d: dict) -> dict:
+        """The agent's add_subscription: a Coinpile subscription only. Sending it to Firefly III stays a person's click (edit it once, or add it yourself)."""
+        try:
+            s = Sub(**d)
+        except Exception as e:
+            raise HTTPException(422, str(e)[:200])
+        every, unit = check_sub(s)
+        with store.tx() as c:
+            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+        return ledger.subscription(store, cur.lastrowid, ctx.today())
+
+    ctx.create_sub = create_sub_from_agent
 
     @app.post("/api/subscriptions")
     def subs_add(request: Request, s: Sub):

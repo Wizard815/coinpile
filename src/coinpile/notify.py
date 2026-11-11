@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from coinpile import ledger, settings as cfg
+from coinpile import ledger, netguard, settings as cfg
 
 SEV = {"info": 0, "warning": 1, "critical": 2}
 ICON = {"critical": ":rotating_light:", "warning": ":warning:", "info": ":information_source:"}
@@ -65,7 +65,7 @@ def payload(alerts: list[dict], who: str, grp: str = "other") -> dict:
 
 
 def post(url: str, body: dict, transport=None) -> None:
-    with httpx.Client(timeout=10, transport=transport) as c:
+    with netguard.client(transport, timeout=10) as c:
         c.post(url, json=body).raise_for_status()
 
 

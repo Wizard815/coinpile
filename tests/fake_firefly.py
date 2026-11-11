@@ -37,6 +37,10 @@ class FakeFirefly:
             return httpx.Response(200, json={"data": d["groups"][-1]})
         if parts[0] == "transactions" and method == "PUT":
             g = next(x for x in d["groups"] if x["id"] == parts[1])
+            if len(g["attributes"]["transactions"]) > 1 and not b.get("group_title"):
+                return httpx.Response(422, json={"message": "A group title is mandatory when there is more than one transaction.", "errors": {"group_title": ["mandatory"]}})
+            keep = {str(ch["transaction_journal_id"]) for ch in b["transactions"]}
+            g["attributes"]["transactions"] = [t for t in g["attributes"]["transactions"] if t["transaction_journal_id"] in keep]     # like Firefly III: splits left out are deleted
             for ch in b["transactions"]:
                 t = next(x for x in g["attributes"]["transactions"] if x["transaction_journal_id"] == str(ch["transaction_journal_id"]))
                 t.update({k: v for k, v in ch.items() if k == "category_name"})
@@ -96,6 +100,9 @@ class FakeFirefly:
             if p == "/accounts":
                 t = q.get("type")
                 rows = [a for a in d["accounts"] if a["attributes"]["type"] == t]
+            elif p.startswith("/transactions/"):
+                g = next((x for x in d["groups"] if x["id"] == p.split("/")[2]), None)
+                return httpx.Response(200, json={"data": g}) if g else httpx.Response(404, json={"message": "No query results"})
             elif p == "/transactions":
                 rows = [g for g in d["groups"] if (not q.get("start") or g["attributes"]["transactions"][0]["date"][:10] >= q["start"]) and g["attributes"]["transactions"][0]["date"][:10] <= q["end"]]
             elif p == "/bills":

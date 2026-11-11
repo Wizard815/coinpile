@@ -116,6 +116,8 @@ def account_row(a: dict) -> dict | None:
     elif at["type"] in ("liabilities", "liability", "loan", "debt", "mortgage"):
         kind, subtype = "loan", at.get("liability_type") or "loan"
         bal = abs(_num(at.get("debt_amount")) or _num(at.get("current_balance")))
+        if (at.get("liability_direction") or "credit") == "debit":
+            kind, subtype = "cash", "owed to you"                # money someone owes you counts for you
     else:
         return None
     return {"id": f"ff:{a['id']}", "ff_id": str(a["id"]), "institution": inst, "name": name, "mask": mask, "kind": kind, "subtype": subtype,
@@ -173,8 +175,9 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
     if start:
         params["start"] = start.isoformat()
     cats = set()
+    groups = list(ff.pages("/transactions", **params))           # read everything first: the person's database is not held while Firefly III answers
     with db.tx() as c:
-        for g in ff.pages("/transactions", **params):
+        for g in groups:
             for r in tx_rows(g, mine):
                 seen.add(r["id"])
                 cats.add(r["category"])

@@ -338,11 +338,14 @@ def test_bank_and_paypal_csvs_go_into_coinpile_accounts_never_into_firefly(tmp_p
 
 def test_a_robinhood_connector_with_a_value_adds_an_investment_account(tmp_path, monkeypatch):
     monkeypatch.setenv("RH_AGENT_URL", "http://rh-agent:8000")
+    monkeypatch.setenv("RH_OWNER", "alice@example.com")                                           # the connector is alice's Robinhood account
     rh = httpx.MockTransport(lambda req: httpx.Response(200, json={"data": {"equity": 1234.5} if req.url.path == "/balances" else [], "as_of": "2026-11-10T00:00:00+00:00", "source": "mcp"}))
     a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), robinhood_transport=rh, today=lambda: TODAY)
     c = signed_in(a)
     acct = next(x for x in c.get("/api/accounts").json() if x["id"] == "rh:agent")
     assert acct["kind"] == "investment" and acct["balance"] == 1234.5 and acct["source"] == "robinhood"
+    bob = signed_in(a, BOB)
+    assert "error" in bob.get("/api/robinhood/agent").json() and not any(x["id"].startswith("rh:") for x in bob.get("/api/accounts").json())   # never someone else's portfolio
 
 
 def test_nothing_is_sent_to_firefly_iii_until_each_part_is_switched_on(tmp_path):
@@ -423,3 +426,82 @@ def test_a_signed_firefly_webhook_makes_coinpile_read_at_once(tmp_path):
             break
         _t.sleep(0.1)
     assert c.get("/api/transactions?q=webhook").json()["items"][0]["amount"] == -7.25 and c.get("/api/firefly/webhook").json()["last"]
+
+
+
+def test_a_person_never_gets_the_containers_or_anyone_elses_credentials(tmp_path, monkeypatch):
+    monkeypatch.setenv("CALDAV_URL", "https://dav.example.com/operator")
+    monkeypatch.setenv("CALDAV_USER", "admin")
+    monkeypatch.setenv("CALDAV_PASSWORD", "S3cret-admin")
+    sent = []
+    dav = httpx.MockTransport(lambda req: sent.append(req.headers.get("authorization")) or httpx.Response(207))
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), caldav_transport=dav, today=lambda: TODAY)
+    bob = signed_in(a, BOB)
+    assert bob.get("/api/settings").json()["caldav_url"] == "" and bob.get("/api/settings").json()["caldav_user"] == ""
+    bob.put("/api/settings", json={"caldav_url": "https://attacker.example/x"})
+    bob.post("/api/settings/test-caldav")
+    assert not any(h and "S3cret" in __import__("base64").b64decode(h.split()[1]).decode() for h in sent if h and h.startswith("Basic"))
+
+
+def test_a_handle_is_never_handed_to_someone_new(tmp_path):
+    ff = FakeFirefly({ALICE: {"id": "1", "email": "alice@example.com"}, BOB: {"id": "2", "email": "bob@example.com"}, "tok-mallory-" + "m" * 30: {"id": "3", "email": "alice@evil.example"}})
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=ff.transport(), today=lambda: TODAY)
+    alice, bob = signed_in(a, ALICE), signed_in(a, BOB)
+    alice.post("/api/links", json={"peer": "bob"})
+    bob.post("/api/links/alice/accept", json={})
+    import time as _t
+    _t.sleep(0.3)
+    assert alice.post("/api/forget").json() == {"forgotten": True}
+    _t.sleep(0.3)
+    assert bob.get("/api/links").json()["links"] == []                                           # bob was told alice is gone
+    mallory = signed_in(a, "tok-mallory-" + "m" * 30)
+    assert mallory.get("/api/links").json()["me"] != "alice" and "alice" not in bob.get("/api/links/people").json()["people"]
+
+
+def test_oauth_can_only_be_finished_by_the_browser_that_started_it(tmp_path):
+    a = web.create_app(firefly_url="http://firefly:8080", data_dir=str(tmp_path), client_id="abc-123", public_url="http://testserver")
+    attacker = TestClient(a)
+    loc = attacker.get("/auth/firefly", follow_redirects=False).headers["location"]
+    state = dict(x.split("=", 1) for x in loc.split("?", 1)[1].split("&"))["state"]
+    victim = TestClient(a)
+    assert victim.get(f"/auth/callback?code=x&state={state}", follow_redirects=False).headers["location"] == "/?signin=failed"
+
+
+def test_large_bodies_are_refused_without_reading_them_all(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    big = b"x" * (web.MAX_BODY + 10)
+    assert c.post("/api/import/csv", content=big).status_code == 413
+    def chunks():
+        for _ in range(8):
+            yield b"y" * 1_000_000
+    assert c.post("/api/import/csv", content=chunks()).status_code == 413
+    assert c.get("/health").headers["x-frame-options"] == "DENY"
+
+
+def test_setting_one_splits_category_keeps_the_other_splits(tmp_path):
+    ff = world()
+    ff.tx("1", 70, "withdrawal", 60, "COSTCO food", 1, 96, "2026-11-08", None)
+    ff.data["1"]["groups"][-1]["attributes"]["transactions"].append({**ff.data["1"]["groups"][-1]["attributes"]["transactions"][0], "transaction_journal_id": "71", "amount": "40.0", "description": "COSTCO tires"})
+    c = signed_in(app(tmp_path, ff))
+    c.put("/api/settings", json={"ff_send_categories": "on"})
+    assert c.put("/api/transactions/ff:70/category", json={"category": "Groceries"}).status_code == 200
+    splits = {t["transaction_journal_id"]: t for t in ff.data["1"]["groups"][-1]["attributes"]["transactions"]}
+    assert set(splits) == {"70", "71"} and splits["70"]["category_name"] == "Groceries" and splits["71"]["category_name"] is None
+
+
+@pytest.mark.parametrize("url,ok", [("http://127.0.0.1:11434/v1", False), ("http://localhost:8000", False), ("http://169.254.169.254/latest/meta-data", False),
+                                    ("http://[::1]:80", False), ("http://[::ffff:127.0.0.1]/", False), ("http://0.0.0.0/", False), ("http://metadata.google.internal/", False),
+                                    ("http://192.168.1.50:11434/v1", True), ("http://10.0.0.5:6421", True), ("https://203.0.113.9/v1", True)])
+def test_typed_addresses_cannot_reach_the_server_itself_or_metadata(url, ok):
+    from coinpile import netguard
+    if ok:
+        netguard.check(url)
+    else:
+        with pytest.raises(netguard.Blocked):
+            netguard.check(url)
+
+
+def test_the_connector_name_cannot_steer_the_path(tmp_path):
+    c = signed_in(app(tmp_path, world(), connector_transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
+    c.put("/api/settings", json={"connector_url": "http://connector:8000", "connector_name": "../admin/p/bob", "connector_token": "a long enough password"})
+    assert "lowercase" in c.get("/api/banks").json()["detail"]

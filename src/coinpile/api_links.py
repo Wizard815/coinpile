@@ -101,15 +101,6 @@ def register(app, ctx):
         ctx.link_flush()
         return {"ok": True}
 
-    @app.post("/internal/link/inbox")
-    def inbox(request: Request, m: InboxIn):
-        """From the gateway only (it sets `sender` after checking who really sent it)."""
-        auth(request)
-        r = links.receive(store, name, m.sender, m.type, m.payload)
-        if r.get("ok"):
-            ctx.link_flush()
-        return r
-
     @app.post("/api/goals/{gid}/share")
     def goal_share(request: Request, gid: int, b: ShareIn):
         auth(request)

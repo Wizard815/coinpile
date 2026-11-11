@@ -12,9 +12,12 @@ from datetime import datetime
 
 
 def _num(s: str) -> float:
+    """'$1,234.50', '-12.00', '$-12.00', '(12.00)', '12.00-' -> a signed number. Anything else is not a number (ValueError, reported as a bad file)."""
     s = (s or "").strip()
-    neg = s.startswith("(") or s.startswith("-") or s.startswith("- ")
+    neg = "-" in s or (s.startswith("(") and s.endswith(")"))
     v = re.sub(r"[^0-9.]", "", s)
+    if v.count(".") > 1:
+        raise ValueError(f"not an amount: {s[:20]!r}")
     return -float(v) if neg and v else float(v or 0)
 
 
@@ -144,11 +147,12 @@ def store_bank(db, account_id: str, rows: list[dict], balance: float | None = No
     added = 0
     for r in rows:
         with db.tx() as c:
+            tid = f"{r['id']}@{account_id}"                    # the same line in two accounts' files is two transactions
             cur = c.execute("INSERT OR IGNORE INTO transactions(id,account_id,date,name,amount,source,category) VALUES(?,?,?,?,?,?,?)",
-                            (r["id"], account_id, r["date"], r["name"], r["amount"], "csv", ledger.categorize(db, r["name"], r["amount"], None, acct["kind"])))
+                            (tid, account_id, r["date"], r["name"], r["amount"], "csv", ledger.categorize(db, r["name"], r["amount"], None, acct["kind"])))
             if cur.rowcount:
                 added += 1
-                c.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (f"tx:{r['id']}", f"{r['date']}T00:00:00+00:00", "transaction", f"{acct['name']}: {r['name']} {money(r['amount'])}", r["amount"], account_id, "imported"))
+                c.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (f"tx:{tid}", f"{r['date']}T00:00:00+00:00", "transaction", f"{acct['name']}: {r['name']} {money(r['amount'])}", r["amount"], account_id, "imported"))
     if balance is not None:
         with db.tx() as c:
             c.execute("UPDATE accounts SET balance=?, updated=? WHERE id=?", (balance, now(), account_id))

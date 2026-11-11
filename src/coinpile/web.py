@@ -23,7 +23,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_links, api_money, ffwrite, importers, robinhood, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import agent, api_links, api_money, ffwrite, importers, netguard, robinhood, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 
@@ -47,8 +47,9 @@ def ensure_field_key(data_dir: str) -> None:
     f = Path(data_dir) / ".field_key"
     if not f.exists():
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(Fernet.generate_key().decode())
-        f.chmod(0o600)
+        fd = os.open(f, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)          # owner-only from the first byte
+        with os.fdopen(fd, "w") as fh:
+            fh.write(Fernet.generate_key().decode())
     os.environ["FIELD_KEY"] = f.read_text().strip()
 
 
@@ -96,11 +97,11 @@ class Users:
         return h
 
     def by_handle(self, handle: str) -> str | None:
-        r = self.db.one("SELECT id FROM users WHERE handle=?", (handle,))
+        r = self.db.one("SELECT id FROM users WHERE handle=? AND token_enc IS NOT NULL", (handle,))
         return r["id"] if r else None
 
     def handles(self) -> list[str]:
-        return [r["handle"] for r in self.db.all("SELECT handle FROM users WHERE handle IS NOT NULL ORDER BY handle")]
+        return [r["handle"] for r in self.db.all("SELECT handle FROM users WHERE handle IS NOT NULL AND token_enc IS NOT NULL ORDER BY handle")]
 
     def get(self, uid: str) -> dict | None:
         return self.db.one("SELECT * FROM users WHERE id=?", (uid,))
@@ -113,9 +114,11 @@ class Users:
             c.execute("UPDATE users SET problem=? WHERE id=?", (text, uid))
 
     def forget(self, uid: str) -> None:
+        """Everything about the person goes, except a tombstone row that keeps their handle: a handle is never given to someone else,
+        so nobody can sign up later as 'alice' and inherit alice's links."""
         with self.db.tx() as c:
             c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-            c.execute("DELETE FROM users WHERE id=?", (uid,))
+            c.execute("UPDATE users SET email=NULL, kind=NULL, token_enc=NULL, refresh_enc=NULL, expires=NULL, problem=NULL WHERE id=?", (uid,))
 
     def new_session(self, uid: str) -> str:
         tok = secrets.token_urlsafe(32)
@@ -153,6 +156,25 @@ class Dispatch:
         self.front, self.users, self.person_app = front, users, person_app
 
     async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.front(scope, receive, send)
+        send = with_headers(send)
+        size = next((int(v) for k, v in scope.get("headers", []) if k == b"content-length" and v.isdigit()), None)
+        if size is not None and size > MAX_BODY:
+            return await JSONResponse({"detail": "too large"}, 413)(scope, receive, send)
+        started = False
+
+        async def tracked(msg):
+            nonlocal started
+            started = started or msg["type"] == "http.response.start"
+            await send(msg)
+        try:
+            return await self.route(scope, capped(receive), tracked)
+        except TooLarge:
+            if not started:
+                return await JSONResponse({"detail": "too large"}, 413)(scope, receive, send)
+
+    async def route(self, scope, receive, send):
         path = scope.get("path", "")
         if scope["type"] == "http" and (path.startswith("/api/") and not path.startswith("/api/v1/") or path == "/subscriptions.ics"):
             uid = self.users.session_user(cookie_of(scope))
@@ -162,6 +184,41 @@ class Dispatch:
                 return await JSONResponse({"detail": "that request did not come from this site"}, 403)(scope, receive, send)
             return await self.person_app(uid)(scope, receive, send)
         return await self.front(scope, receive, send)
+
+
+MAX_BODY = 6_000_000          # the largest CSV upload plus room; nothing else comes close
+
+
+class TooLarge(HTTPException):
+    def __init__(self):
+        super().__init__(413, "too large")
+
+
+def capped(receive):
+    """Stops reading a body (also one sent without a Content-Length) once it passes MAX_BODY, instead of holding it all in memory."""
+    seen = 0
+
+    async def r():
+        nonlocal seen
+        msg = await receive()
+        if msg["type"] == "http.request":
+            seen += len(msg.get("body", b""))
+            if seen > MAX_BODY:
+                raise TooLarge()
+        return msg
+    return r
+
+
+SECURITY_HEADERS = [(b"x-frame-options", b"DENY"), (b"content-security-policy", b"frame-ancestors 'none'"), (b"x-content-type-options", b"nosniff"),
+                    (b"referrer-policy", b"same-origin")]
+
+
+def with_headers(send):
+    async def s(msg):
+        if msg["type"] == "http.response.start":
+            msg = {**msg, "headers": list(msg.get("headers", [])) + SECURITY_HEADERS}
+        await send(msg)
+    return s
 
 
 def same_origin(scope) -> bool:
@@ -189,6 +246,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     dbs: dict[str, DB] = {}
     locks: dict[str, threading.Lock] = {}
     pending_oauth: dict[str, tuple[str, float]] = {}
+    oauth_lock = threading.Lock()
     ui = ui_dir()
     from contextlib import asynccontextmanager
 
@@ -223,8 +281,14 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             return dbs[uid]
 
     # ---------------- Firefly III tokens
+    renewing: dict[str, threading.Lock] = {}
+
     def token_for(uid: str) -> str:
         from coinpile import crypto
+        with renewing.setdefault(uid, threading.Lock()):            # Firefly III rotates refresh tokens: two renewals at once would sign the person out
+            return _token_for(uid, crypto)
+
+    def _token_for(uid: str, crypto) -> str:
         u = users.get(uid)
         if not u or not u["token_enc"]:
             raise firefly.TokenRefused("sign in again")
@@ -253,7 +317,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             out = firefly.refresh(db, ff_for(uid), today(), full)
             try:
                 person_app(uid)                                     # makes sure this person's Robinhood reader exists
-                rh_ = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport)
+                rh_ = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, (users.get(uid) or {}).get("email", ""))
                 out["robinhood"] = rh_.snapshot(cfg.get(db, "rh_main_source") or "auto")
             except Exception:
                 pass
@@ -368,7 +432,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         ctx.writer = ffwrite.Writer(db, lambda: ff_for(uid), read_back, today)
 
-        rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport)
+        rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, who())
 
         @app.get("/api/robinhood/main")
         def rh_main():
@@ -549,7 +613,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             if not url:
                 raise HTTPException(503, "CalDAV is not set up yet")
             try:
-                r = httpx.Client(timeout=15, auth=(user, pw), transport=caldav_transport).request("PROPFIND", url, headers={"Depth": "0"})
+                r = netguard.client(caldav_transport, timeout=15, auth=(user, pw)).request("PROPFIND", url, headers={"Depth": "0"})
             except httpx.HTTPError as e:
                 return {"ok": False, "detail": type(e).__name__}
             return {"ok": r.status_code in (200, 207), "status": r.status_code}
@@ -624,7 +688,21 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.post("/api/forget")
         def forget():
             """Stop reading this Firefly III account and delete everything Coinpile keeps for it (Firefly III itself is not touched)."""
+            for peer in [r["peer"] for r in db.all("SELECT peer FROM links")]:
+                try:
+                    links.unlink(db, peer)                          # the others stop sharing with someone who is gone
+                except Exception:
+                    pass
+            try:
+                link_flush()
+            except Exception:
+                pass
             users.forget(uid)
+            flushers.pop(uid, None)
+            for k in [k for k, v in hooks_known.items() if v == uid]:
+                del hooks_known[k]
+            import shutil
+            shutil.rmtree(os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), ignore_errors=True)
             apps.pop(uid, None)
             d = dbs.pop(uid, None)
             if d:
@@ -722,17 +800,27 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         if not k:
             k = secrets.token_urlsafe(18)
             cfg.set_value(db, "ff_hook_key", k)
+        hook_index()[k] = uid
         return k
 
     hook_seen: dict[str, float] = {}
+    hooks_known: dict[str, str] = {}
+
+    def hook_index() -> dict[str, str]:
+        if not hooks_known:
+            for u in users.all():
+                k = cfg.get(person_db(u["id"]), "ff_hook_key")
+                if k:
+                    hooks_known[k] = u["id"]
+        return hooks_known
 
     @front.post("/hooks/firefly/{key}")
     async def firefly_hook(key: str, request: Request):
         """Signed by Firefly III with the webhook's secret: header Signature: t=<time>,v1=<HMAC-SHA3-256 of "<time>.<body>">. Anything else is ignored."""
-        uid = next((u["id"] for u in users.all() if cfg.get(person_db(u["id"]), "ff_hook_key") == key), None)
-        body = await request.body()
-        if not uid or len(body) > 2_000_000:
+        uid = hook_index().get(key)
+        if not uid:
             raise HTTPException(404, "unknown hook")
+        body = await request.body()
         db = person_db(uid)
         secret = cfg.get(db, "ff_webhook_secret")
         parts = dict(p.split("=", 1) for p in request.headers.get("signature", "").split(",") if "=" in p)
@@ -750,10 +838,12 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         return {"ok": True}
 
     # ---------------- signing in
+    def is_secure(request: Request) -> bool:
+        return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https" or my_url.startswith("https://")
+
     def signed_in(response: Response, request: Request, uid: str) -> None:
         tok = users.new_session(uid)
-        secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
-        response.set_cookie(COOKIE, tok, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=secure, path="/")
+        response.set_cookie(COOKIE, tok, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=is_secure(request), path="/")
 
     @front.get("/health")
     def health():
@@ -799,18 +889,27 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
         state = secrets.token_urlsafe(24)
         now = time.time()
-        for k in [k for k, (_, t) in pending_oauth.items() if now - t > 900]:
-            del pending_oauth[k]
-        pending_oauth[state] = (verifier, now)
+        with oauth_lock:
+            for k in [k for k, (_, t) in pending_oauth.items() if now - t > 900]:
+                del pending_oauth[k]
+            if len(pending_oauth) >= 1000:
+                raise HTTPException(429, "too many sign-ins in progress; try again in a few minutes")
+            pending_oauth[state] = (verifier, now)
         back = (my_url or str(request.base_url).rstrip("/")) + "/auth/callback"
         q = urlencode({"client_id": client_id, "redirect_uri": back, "response_type": "code", "scope": "", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
-        return RedirectResponse(f"{ff_public}/oauth/authorize?{q}", 302)
+        resp = RedirectResponse(f"{ff_public}/oauth/authorize?{q}", 302)
+        resp.set_cookie("coinpile_oauth", sha(state), max_age=900, httponly=True, samesite="lax", secure=is_secure(request), path="/auth/")   # only this browser can finish this sign-in
+        return resp
 
     @front.get("/auth/callback")
     async def auth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-        if error or state not in pending_oauth:
+        if error or not state or not hmac.compare_digest(request.cookies.get("coinpile_oauth", ""), sha(state)):
+            return RedirectResponse("/?signin=failed", 302)             # not started in this browser: someone may be trying to sign you in as them
+        with oauth_lock:
+            got = pending_oauth.pop(state, None)
+        if not got:
             return RedirectResponse("/?signin=failed", 302)
-        verifier, _ = pending_oauth.pop(state)
+        verifier, _ = got
         back = (my_url or str(request.base_url).rstrip("/")) + "/auth/callback"
         try:
             r = await run_in_threadpool(http.post, f"{ff_url}/oauth/token", data={"grant_type": "authorization_code", "client_id": client_id, "redirect_uri": back, "code_verifier": verifier, "code": code})
@@ -826,6 +925,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         users.save(me_["id"], me_["email"], "oauth", d["access_token"], d.get("refresh_token"), time.time() + int(d.get("expires_in", 3600)))
         users.ensure_handle(me_["id"])
         resp = RedirectResponse("/", 302)
+        resp.delete_cookie("coinpile_oauth", path="/auth/")
         signed_in(resp, request, me_["id"])
         refresh_soon(me_["id"])
         return resp
