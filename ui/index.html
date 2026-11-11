@@ -386,6 +386,7 @@ async function accountDetail(root, rerender) {
   const a = d.account, manual = a.source === "manual", toFF = a.source === "firefly" && !!S.sends?.accounts, local = manual || toFF;
   add(root, 
     h("div", { class: "bar" }, h("button", { class: "btn sm", onclick: () => { S.acct = null; rerender(); } }, "‹ All accounts"), h("span", { class: "muted small" }, `${a.institution} · ${a.kind}${a.category_effective ? " · " + a.category_effective : ""}${manual ? " · tracked by hand" : " · linked"}`),
+      a.kind !== "credit" && a.kind !== "loan" ? h("button", { class: "btn sm", onclick: async () => { const on = !["investment", "retirement"].includes((a.category || "").toLowerCase()); try { await api("/api/investments/" + encodeURIComponent(a.id), send("PUT", { investment: on })); toast(on ? "Now tracked as an investment" : "No longer tracked as an investment"); rerender(); } catch (e) { fail(e); } } }, ["investment", "retirement"].includes((a.category || "").toLowerCase()) ? "Stop tracking as an investment" : "Track as an investment") : null,
       h("button", { class: "btn sm", title: "Look through this account's transactions for repeating payments", onclick: () => { S.scanAcct = a.id; S.scan = null; S.tab = "subs"; S.acct = null; render(); } }, "Check for subscriptions")),
     d.alerts.length ? h("div", { class: "panel" }, h("div", { class: "alerts" }, d.alerts.map(alertRow))) : null,
     h("div", { class: "grid" }, kpi(an(a), usd(a.balance), a.updated ? "updated " + ago(a.updated) : ""), kpi("In, last 30 days", usd(d.last_30_days.in), "", "pos"), kpi("Out, last 30 days", usd(d.last_30_days.out), `${d.last_30_days.count} transactions`, "neg")),
@@ -698,6 +699,31 @@ function portfolio(title, badge, d) {
     d.errors ? h("p", { class: "neg small" }, "Partial data: " + d.errors.join(", ")) : null,
     Array.isArray(d.positions) && d.positions.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Symbol"), h("th", { class: "r" }, "Shares"), h("th", { class: "r" }, "Value / cost"))), h("tbody", {}, d.positions.map((p) => h("tr", {}, h("td", { class: "mono" }, p.symbol), h("td", { class: "num r" }, p.quantity), h("td", { class: "num r" }, usd(p.equity ?? p.net_cost)))))) : h("p", { class: "muted small" }, "No positions reported."));
 }
+async function viewInvestments(root, rerender) {
+  const inv = await api("/api/investments"), money = (v) => usd(v);
+  const track = async (id, on, category) => { try { await api("/api/investments/" + encodeURIComponent(id), send("PUT", { investment: on, category: category || "Investment" })); toast(on ? "Now tracked as an investment" : "No longer tracked as an investment"); rerender(); } catch (e) { fail(e); } };
+  add(root,
+    h("div", { class: "grid" }, kpi("Investments", money(inv.total), `${inv.accounts.length} account${inv.accounts.length === 1 ? "" : "s"}`), kpi("Sources", String(inv.providers.filter((p) => p.connected).length), inv.providers.filter((p) => p.connected).map((p) => p.name).join(", ") || "none connected yet")),
+    h("div", { class: "panel scroll" }, h("h3", {}, "Investment accounts"),
+      h("p", { class: "muted small" }, "Any account can be tracked as an investment: a brokerage or retirement account in Firefly III, an account the Plaid connector brought in, or one you keep in Coinpile. Tracked accounts show here and under Investments on the Overview. Firefly III is not changed."),
+      inv.accounts.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Account"), h("th", {}, "Kind"), h("th", { class: "r" }, "Balance"), h("th", {}, ""))),
+        h("tbody", {}, inv.accounts.map((a) => h("tr", {}, h("td", {}, h("b", {}, a.name), h("div", { class: "muted small" }, a.institution || "")),
+          h("td", { class: "small" }, a.category || "Investment", a.how === "type" ? h("span", { class: "pill", style: "margin-left:6px" }, "by type") : null),
+          h("td", { class: "r num" }, money(a.balance), a.native_currency ? h("div", { class: "muted small" }, `${a.native_balance} ${a.native_currency}`) : null),
+          h("td", { class: "r" }, a.how === "type" ? null : h("button", { class: "btn sm", onclick: () => track(a.id, false) }, "Stop tracking"))))))
+        : h("p", { class: "muted" }, "No investment accounts yet. Pick one below."),
+      inv.candidates.length ? h("form", { class: "row", style: "margin-top:12px", onsubmit: (e) => { e.preventDefault(); if (!val("iv-acct")) return toast("Choose an account"); track(val("iv-acct"), true, val("iv-cat")); } },
+        select("iv-acct", "Track an account as an investment", [["", "Choose an account..."], ...inv.candidates.map((a) => [a.id, `${a.name} (${a.institution || ""})`])], ""),
+        select("iv-cat", "As", [["Investment", "Investment"], ["Retirement", "Retirement"]], "Investment"),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Track it"))) : null),
+    ...inv.providers.map((p) => h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, p.name), h("span", { class: "pill " + (p.connected ? "t" : p.available ? "" : "b") }, p.connected ? "connected" : p.available ? "not set up" : "planned")),
+      h("p", { class: "muted small" }, p.how), p.id === "robinhood" ? h("div", { id: "rh-box" }) : null)));
+  const box = $("#rh-box");
+  if (box && inv.providers.find((p) => p.id === "robinhood")?.connected) {
+    const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
+    box.replaceChildren(h("div", { class: "two" }, portfolio("Main account", "read-only", m), portfolio("Agent account", "read-only", a)));
+  } else if (box) box.replaceChildren(h("p", { class: "muted small" }, "Upload a Robinhood activity report under Settings, Robinhood to see positions here."));
+}
 async function viewRobinhood(root) {
   const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
   add(root, h("div", { class: "two" }, portfolio("Main account", "read-only", m), portfolio("Agent account", "read-only", a)), h("p", { class: "muted small" }, "Choose where the main account's data comes from under Settings > Robinhood. Nothing on this page can place a trade."));
@@ -1001,7 +1027,7 @@ async function tabSharing(root, rerender) {
 }
 
 /* ================================ SHELL ================================ */
-const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["planner", "Budgets & notes", viewPlanner], ["agent", "Agent", viewAgent], ["robinhood", "Robinhood", viewRobinhood], ["settings", "Settings", viewSettings]];
+const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["planner", "Budgets & notes", viewPlanner], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["settings", "Settings", viewSettings]];
 /* ---------- movable panels: order is remembered per tab in this browser ---------- */
 function layoutKey() { return "gb_layout_" + S.tab + (S.tab === "settings" ? ":" + S.settingsTab : "") + (S.acct ? ":acct" : ""); }
 function blocksOf(main) {

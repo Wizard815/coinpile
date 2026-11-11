@@ -38,6 +38,8 @@ def firefly() -> FakeFirefly:
     ff.acct("1", 2, "Huntington - Bills Checking ••7730", balance="812.40")
     ff.acct("1", 3, "Axos - High Yield Savings ••0099", role="savingAsset", balance="8374.63")
     ff.acct("1", 4, "Capital One - Quicksilver ••0182", role="ccAsset", balance="-952.80")
+    ff.acct("1", 6, "Fidelity - 401k ••5555", balance="48250.00")
+    ff.acct("1", 7, "Vanguard - Brokerage ••3141", balance="12780.40")
     ff.acct("1", 5, "Ally - Car loan", type="liabilities", role=None, balance="-11250", debt_amount="-11250", liability_type="loan")
     jid = [100]
 
@@ -117,6 +119,8 @@ def main(out: str, artifact: bool):
         post("/api/incomes/accept", {"key": sg["key"], "name": "Acme paycheck"})
     for cat, amt in [("Food", 250), ("Groceries", 600), ("Gas", 160), ("Shopping", 200)]:
         c.put("/api/budgets", json={"category": cat, "monthly_amount": amt})
+    c.put("/api/investments/ff:6", json={"investment": True, "category": "Retirement"})
+    c.put("/api/investments/ff:7", json={"investment": True, "category": "Investment"})
     post("/api/accounts", {"name": "Cash wallet", "kind": "cash", "balance": 140, "min_balance": 20})
     post("/api/notes", {"title": "Goals for the year", "body": "- Keep checking above $500\n- Pay the card in full each month\n- Roll the 6-month CD into the house fund", "pinned": True})
     post("/api/tokens", {"name": "Home Assistant", "scopes": ["summary", "bills", "refresh"]})
@@ -143,7 +147,7 @@ def main(out: str, artifact: bool):
     for p in ["/api/overview", "/api/history", "/api/spending?", "/api/categories", "/api/accounts", "/api/subscriptions", "/api/suggestions", "/api/alerts", "/api/notes", "/api/budgets",
               "/api/links", "/api/links/people", "/api/requests", "/api/sharing", "/api/agent/providers", "/api/agent/presets", "/api/settings", "/api/category-rules", "/api/goals",
               "/api/incomes", "/api/tokens", "/api/forecast", "/api/maturities", "/api/notify/status", "/api/status", "/api/piggy-banks", "/api/webhooks", "/api/firefly/webhook", "/api/summary",
-              "/api/chats", "/api/account-categories", "/api/robinhood/main", "/api/robinhood/agent"]:
+              "/api/chats", "/api/account-categories", "/api/robinhood/main", "/api/robinhood/agent", "/api/investments"]:
         rec[p] = get(p)
     for dd in list(range(1, 121)) + [365]:
         rec[f"/api/upcoming?days={dd}"] = get(f"/api/upcoming?days={dd}")
@@ -172,6 +176,9 @@ def main(out: str, artifact: bool):
     rec["/api/robinhood/main"] = {"source": "csv", "as_of": TODAY.isoformat(), "balances": {"net_transfers": 6000},
                                   "positions": [{"symbol": "VTI", "quantity": 18.5, "net_cost": 4400}, {"symbol": "AAPL", "quantity": 6, "net_cost": 1080}], "history": []}
     rec["/api/status"]["robinhood"]["csv_files"] = ["import-2026-11-01.csv"]
+    for pr in rec["/api/investments"]["providers"]:
+        if pr["id"] == "robinhood":
+            pr["connected"] = True
     rec["/scan"] = c.post("/api/subscriptions/scan", json={}).json()
     rec["chatProvider"] = rec["/api/agent/providers"]["items"][0]["id"]
     up = rec["/api/upcoming?days=60"]

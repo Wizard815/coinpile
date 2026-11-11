@@ -670,3 +670,20 @@ def test_a_coinpile_password_signs_in_and_can_be_reset_with_a_token(tmp_path):
     f.put("/api/password", json={"new": "one more long phrase"})
     f.post("/api/forget")
     assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "one more long phrase"}).status_code == 401
+
+
+def test_any_account_can_be_tracked_as_an_investment(tmp_path):
+    ff = world()
+    ff.acct("1", 9, "Fidelity - 401k ••5555", balance="42000")
+    c = signed_in(app(tmp_path, ff))
+    inv = c.get("/api/investments").json()
+    assert inv["accounts"] == [] and any(x["id"] == "ff:9" for x in inv["candidates"]) and [p["id"] for p in inv["providers"]] == ["robinhood", "foliofox"]
+    assert next(p for p in inv["providers"] if p["id"] == "foliofox")["available"] is False
+    assert c.put("/api/investments/ff:9", json={"investment": True, "category": "Bonds"}).status_code == 422
+    inv = c.put("/api/investments/ff:9", json={"investment": True, "category": "Retirement"}).json()
+    assert [(a["id"], a["category"], a["balance"]) for a in inv["accounts"]] == [("ff:9", "Retirement", 42000)] and inv["total"] == 42000
+    ov = c.get("/api/overview").json()
+    assert ov["by_kind"]["investment"] == 42000 and ov["by_kind"]["cash"] == round(1200.5 + 5000, 2)                  # shown as an investment, still in net worth
+    c.post("/api/refresh?full=true")
+    assert c.get("/api/investments").json()["total"] == 42000                                                         # survives reading Firefly III again
+    assert c.put("/api/investments/ff:9", json={"investment": False}).json()["accounts"] == []
