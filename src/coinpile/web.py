@@ -23,14 +23,14 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from coinpile import agent, api_links, api_money, ffwrite, importers, investments, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
 from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"share", "rh_main_source", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
 
 
@@ -259,7 +259,7 @@ def same_origin(scope, public_url: str = "") -> bool:
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
                caldav_transport=None, notify_transport=None, today=None, background: bool = False, client_id: str | None = None,
-               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None):
+               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None):
     ff_url = (firefly_url or os.environ.get("FIREFLY_URL", "")).rstrip("/")
     ff_public = (public_firefly_url or os.environ.get("FIREFLY_PUBLIC_URL", "") or ff_url).rstrip("/")
     client_id = client_id or os.environ.get("FIREFLY_CLIENT_ID", "")
@@ -273,6 +273,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     locks: dict[str, threading.Lock] = {}
     pending_oauth: dict[str, tuple[str, float]] = {}
     oauth_lock = threading.Lock()
+    rh_pending: dict[str, tuple[str, str, float]] = {}
     ui = ui_dir()
     from contextlib import asynccontextmanager
 
@@ -361,7 +362,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             out = firefly.refresh(db, ff_for(uid), today(), full)
             try:
                 person_app(uid)                                     # makes sure this person's Robinhood reader exists
-                rh_ = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, (users.get(uid) or {}).get("email", ""))
+                rh_ = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, (users.get(uid) or {}).get("email", ""), mcp_transport)
                 out["robinhood"] = rh_.snapshot(cfg.get(db, "rh_main_source") or "auto")
             except Exception:
                 pass
@@ -523,13 +524,74 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         ctx.writer = ffwrite.Writer(db, lambda: ff_for(uid), read_back, today)
 
-        rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, who())
+        rh = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, who(), mcp_transport)
+
+        @app.post("/api/robinhood/connect")
+        async def rh_connect(request: Request):
+            """Start signing in to Robinhood's MCP on Robinhood's own site. Coinpile only ever asks it for reads."""
+            url = cfg.get(db, "rh_mcp_url") or robinhood.MCP_URL
+            back = (my_url or str(request.base_url).rstrip("/")) + "/auth/robinhood/callback"
+            try:
+                meta = await run_in_threadpool(mcp.discover, url, mcp_transport)
+                client = cfg.get(db, "rh_mcp_client") if cfg.get(db, "rh_mcp_meta") and json.loads(cfg.get(db, "rh_mcp_meta")).get("redirect") == back else ""
+                if not client:
+                    client = await run_in_threadpool(mcp.register, meta, back, mcp_transport)
+            except (mcp.MCPError, netguard.Blocked) as e:
+                raise HTTPException(502, str(e))
+            cfg.set_value(db, "rh_mcp_client", client)
+            cfg.set_value(db, "rh_mcp_meta", json.dumps({**meta, "redirect": back}))
+            verifier, challenge = mcp.pkce()
+            state = secrets.token_urlsafe(24)
+            with oauth_lock:
+                for k in [k for k, v in rh_pending.items() if time.time() - v[2] > 900]:
+                    del rh_pending[k]
+                rh_pending[state] = (uid, verifier, time.time())
+            return {"url": mcp.authorize_url(meta, client, back, state, challenge)}
+
+        class RhToken(BaseModel):
+            token: str
+            url: str | None = None
+
+        @app.post("/api/robinhood/token")
+        def rh_paste_token(b: RhToken):
+            """If signing in from Coinpile does not work for your account: paste an access token for Robinhood's MCP instead."""
+            if len(b.token.strip()) < 16:
+                raise HTTPException(422, "that does not look like a token")
+            if b.url:
+                try:
+                    cfg.put(db, "rh_mcp_url", b.url.strip())
+                except ValueError as e:
+                    raise HTTPException(422, str(e))
+            cfg.set_value(db, "rh_mcp_token", b.token.strip())
+            for k in ("rh_mcp_refresh", "rh_mcp_expires"):
+                cfg.set_value(db, k, "")
+            return {"connected": True}
+
+        @app.post("/api/robinhood/test")
+        async def rh_test():
+            c = rh.mcp_client()
+            if not c:
+                raise HTTPException(409, "not connected to Robinhood yet")
+            try:
+                tools = await run_in_threadpool(c.tools)
+            except mcp.MCPError as e:
+                raise HTTPException(502, str(e))
+            return {"ok": True, "tools": len(tools), "reads_used": sorted(t for t in tools if t in robinhood.READ_TOOLS),
+                    "never_called": sorted(t for t in tools if t not in robinhood.READ_TOOLS)[:40]}
+
+        @app.post("/api/robinhood/disconnect")
+        def rh_disconnect():
+            for k in ("rh_mcp_token", "rh_mcp_refresh", "rh_mcp_expires"):
+                cfg.set_value(db, k, "")
+            with db.tx() as c:
+                c.execute("DELETE FROM accounts WHERE id='rh:agent'")
+            return {"connected": False}
 
         @app.get("/api/investments")
         def investments_view():
             accts = investments.accounts(db)
             return {"accounts": accts, "total": round(sum(a["balance"] for a in accts), 2), "currency": cfg.get(db, "currency") or "USD",
-                    "candidates": investments.candidates(db), "providers": investments.providers(rh)}
+                    "candidates": investments.candidates(db), "providers": investments.providers(rh), "monthly": investments.monthly(db, [a["id"] for a in accts])}
 
         class TrackIn(BaseModel):
             investment: bool
@@ -624,7 +686,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     "sends": {k: cfg.get(db, v) == "on" for k, v in ffwrite.PARTS.items()},
                     "connector": {"configured": bool(cfg.get(db, "connector_url") and cfg.get(db, "connector_name") and cfg.get(db, "connector_token"))},
                     "caldav_configured": bool(cfg.get(db, "caldav_url")),
-                    "robinhood": {"agent": ctx.robinhood.probe("agent"), "csv": "built-in", "live": ctx.robinhood.probe("live"),
+                    "robinhood": {"mcp": bool(cfg.get(db, "rh_mcp_token")), "agent": ctx.robinhood.probe("agent"), "csv": "built-in", "live": ctx.robinhood.probe("live"),
                                   "csv_files": sorted(os.listdir(ctx.robinhood.csv_dir)) if os.path.isdir(ctx.robinhood.csv_dir) else []}}
 
         @app.post("/api/refresh")
@@ -1151,6 +1213,25 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         signed_in(response, request, me_["id"])
         refresh_soon(me_["id"])
         return {"signed_in": True, "email": me_["email"], "password_set": True}
+
+    @front.get("/auth/robinhood/callback")
+    async def rh_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+        """Back from Robinhood's sign-in. Only the browser (and person) that started it can finish it."""
+        with oauth_lock:
+            got = rh_pending.pop(state, None) if state else None
+        uid = users.session_user(request.cookies.get(COOKIE))
+        if error or not got or got[0] != uid:
+            return RedirectResponse("/?robinhood=failed#settings", 302)
+        db = person_db(uid)
+        try:
+            meta = json.loads(cfg.get(db, "rh_mcp_meta"))
+            d = await run_in_threadpool(mcp.exchange, meta, cfg.get(db, "rh_mcp_client"),
+                                        {"grant_type": "authorization_code", "code": code, "redirect_uri": meta["redirect"], "code_verifier": got[1]}, mcp_transport)
+        except (mcp.MCPError, ValueError, KeyError):
+            return RedirectResponse("/?robinhood=refused#settings", 302)
+        robinhood.Robinhood(db, "", None, "", mcp_transport).save_tokens(d)
+        refresh_soon(uid)
+        return RedirectResponse("/?robinhood=connected#investments", 302)
 
     @front.get("/auth/firefly")
     def auth_firefly(request: Request):

@@ -178,6 +178,10 @@ def main(out: str, artifact: bool):
                                   "monthly": [{"month": (TODAY.replace(day=1) - timedelta(days=30 * k)).strftime("%Y-%m"), "deposits": 1000.0 if k % 2 == 0 else 500.0,
                                                "bought": 900.0 if k % 2 == 0 else 450.0, "sold": 0.0, "dividends": [0, 0, 11.42][k % 3], "fees": 0.0, "trades": 2} for k in range(6)]}
     rec["/api/status"]["robinhood"]["csv_files"] = ["import-2026-11-01.csv"]
+    rec["/api/status"]["robinhood"]["mcp"] = True
+    rec["/api/robinhood/agent"] = {"source": "robinhood-mcp", "as_of": TODAY.isoformat() + "T08:00:00+00:00", "balances": {"equity": 7340.25, "buying_power": 412.10},
+                                   "positions": [{"symbol": "NVDA", "quantity": 10, "net_cost": 1200, "equity": 1450}, {"symbol": "VTI", "quantity": 20, "net_cost": 5000, "equity": 5890.25}]}
+    rec["/api/investments"]["monthly"] = [{"month": (TODAY.replace(day=1) - timedelta(days=30 * k)).strftime("%Y-%m"), "value": round(61030.40 - 1450 * k + (230 if k % 2 else -120), 2)} for k in range(6, -1, -1)]
     for pr in rec["/api/investments"]["providers"]:
         if pr["id"] == "robinhood":
             pr["connected"] = True

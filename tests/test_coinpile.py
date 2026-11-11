@@ -688,3 +688,37 @@ def test_any_account_can_be_tracked_as_an_investment(tmp_path):
     c.post("/api/refresh?full=true")
     assert c.get("/api/investments").json()["total"] == 42000                                                         # survives reading Firefly III again
     assert c.put("/api/investments/ff:9", json={"investment": False}).json()["accounts"] == []
+
+
+def test_robinhood_mcp_signs_in_on_robinhood_and_only_ever_reads(tmp_path, monkeypatch):
+    from tests.fake_mcp import FakeRobinhood, MCP
+    rh = FakeRobinhood()
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), mcp_transport=rh.transport(),
+                       today=lambda: TODAY, public_url="http://testserver")
+    c = signed_in(a)
+    c.put("/api/settings", json={"rh_mcp_url": MCP})
+    url = c.post("/api/robinhood/connect").json()["url"]
+    assert url.startswith("https://auth.example.com/authorize?") and url.endswith("&scope=read") and "trade" not in url        # only reading is asked for
+    back = rh.approve(url).split("testserver", 1)[1]
+    assert TestClient(a).get(back, follow_redirects=False).headers["location"] == "/?robinhood=failed#settings"       # another browser cannot finish it
+    url = c.post("/api/robinhood/connect").json()["url"]
+    assert c.get(rh.approve(url).split("testserver", 1)[1], follow_redirects=False).headers["location"] == "/?robinhood=connected#investments"
+    t = c.post("/api/robinhood/test").json()
+    assert t["reads_used"] == ["get_accounts", "get_crypto_positions", "get_equity_positions", "get_portfolio"] and "place_equity_order" in t["never_called"]
+    ag = c.get("/api/robinhood/agent").json()
+    assert ag["balances"]["equity"] == 7340.25 and {p["symbol"]: (p["quantity"], p["net_cost"], p["equity"]) for p in ag["positions"]} == {"NVDA": (10, 1200, 1450), "VTI": (20, 5000, 5890.25)}
+    c.post("/api/refresh")
+    inv = c.get("/api/investments").json()
+    assert any(x["id"] == "rh:agent" and x["balance"] == 7340.25 for x in inv["accounts"]) and inv["monthly"][-1]["value"] == 7340.25
+    assert not any("place_" in x or "cancel_" in x for x in rh.calls)                                                 # never an order tool
+    # the token is renewed by itself when it is about to run out
+    db = a.person_db("1")
+    from coinpile import settings as cfg
+    cfg.set_value(db, "rh_mcp_expires", "1")
+    assert c.get("/api/robinhood/agent").json()["balances"]["equity"] == 7340.25
+    # a tool outside the read list cannot even be asked for
+    from coinpile import robinhood as R, mcp
+    cl = R.Robinhood(db, str(tmp_path), None, "", rh.transport()).mcp_client()
+    with pytest.raises(PermissionError):
+        cl.call("place_equity_order", {"symbol": "NVDA", "quantity": 1})
+    assert c.post("/api/robinhood/disconnect").json() == {"connected": False} and not any(x["id"] == "rh:agent" for x in c.get("/api/investments").json()["accounts"])
