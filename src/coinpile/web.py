@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from coinpile import agent, api_links, api_money, ffwrite, importers, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB
 from coinpile.oplog import log
+from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
@@ -70,8 +71,11 @@ class Users:
         with self.db.tx() as c:
             c.executescript("""CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT, kind TEXT, token_enc TEXT, refresh_enc TEXT, expires REAL, created TEXT, last_seen TEXT, problem TEXT);
                                CREATE TABLE IF NOT EXISTS sessions(hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires REAL NOT NULL);""")
-            if "handle" not in [r[1] for r in c.execute("PRAGMA table_info(users)")]:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+            if "handle" not in cols:
                 c.execute("ALTER TABLE users ADD COLUMN handle TEXT")
+            if "pw_hash" not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN pw_hash TEXT")       # a Coinpile-only password, as a salted scrypt hash (never the password)
 
     def save(self, uid: str, email: str, kind: str, token: str, refresh: str | None = None, expires: float | None = None) -> None:
         from coinpile import crypto
@@ -118,7 +122,7 @@ class Users:
         so nobody can sign up later as 'alice' and inherit alice's links."""
         with self.db.tx() as c:
             c.execute("DELETE FROM sessions WHERE user_id=?", (uid,))
-            c.execute("UPDATE users SET email=NULL, kind=NULL, token_enc=NULL, refresh_enc=NULL, expires=NULL, problem=NULL WHERE id=?", (uid,))
+            c.execute("UPDATE users SET email=NULL, kind=NULL, token_enc=NULL, refresh_enc=NULL, expires=NULL, problem=NULL, pw_hash=NULL WHERE id=?", (uid,))
 
     def new_session(self, uid: str) -> str:
         tok = secrets.token_urlsafe(32)
@@ -132,6 +136,15 @@ class Users:
             return None
         r = self.db.one("SELECT user_id FROM sessions WHERE hash=? AND expires>?", (sha(tok), time.time()))
         return r["user_id"] if r else None
+
+    def set_password(self, uid: str, pw_hash: str | None, keep_session: str | None = None) -> None:
+        """A new (or removed) password signs out every other browser of this person."""
+        with self.db.tx() as c:
+            c.execute("UPDATE users SET pw_hash=? WHERE id=?", (pw_hash, uid))
+            c.execute("DELETE FROM sessions WHERE user_id=? AND hash<>?", (uid, sha(keep_session) if keep_session else ""))
+
+    def by_email(self, email: str) -> dict | None:
+        return self.db.one("SELECT * FROM users WHERE lower(email)=? AND token_enc IS NOT NULL", ((email or "").strip().lower(),))
 
     def end_session(self, tok: str | None) -> None:
         if tok:
@@ -581,7 +594,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.get("/api/status")
         def status():
             u = users.get(uid) or {}
-            return {"currency": cfg.get(db, "currency") or "USD", "firefly": {"address": ff_public, "email": u.get("email"), "signed_in_with": u.get("kind"), "last_refresh": cfg.get(db, "ff_last_refresh") or None,
+            return {"currency": cfg.get(db, "currency") or "USD", "firefly": {"address": ff_public, "email": u.get("email"), "signed_in_with": u.get("kind"), "has_password": bool(u.get("pw_hash")), "last_refresh": cfg.get(db, "ff_last_refresh") or None,
                                 "last_error": cfg.get(db, "ff_last_error") or None, "refresh_minutes": int(float(cfg.get(db, "refresh_minutes") or 10)),
                                 "accounts": db.one("SELECT COUNT(*) n FROM accounts WHERE source='firefly'")["n"], "transactions": db.one("SELECT COUNT(*) n FROM transactions WHERE source='firefly'")["n"]},
                     "sends": {k: cfg.get(db, v) == "on" for k, v in ffwrite.PARTS.items()},
@@ -681,6 +694,31 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.get("/api/webhooks/{hid}/deliveries")
         def hooks_log(hid: int):
             return hook_err(lambda: webhooks.deliveries(db, hid) if db.one("SELECT 1 FROM webhooks WHERE id=?", (hid,)) else (_ for _ in ()).throw(KeyError(hid)))
+
+        class PasswordSet(BaseModel):
+            new: str | None = None
+            current: str | None = None
+
+        @app.put("/api/password")
+        async def password_set(b: PasswordSet, request: Request):
+            """Set or change the Coinpile password. Changing one needs the current one (forgot it? sign out and use Forgot password with a token)."""
+            u = users.get(uid) or {}
+            if u.get("pw_hash") and not await run_in_threadpool(verify_password, b.current or "", u["pw_hash"]):
+                raise HTTPException(403, "the current password is not right")
+            try:
+                check_password_strength(b.new or "", u.get("email") or "")
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            users.set_password(uid, await run_in_threadpool(hash_password, b.new), keep_session=request.cookies.get(COOKIE))
+            return {"password_set": True}
+
+        @app.delete("/api/password")
+        async def password_remove(b: PasswordSet, request: Request):
+            u = users.get(uid) or {}
+            if u.get("pw_hash") and not await run_in_threadpool(verify_password, b.current or "", u["pw_hash"]):
+                raise HTTPException(403, "the current password is not right")
+            users.set_password(uid, None, keep_session=request.cookies.get(COOKIE))
+            return {"password_set": False}
 
         @app.get("/api/firefly/webhook")
         def webhook_info(request: Request):
@@ -1011,7 +1049,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         uid = users.session_user(request.cookies.get(COOKIE))
         u = users.get(uid) if uid else None
         return {"signed_in": bool(u), "email": (u or {}).get("email"), "oauth": bool(client_id and ff_url), "firefly": ff_public, "problem": (u or {}).get("problem"),
-                "configured": bool(ff_url)}
+                "configured": bool(ff_url), "has_password": bool((u or {}).get("pw_hash"))}
 
     class TokenIn(BaseModel):
         token: str
@@ -1036,6 +1074,59 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         refresh_soon(me_["id"])
         log.info("someone signed in with a token")
         return {"signed_in": True, "email": me_["email"]}
+
+    pw_throttle = Throttle()
+    dummy_hash = hash_password("not a real password, only for timing")
+
+    class PasswordIn(BaseModel):
+        email: str
+        password: str
+
+    @front.post("/auth/password")
+    async def auth_password(b: PasswordIn, request: Request, response: Response):
+        """Sign in with your Firefly III email and the Coinpile password you set (Settings, Firefly III). It only opens Coinpile."""
+        key = "pw:" + b.email.strip().lower()[:200]
+        pw_throttle.check(key)
+        u = users.by_email(b.email)
+        ok = await run_in_threadpool(verify_password, b.password, (u or {}).get("pw_hash") or dummy_hash)    # the same work whether or not the person exists
+        if not (u and u.get("pw_hash") and ok):
+            pw_throttle.fail(key)
+            raise HTTPException(401, "wrong email or password")
+        pw_throttle.ok(key)
+        signed_in(response, request, u["id"])
+        refresh_soon(u["id"])
+        return {"signed_in": True, "email": u["email"]}
+
+    class ResetIn(BaseModel):
+        token: str
+        new: str
+
+    @front.post("/auth/password/reset")
+    async def auth_password_reset(b: ResetIn, request: Request, response: Response):
+        """Forgot the Coinpile password: a Firefly III Personal Access Token proves who you are again; then the new password is set.
+        Every other browser is signed out, and the token becomes the one Coinpile reads Firefly III with."""
+        if not ff_url:
+            raise HTTPException(503, "Coinpile does not know your Firefly III address yet (set FIREFLY_URL)")
+        try:
+            check_password_strength(b.new)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        tok = b.token.strip()
+        if len(tok) < 20 or len(tok) > 5000:
+            raise HTTPException(422, "that is not a Firefly III Personal Access Token (it is a very long string)")
+        try:
+            me_ = await run_in_threadpool(lambda: firefly.Firefly(ff_url, tok, firefly_transport).me())
+        except firefly.TokenRefused:
+            raise HTTPException(401, "Firefly III did not accept that token")
+        except firefly.FireflyError as e:
+            raise HTTPException(502, str(e))
+        users.save(me_["id"], me_["email"], "pat", tok)
+        users.ensure_handle(me_["id"])
+        users.set_password(me_["id"], await run_in_threadpool(hash_password, b.new))
+        pw_throttle.ok("pw:" + (me_["email"] or "").lower())
+        signed_in(response, request, me_["id"])
+        refresh_soon(me_["id"])
+        return {"signed_in": True, "email": me_["email"], "password_set": True}
 
     @front.get("/auth/firefly")
     def auth_firefly(request: Request):

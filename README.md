@@ -83,7 +83,9 @@ Coinpile has no passwords of its own: you sign in with your Firefly III account.
 2. Copy the client's ID and set on the container: `FIREFLY_CLIENT_ID` (that ID) and `COINPILE_PUBLIC_URL` (e.g. `http://192.168.1.50:8190`).
 3. If your browser reaches Firefly III at a different address than the container does, also set `FIREFLY_PUBLIC_URL` (e.g. `https://firefly.example.com`).
 
-Coinpile renews this sign-in by itself. Tested against Firefly III 6.7.9.
+Coinpile renews this sign-in by itself.
+
+**A Coinpile password** (optional): once signed in, set one under Settings, Firefly III, Coinpile password. From then on sign in with your Firefly III email and that password; Firefly III is still read with your token. Only a salted scrypt hash is kept (in `/data/users.db`); wrong guesses are slowed down. Changing it needs the current one and signs out your other browsers. Forgot it? On the sign-in page, **Forgot your Coinpile password?** asks for a Personal Access Token to prove it is you, then lets you choose a new one (and the new token becomes the one Coinpile uses). Tested against Firefly III 6.7.9.
 
 Tokens are stored encrypted with a key kept in `/data/.field_key` (or `FIELD_KEY` if you set one). Back up `/data` as a whole; without that key the stored tokens cannot be read (you would just sign in again).
 
