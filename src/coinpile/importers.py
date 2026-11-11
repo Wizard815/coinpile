@@ -11,24 +11,58 @@ import re
 from datetime import datetime
 
 
+AMOUNT = re.compile(r"^(?P<lp>\()?\s*(?P<s1>[-+\u2212])?\s*(?:[A-Z]{3}|[$€£¥₹]|US\$|C\$|A\$|kr|zł|Fr\.?|CHF)?\s*(?P<s2>[-+\u2212])?\s*"
+                    r"(?P<n>\d[\d.,'\s\u00a0\u202f]*)\s*(?:[A-Z]{3}|[$€£¥₹]|kr|zł|CHF)?\s*(?P<s3>[-+\u2212])?\s*(?P<rp>\))?\s*(?P<crdr>CR|DR|Cr|Dr|cr|dr)?$")
+
+
 def _num(s: str) -> float:
-    """'$1,234.50', '-12.00', '$-12.00', '(12.00)', '12.00-' -> a signed number. Anything else is not a number (ValueError, reported as a bad file)."""
+    """'$1,234.50', '-12.00', '$-12.00', '(12.00)', '12.00-', '12.00 DR', '1.234,56', '12,50 €' -> a signed number. An empty cell is 0.
+    Anything else is not a number (ValueError, reported as a bad file). With both separators the last one is the decimal mark; a lone comma
+    is the decimal mark unless exactly three digits follow it (1,234 is a thousand); a lone point is always the decimal mark."""
     s = (s or "").strip()
-    neg = "-" in s or (s.startswith("(") and s.endswith(")"))
-    v = re.sub(r"[^0-9.]", "", s)
-    if v.count(".") > 1:
+    if not s:
+        return 0.0
+    m = AMOUNT.match(s)
+    if not m or bool(m["lp"]) != bool(m["rp"]) or sum(1 for k in ("s1", "s2", "s3") if m[k]) > 1:
         raise ValueError(f"not an amount: {s[:20]!r}")
-    return -float(v) if neg and v else float(v or 0)
+    n = re.sub(r"[\s\u00a0\u202f']", "", m["n"])
+    dot, comma = n.rfind("."), n.rfind(",")
+    if dot >= 0 and comma >= 0:
+        dec = "." if dot > comma else ","
+    elif comma >= 0:
+        dec = "," if n.count(",") == 1 and len(n) - comma - 1 != 3 else None
+    elif n.count(".") > 1:
+        dec = None                                       # 1.234.567: points grouping thousands
+    else:
+        dec = "."
+    whole, _, frac = n.rpartition(dec) if dec and dec in n else (n, "", "")
+    sep = {".": ",", ",": "."}.get(dec, "." if "." in whole else ",")
+    if not re.fullmatch(r"\d+|\d{1,3}(?:" + re.escape(sep) + r"\d{3})+", whole) or (_ and not re.fullmatch(r"\d+", frac)):
+        raise ValueError(f"not an amount: {s[:20]!r}")              # thousands come in groups of three, and only one decimal mark
+    whole = whole.replace(sep, "")
+    v = float(whole + ("." + frac if frac else ""))
+    neg = bool(m["lp"]) or any((m[k] or "") in ("-", "\u2212") and m[k] for k in ("s1", "s2", "s3")) or (m["crdr"] or "").upper() == "DR"
+    return -v if neg else v
+
+
+DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d.%m.%Y", "%d.%m.%y", "%Y/%m/%d", "%d %b %Y", "%d %B %Y", "%b %d, %Y", "%B %d, %Y", "%b %d %Y", "%B %d %Y",
+                "%d-%b-%Y", "%d-%b-%y", "%d %b %y", "%Y%m%d")
 
 
 def _date(s: str) -> str:
+    """A date as YYYY-MM-DD. Accepts ISO dates (with or without a time), US 11/01/2026, European 01.11.2026 and spelled-out months (1 Nov 2026,
+    Nov 1, 2026). Slashes are read the US way (month first). Raises ValueError when it is not a date."""
     s = (s or "").strip()
-    for fmt in ("%Y-%m-%dT%H:%M:%S", "%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y", "%Y-%m-%d %H:%M:%S %Z", "%Y-%m-%d %H:%M:%S"):
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})[T ]\d{1,2}:\d{2}", s)
+    if m:
+        s = m.group(1)                                   # a timestamp: its date part (time zones are not shifted, the bank's own day is kept)
+    s = re.sub(r"\s+", " ", s)
+    for fmt in DATE_FORMATS:
         try:
-            return datetime.strptime(s[:19] if "T" in s else s, fmt).date().isoformat()
+            return datetime.strptime(s, fmt).date().isoformat()
         except ValueError:
             continue
-    return s[:10]
+    raise ValueError(f"not a date: {s[:30]!r}")
 
 
 def detect(headers: list[str]) -> str | None:
@@ -48,33 +82,49 @@ def parse(text: str, provider: str | None = None) -> tuple[str, list[dict]]:
         lines = text.splitlines()
         i = next((n for n, l in enumerate(lines) if "Datetime" in l and "Note" in l), 0)
         text = "\n".join(lines[i:])
-    rows = list(csv.DictReader(io.StringIO(text)))
+    rows = _rows(text)
     if not rows:
         return provider or "unknown", []
     prov = provider or detect(list(rows[0].keys()))
     if not prov:
         raise ValueError("unrecognized CSV format (expected PayPal, Venmo or Cash App export)")
     out = []
-    for r in rows:
-        r = {k.strip(): (v or "").strip() for k, v in r.items() if k}
-        if prov == "paypal":
-            if r.get("Status", "Completed") not in ("Completed", ""):
-                continue
-            amt, name, date = _num(r.get("Net") or r.get("Gross", "0")), r.get("Name") or r.get("Type", ""), _date(r.get("Date", ""))
-            tid = r.get("Transaction ID", "")
-        elif prov == "venmo":
-            if not r.get("Datetime") or r.get("Status") not in ("Complete", ""):
-                continue
-            amt = _num(r.get("Amount (total)") or r.get("Amount", "0"))
-            name = (r.get("To") if amt < 0 else r.get("From")) or r.get("Type", "")
-            name = f"{name}: {r.get('Note', '')}".strip(": ")
-            date, tid = _date(r["Datetime"]), r.get("ID", "")
-        else:  # cashapp
-            amt, name, date = _num(r.get("Net Amount") or r.get("Amount", "0")), r.get("Notes") or r.get("Transaction Type", ""), _date(r.get("Date", ""))
-            tid = r.get("Transaction ID", "")
-        tid = tid or hashlib.sha256(f"{date}|{name}|{amt}".encode()).hexdigest()[:16]
-        out.append({"id": f"{prov}:{tid}", "date": date, "name": name or prov, "amount": amt})
+    for n, r in enumerate(rows, start=2):
+        r = {k.strip(): (v or "").strip() if isinstance(v, str) else "" for k, v in r.items() if isinstance(k, str) and k}
+        try:
+            row = _p2p_row(prov, r)
+        except ValueError as e:
+            raise ValueError(f"row {n}: {e}")
+        if row:
+            out.append(row)
     return prov, out
+
+
+def _rows(text: str) -> list[dict]:
+    try:
+        return list(csv.DictReader(io.StringIO(text.replace("\x00", ""))))
+    except csv.Error as e:
+        raise ValueError(f"this is not a readable CSV file ({e})")
+
+
+def _p2p_row(prov: str, r: dict) -> dict | None:
+    if prov == "paypal":
+        if r.get("Status", "Completed") not in ("Completed", ""):
+            return None
+        amt, name, date = _num(r.get("Net") or r.get("Gross", "0")), r.get("Name") or r.get("Type", ""), _date(r.get("Date", ""))
+        tid = r.get("Transaction ID", "")
+    elif prov == "venmo":
+        if not r.get("Datetime") or r.get("Status") not in ("Complete", ""):
+            return None
+        amt = _num(r.get("Amount (total)") or r.get("Amount", "0"))
+        name = (r.get("To") if amt < 0 else r.get("From")) or r.get("Type", "")
+        name = f"{name}: {r.get('Note', '')}".strip(": ")
+        date, tid = _date(r["Datetime"]), r.get("ID", "")
+    else:  # cashapp
+        amt, name, date = _num(r.get("Net Amount") or r.get("Amount", "0")), r.get("Notes") or r.get("Transaction Type", ""), _date(r.get("Date", ""))
+        tid = r.get("Transaction ID", "")
+    tid = tid or hashlib.sha256(f"{date}|{name}|{amt}".encode()).hexdigest()[:16]
+    return {"id": f"{prov}:{tid}", "date": date, "name": name or prov, "amount": amt}
 
 
 def store(db, provider: str, rows: list[dict]) -> int:
@@ -113,7 +163,7 @@ def parse_bank(text: str, flip: bool = False) -> tuple[list[dict], float | None]
     text = text.lstrip("﻿")
     lines = text.splitlines()
     i = next((n for n, l in enumerate(lines) if any(d in l.lower() for d in DATE_COLS) and ("," in l or "\t" in l)), 0)      # some banks put notes above the header
-    rows = list(csv.DictReader(io.StringIO("\n".join(lines[i:]))))
+    rows = _rows("\n".join(lines[i:]))
     if not rows:
         return [], None
     heads = {k.strip().lower(): k for k in rows[0].keys() if k}
@@ -122,21 +172,26 @@ def parse_bank(text: str, flip: bool = False) -> tuple[list[dict], float | None]
     if not dcol or not ncol or not (acol or debit or credit):
         raise ValueError("could not find a date, a description and an amount in this file")
     out, seen, newest = [], {}, None
-    for r in rows:
-        date = _date((r.get(dcol) or "").strip())
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-            continue
-        name = (r.get(ncol) or "").strip()
-        if acol and (r.get(acol) or "").strip():
-            amt = _num(r[acol]) * (-1 if flip else 1)
-        else:
-            amt = abs(_num(r.get(credit) or "")) - abs(_num(r.get(debit) or ""))
+    for n, r in enumerate(rows, start=i + 2):
+        cell = lambda col: (r.get(col) or "").strip() if col and isinstance(r.get(col), str) else ""
+        if not re.search(r"\d", cell(dcol)):
+            continue                                     # a blank line or a note like "Total" or "Ending balance"
+        try:
+            date = _date(cell(dcol))
+            name = cell(ncol)
+            if acol and cell(acol):
+                amt = _num(cell(acol)) * (-1 if flip else 1)
+            else:
+                amt = abs(_num(cell(credit))) - abs(_num(cell(debit)))
+            row_bal = _num(cell(bcol)) if bcol and cell(bcol) else None
+        except ValueError as e:
+            raise ValueError(f"row {n}: {e}")
         key = (date, name, round(amt, 2))
         seen[key] = seen.get(key, 0) + 1            # two identical purchases on one day are both real: number them
         tid = hashlib.sha256(f"{date}|{name}|{amt:.2f}|{seen[key]}".encode()).hexdigest()[:20]
         out.append({"id": f"bank:{tid}", "date": date, "name": name or "(no description)", "amount": round(amt, 2)})
-        if bcol and (r.get(bcol) or "").strip() and (newest is None or date >= newest[0]):
-            newest = (date, _num(r[bcol]))
+        if row_bal is not None and (newest is None or date >= newest[0]):
+            newest = (date, row_bal)
     return out, (newest[1] if newest else None)
 
 
