@@ -13,7 +13,7 @@ import httpx
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
-from coinpile import crypto, feed, ledger, plan, recur, settings as cfg, sync
+from coinpile import crypto, feed, netguard, ledger, plan, recur, settings as cfg, sync
 
 PRESETS = [
     {"name": "Ollama (this machine)", "kind": "openai", "base_url": "http://host.docker.internal:11434/v1", "model": "llama3.1", "tools": True},
@@ -359,7 +359,7 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
         snap = {n: by_name[n]({}) for n in ("get_overview", "list_accounts", "list_subscriptions", "upcoming_bills", "savings_summary", "find_recurring_payments", "budget_status")}
         system += "\nYou have no tools. Here is a snapshot of the user's data as JSON:\n" + json.dumps(snap, default=str)[:14000]
     msgs, trace = [dict(m) for m in history], []
-    with httpx.Client(timeout=300, transport=ctx.llm_transport) as http:
+    with netguard.client(ctx.llm_transport, timeout=300) as http:
         for step in range(max_steps):
             out = call(http, prov, key, system, msgs, tools if use_tools else None)
             if not out["tool_calls"]:
@@ -392,7 +392,7 @@ def list_models(kind: str, base_url: str, key: str, transport=None) -> list[dict
     """Ask the server what it has. OpenAI-compatible servers answer GET /models (Ollama and LM Studio included);
     Anthropic answers GET /v1/models. Ollama's own /api/tags is the fallback. Returns [{id, context}]."""
     base = base_url.rstrip("/")
-    with httpx.Client(timeout=15, transport=transport) as http:
+    with netguard.client(transport, timeout=15) as http:
         if kind == "anthropic":
             r = http.get(base + "/v1/models", headers={"x-api-key": key, "anthropic-version": "2023-06-01"}, params={"limit": 1000})
             r.raise_for_status()
@@ -420,7 +420,7 @@ def model_context(base_url: str, model: str, transport=None) -> dict:
     because Ollama only uses that much when num_ctx is set. LM Studio: the loaded context. llama.cpp server: n_ctx (the server's own setting).
     Returns {"context_tokens": None} when the server cannot say."""
     origin = _origin(base_url)
-    with httpx.Client(timeout=15, transport=transport) as http:
+    with netguard.client(transport, timeout=15) as http:
         try:
             r = http.post(origin + "/api/show", json={"model": model, "name": model})
             r.raise_for_status()
@@ -594,7 +594,7 @@ def register(app, ctx):
         try:
             return fn()
         except httpx.HTTPStatusError as e:
-            raise HTTPException(502, f"model server answered {e.response.status_code}: {e.response.text[:200]}")
+            raise HTTPException(502, f"model server answered {e.response.status_code}")
         except httpx.HTTPError as e:
             raise HTTPException(502, f"could not reach the model at {row['base_url']} ({type(e).__name__}). Is it running?")
 
@@ -644,7 +644,7 @@ def register(app, ctx):
         prompt = ("Summarize this conversation so you can continue it later. Keep every number, name, decision and open question. Under 250 words.\n\n"
                   + (f"Earlier summary:\n{chat['summary']}\n\n" if chat["summary"] else "") + text)
         call = _call_anthropic if prov["kind"] == "anthropic" else _call_openai
-        with httpx.Client(timeout=300, transport=ctx.llm_transport) as http:
+        with netguard.client(ctx.llm_transport, timeout=300) as http:
             out = call(http, prov, key, "You write concise, faithful conversation summaries.", [{"role": "user", "content": prompt}], None)
         summary = out["content"].strip()
         if not summary:
@@ -783,7 +783,7 @@ def register(app, ctx):
         try:
             out = run_chat(ctx, row, crypto.decrypt(row["key_enc"]) if row["key_enc"] else "", hist[-30:])
         except httpx.HTTPStatusError as e:
-            raise HTTPException(502, f"model server answered {e.response.status_code}: {e.response.text[:200]}")
+            raise HTTPException(502, f"model server answered {e.response.status_code}")
         except httpx.HTTPError as e:
             raise HTTPException(502, f"could not reach the model at {row['base_url']} ({type(e).__name__}). Is it running?")
         return {**out, "provider": {"id": row["id"], "name": row["name"], "model": row["model"], "local": local}}

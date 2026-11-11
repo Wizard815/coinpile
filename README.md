@@ -108,6 +108,18 @@ Settings, Agent models: add a model. A local one (Ollama, LM Studio, llama.cpp: 
 | `CONNECTOR_URL` | default Plaid connector address for everyone's Banks settings |
 | `REFRESH_MINUTES` | default: read Firefly III every 10 minutes (each person can change it) |
 | `DATA_DIR` | default `/data` |
+| `RH_AGENT_URL`, `RH_LIVE_URL`, `CONNECTOR_SECRET` | the optional Robinhood connector containers |
+| `RH_OWNER` | the Firefly III email of the one person those Robinhood connectors belong to (nobody else sees them; without it, nobody does) |
+| `ALLOW_LOOPBACK_URLS` | `1` lets addresses people type (model server, calendar, webhook) point at the container itself; off by default |
+
+### Security notes
+
+- Each person's settings and secrets are their own: nothing falls back to the container's environment for a person (except `CONNECTOR_URL` and `REFRESH_MINUTES`, which are not secret).
+- Addresses a person types (a model server, a calendar, a chat webhook, the connector) cannot reach the container itself or the cloud metadata address; your home network is allowed.
+- "Sign in with Firefly III" can only be finished in the browser that started it.
+- A person's name for sharing is never given to someone else after they use "Forget me", and the people they shared with are told.
+- What the agent adds (subscriptions, goals, notes) stays in Coinpile: it is never sent to Firefly III without you.
+- Uploads over 6 MB are refused before they are read. Pages cannot be framed by other sites.
 
 ## Develop
 

@@ -1,4 +1,5 @@
-"""Per-goblin settings stored in the DB (secrets Fernet-encrypted). Env vars are the fallback."""
+"""Each person's settings, in their own database (secrets Fernet-encrypted). Nothing falls back to the container's environment except two
+non-secret defaults (CONNECTOR_URL, REFRESH_MINUTES): one person must never be handed another's (or the operator's) credentials."""
 import os
 import re
 
@@ -8,16 +9,16 @@ SOURCES = ("auto", "plaid", "csv", "live")
 SHAREABLE = ("net_worth", "subscriptions", "bills", "bill_list", "alerts", "alert_list", "savings", "goals", "spending", "robinhood_main", "robinhood_agent")
 # key -> (kind, secret, env fallback)
 SPEC = {
-    "share": ("list", False, "SHARE"),
+    "share": ("list", False, ""),
     "rh_main_source": ("choice", False, ""),
-    "plaid_client_id": ("str", False, "PLAID_CLIENT_ID"), "plaid_secret": ("str", True, "PLAID_SECRET"), "plaid_env": ("str", False, "PLAID_ENV"),
-    "caldav_url": ("str", False, "CALDAV_URL"), "caldav_user": ("str", False, "CALDAV_USER"),
-    "caldav_password": ("str", True, "CALDAV_PASSWORD"),
-    "rh_mcp_url": ("str", False, "RH_MCP_URL"), "rh_mcp_token": ("str", True, "RH_MCP_TOKEN"),
-    "rh_mcp_read_tools": ("str", False, "RH_MCP_READ_TOOLS"),
-    "rh_mcp_tool_balances": ("str", False, "RH_MCP_TOOL_BALANCES"),
-    "rh_mcp_tool_positions": ("str", False, "RH_MCP_TOOL_POSITIONS"),
-    "rh_mcp_tool_history": ("str", False, "RH_MCP_TOOL_HISTORY"),
+    "plaid_client_id": ("str", False, ""), "plaid_secret": ("str", True, ""), "plaid_env": ("str", False, ""),
+    "caldav_url": ("str", False, ""), "caldav_user": ("str", False, ""),
+    "caldav_password": ("str", True, ""),
+    "rh_mcp_url": ("str", False, ""), "rh_mcp_token": ("str", True, ""),
+    "rh_mcp_read_tools": ("str", False, ""),
+    "rh_mcp_tool_balances": ("str", False, ""),
+    "rh_mcp_tool_positions": ("str", False, ""),
+    "rh_mcp_tool_history": ("str", False, ""),
     # Coinpile: the Plaid connector this person's banks go through (optional), and bookkeeping for the Firefly III copy
     "connector_url": ("str", False, "CONNECTOR_URL"), "connector_name": ("str", False, ""), "connector_token": ("str", True, ""),
     "refresh_minutes": ("int", False, "REFRESH_MINUTES"),

@@ -24,9 +24,13 @@ def equity(bal) -> float | None:
 
 
 class Robinhood:
-    def __init__(self, db, csv_dir: str, transport=None):
+    def __init__(self, db, csv_dir: str, transport=None, email: str = ""):
+        """The live and agent connectors are one Robinhood account: they are used only for the person named in RH_OWNER (their Firefly III email).
+        Everyone else gets the CSV upload only, so nobody is ever shown someone else's portfolio."""
         self.db, self.csv_dir = db, csv_dir
-        self.urls = {"agent": os.environ.get("RH_AGENT_URL", ""), "live": os.environ.get("RH_LIVE_URL", "")}
+        owner = os.environ.get("RH_OWNER", "").strip().lower()
+        mine = bool(owner) and owner == (email or "").strip().lower()
+        self.urls = {"agent": os.environ.get("RH_AGENT_URL", "") if mine else "", "live": os.environ.get("RH_LIVE_URL", "") if mine else ""}
         self.secret = os.environ.get("CONNECTOR_SECRET", "")
         self.c = httpx.Client(timeout=20, transport=transport)
 
@@ -92,7 +96,9 @@ class Robinhood:
         if "Trans Code" not in head or "Activity Date" not in head:
             raise ValueError("not a Robinhood activity report (expected Activity Date and Trans Code columns)")
         os.makedirs(self.csv_dir, exist_ok=True)
-        fname = f"import-{sync.now().replace(':', '').replace('+', 'Z')}.csv"
+        if len(os.listdir(self.csv_dir)) >= 200:
+            raise ValueError("there are already 200 reports here; delete old ones first")
+        fname = f"import-{sync.now().replace(':', '').replace('+', 'Z')}-{os.urandom(3).hex()}.csv"
         with open(os.path.join(self.csv_dir, fname), "wb") as f:
             f.write(raw)
         return fname

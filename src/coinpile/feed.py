@@ -3,6 +3,8 @@ from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
+from coinpile import netguard
+
 FREQ = {"day": "DAILY", "week": "WEEKLY", "month": "MONTHLY", "year": "YEARLY"}
 
 
@@ -36,7 +38,7 @@ def ics(subs: list[dict]) -> str:
 def push_caldav(subs: list[dict], url: str, user: str, password: str, transport: httpx.BaseTransport | None = None) -> dict:
     """PUT one event per subscription into a CalDAV calendar collection (idempotent: stable UIDs)."""
     ok, failed = 0, []
-    with httpx.Client(timeout=20, auth=(user, password), transport=transport) as c:
+    with netguard.client(transport, timeout=20, auth=(user, password)) as c:
         for s in subs:
             if not s.get("active", 1):
                 continue
@@ -77,7 +79,7 @@ def parse_ics(text: str) -> list[dict]:
 def read_caldav(url: str, user: str, password: str, start: date, end: date, transport: httpx.BaseTransport | None = None) -> list[dict]:
     body = f"""<?xml version="1.0"?><c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/></d:prop>
 <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT"><c:time-range start="{start:%Y%m%d}T000000Z" end="{end:%Y%m%d}T000000Z"/></c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"""
-    with httpx.Client(timeout=20, auth=(user, password), transport=transport) as c:
+    with netguard.client(transport, timeout=20, auth=(user, password)) as c:
         r = c.request("REPORT", url, content=body.encode(), headers={"Depth": "1", "Content-Type": "application/xml; charset=utf-8"})
     r.raise_for_status()
     events = []

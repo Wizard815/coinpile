@@ -2,7 +2,11 @@
 
 Coinpile talks to the connector's gateway as that person, with the person's name and their connector password or login token (kept encrypted).
 Bank data itself still flows bank -> connector -> Firefly III -> Coinpile; this is only the remote control."""
+import re
+
 import httpx
+
+from coinpile import netguard
 
 
 class ConnectorError(Exception):
@@ -14,7 +18,9 @@ class Connector:
         if not (url and name and secret):
             raise ConnectorError("the Plaid connector is not set up: enter its address, your name there and your password in Settings, Banks")
         self.url, self.name, self.secret = url.rstrip("/"), name.strip().lower(), secret
-        self.c = httpx.Client(timeout=60, transport=transport)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", self.name):
+            raise ConnectorError("your name at the connector is lowercase letters, digits, - and _ only")
+        self.c = netguard.client(transport, timeout=60)
         self.token = secret if len(secret) >= 40 and " " not in secret else None     # a long random login token is used as is; anything else is a password
 
     def _login(self) -> None:
@@ -60,7 +66,8 @@ class Connector:
         return self.call("POST", "sync", {})
 
     def link_token(self, item_id: str | None = None) -> dict:
-        return self.call("POST", "plaid/link-token" + (f"?item_id={item_id}" if item_id else ""), {})
+        from urllib.parse import quote
+        return self.call("POST", "plaid/link-token" + (f"?item_id={quote(item_id, safe='')}" if item_id else ""), {})
 
     def exchange(self, public_token: str, institution: str) -> dict:
         return self.call("POST", "plaid/exchange", {"public_token": public_token, "institution": institution})

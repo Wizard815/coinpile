@@ -42,18 +42,32 @@ class Writer:
         if not row or not row.get("ff_group"):
             raise KeyError(tid)
         f = self.ff()
-        f.send("PUT", f"/transactions/{row['ff_group']}", {"apply_rules": False, "transactions": [{"transaction_journal_id": tid.split(":")[1], "category_name": category}]})
+        jid = tid.split(":")[1]
+        # Firefly III deletes any split of a group that is left out of an update, so every split goes back, unchanged except this one's category.
+        grp = f.get(f"/transactions/{row['ff_group']}")["data"]["attributes"]
+        splits = grp["transactions"]
+        if not any(str(x["transaction_journal_id"]) == jid for x in splits):
+            raise KeyError(tid)
+        f.send("PUT", f"/transactions/{row['ff_group']}", {"apply_rules": False, **({"group_title": grp.get("group_title") or row["name"][:255]} if len(splits) > 1 else {}), "transactions": [
+            {"transaction_journal_id": str(x["transaction_journal_id"]), **({"category_name": category} if str(x["transaction_journal_id"]) == jid else {})} for x in splits]})
         out = {"id": tid, "category": category, "updated": 1, "in_firefly": True}
         if make_rule:
             words = recur.norm(row["name"]) or row["name"]
-            f.send("POST", "/rules", {"title": f"{words[:60]} is {category}", "rule_group_id": self._rule_group(f), "trigger": "store-journal", "active": True, "strict": True,
-                                      "stop_processing": False, "triggers": [{"type": "description_contains", "value": words[:255], "active": True, "stop_processing": False}],
-                                      "actions": [{"type": "set_category", "value": category, "active": True, "stop_processing": False}]})
+            try:
+                self._make_rule(f, words, category)
+            except firefly.FireflyError as e:
+                if "already in use" not in str(e):
+                    raise                                       # the same rule exists already: fine
             out["rule"] = f"Firefly III rule: description contains '{words[:60]}', set category {category}"
         with self.db.tx() as c:
             c.execute("UPDATE transactions SET category=? WHERE id=?", (category, tid))
             c.execute("INSERT OR IGNORE INTO categories(name,kind,builtin) VALUES(?,?,0)", (category, "expense"))
         return out
+
+    def _make_rule(self, f, words: str, category: str) -> None:
+        f.send("POST", "/rules", {"title": f"{words[:60]} is {category}", "rule_group_id": self._rule_group(f), "trigger": "store-journal", "active": True, "strict": True,
+                                  "stop_processing": False, "triggers": [{"type": "description_contains", "value": words[:255], "active": True, "stop_processing": False}],
+                                  "actions": [{"type": "set_category", "value": category, "active": True, "stop_processing": False}]})
 
     def _rule_group(self, f) -> str:
         for g in f.pages("/rule-groups"):
