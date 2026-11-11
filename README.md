@@ -6,14 +6,35 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 
 - **Overview**: net worth, what you owe on cards, subscriptions per month, bills in the next 30 days, spending this month and a forecast, where the money sits, latest movement. Panels can be moved, resized and hidden (Arrange panels).
 - **Money movement**: search and filter every transaction.
-- **Accounts**: every Firefly III asset account, credit card and liability, with balance history.
+- **Accounts**: every Firefly III asset account, credit card and liability, with balance history (net worth has a past from day one: it is read from Firefly III).
 - **Subscriptions**: your Firefly III bills, plus the subscription catcher (repeating payments found in your transactions that are not a bill yet).
 - **Savings**: Firefly III piggy banks, and Coinpile's own goal planner (set money aside for goals, free vs. promised money, CDs and when they mature).
 - **Budgets & notes**: monthly plan, incomes, notes.
 - **Agent**: chat with a model (a local one such as Ollama by default) that can look up your accounts, transactions, subscriptions, savings and bills, and write notes.
 - **Settings, Banks**: your banks at the Plaid connector: link a bank, fix a bank sign-in, pull now.
 
-Rule of thumb: **change data in Firefly III** (transactions, categories, accounts, bills, piggy banks). Coinpile keeps only its own things: goals, notes, savings you track by hand, chats, nicknames.
+- **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
+- **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
+- **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
+
+### What Coinpile changes in Firefly III
+
+**Nothing, unless you switch it on** (Settings, Firefly III, Send to Firefly III). Each part is separate:
+
+| Switch | What goes into Firefly III |
+|---|---|
+| Goals as piggy banks | each goal becomes a piggy bank holding what you set aside for it on Firefly III accounts; closing or deleting the goal removes it |
+| Subscriptions as bills | a subscription you add or accept becomes a bill; editing or deleting it changes the bill (daily ones stay in Coinpile) |
+| Categories | a category you set on a transaction; "always" also makes a Firefly III rule in a rule group called Coinpile |
+| Accounts and transactions | new accounts; transactions you add to a Firefly III account; bank or PayPal/Venmo/Cash App CSVs you import into one (rows already there are skipped) |
+
+Only things Coinpile made are ever changed or removed. Firefly III's own piggy banks count as money already set aside, so Coinpile's "free to use" money never counts it twice.
+
+What Firefly III has no place for always stays in Coinpile: savings APY and maturity, notes, chats, nicknames, minimum-balance warnings, who pays a subscription, reminders, Robinhood, PayPal/Venmo/Cash App and cash accounts you keep in Coinpile only.
+
+### Firefly III using Coinpile
+
+Firefly III cannot read other apps, but it can tell them when something changes. Add a **webhook** in Firefly III (Automation, Webhooks) pointing at the address shown under Settings, Firefly III, Instant updates, and paste the webhook's secret into Coinpile: Coinpile then shows a new or changed transaction within seconds instead of at the next read. Coinpile checks Firefly III's signature on every call. If Webhooks is greyed out in Firefly III, the owner turns them on under Administration, Configuration.
 
 ## How it fits together
 
@@ -104,8 +125,11 @@ FIREFLY_URL=http://127.0.0.1:8080 DATA_DIR=./data UI_DIR=./ui PYTHONPATH=src uvi
 
 The tests use a stand-in for Firefly III's API (`tests/fake_firefly.py`) and a scripted model (`devtools/fake_llm.py`).
 
+## Home Assistant
+
+Settings, Home Assistant & API: make a token that may read `summary` (and `refresh` for an on-demand read of Firefly III). Coinpile shows the Home Assistant YAML. Tokens look like `cp_<n>_...` and are read at `/api/v1/me/{summary|ha|bills|alerts|savings|goals|budgets|transactions}`. For the Pondering Orb, make a token with the `orb` scope and tick what it may see.
+
 ## Not yet
 
-- Writing back to Firefly III (for example, turning a found subscription into a Firefly III bill, or recategorising) is done in Firefly III for now.
 - Budgets in Coinpile are Coinpile's own; Firefly III budgets are not read yet.
-- Goals do not move money into piggy banks; piggy banks are shown read-only.
+- Firefly III 6.7 can fail to change a piggy bank's amount (an internal error). Coinpile then replaces the piggy bank it made with a new one holding the new amount.

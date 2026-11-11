@@ -42,6 +42,7 @@ class AccountIn(BaseModel):
     pinned: bool | None = None             # show its balance on the Overview
     joint_with: str | None = None          # "" clears; the other goblin that also links this account
     my_share: float | None = None          # percent of its balance that is mine (joint accounts); -1 clears
+    coinpile_only: bool = False            # with "send accounts to Firefly III" on: keep this new one in Coinpile anyway
 
 
 class TxIn(BaseModel):
@@ -86,6 +87,18 @@ def register(app, ctx):
 
     def bad(msg, code=422):
         raise HTTPException(code, msg)
+
+    W = getattr(ctx, "writer", None)             # Coinpile: the parts the person chose to send into Firefly III (ffwrite.py); None or switched off = Firefly III is only read
+
+    def sends(part: str) -> bool:
+        return bool(W) and W.on(part)
+
+    def in_firefly(fn, *a):
+        from coinpile import firefly
+        try:
+            return fn(*a)
+        except firefly.FireflyError as e:
+            bad(str(e), 502)
 
     def date_ok(v, field):
         try:
@@ -171,6 +184,12 @@ def register(app, ctx):
             bad("name required")
         if (a.kind or "cash") not in KINDS:
             bad(f"kind must be one of {sorted(KINDS)}")
+        if sends("accounts") and not a.coinpile_only:
+            aid = in_firefly(W.add_account, a.name, a.institution, a.kind or "cash", a.balance)
+            if a.min_balance is not None:
+                with store.tx() as c:
+                    c.execute("UPDATE accounts SET min_balance=? WHERE id=?", (a.min_balance, aid))
+            return store.one("SELECT * FROM accounts WHERE id=?", (aid,))
         aid = f"own-{uuid.uuid4().hex[:8]}"
         with store.tx() as c:
             c.execute("INSERT INTO accounts(id,source,institution,name,kind,balance,min_balance,updated) VALUES(?,?,?,?,?,?,?,?)",
@@ -273,6 +292,13 @@ def register(app, ctx):
         date_ok(t.date, "date")
         if not store.one("SELECT 1 FROM accounts WHERE id=?", (t.account_id,)):
             bad("account not found", 404)
+        if t.account_id.startswith("ff:"):
+            if not sends("accounts"):
+                bad("this account comes from Firefly III: add the transaction there, or switch on sending to Firefly III in Settings, Firefly III", 409)
+            d = in_firefly(W.add_transaction, t.account_id, t.date, t.name, t.amount, t.category)
+            W.after()
+            jid = d["data"]["attributes"]["transactions"][0]["transaction_journal_id"]
+            return store.one("SELECT * FROM transactions WHERE id=?", (f"ff:{jid}",)) or {"id": f"ff:{jid}", "in_firefly": True}
         cat = t.category or ledger.categorize(store, t.name, t.amount)
         if not store.one("SELECT 1 FROM categories WHERE name=?", (cat,)):
             bad(f"unknown category {cat!r}")
@@ -292,7 +318,12 @@ def register(app, ctx):
     def tx_category(request: Request, tid: str, body: CatSet):
         auth(request)
         if tid.startswith("ff:"):
-            bad("this transaction comes from Firefly III: change its category there (a Firefly III rule can do it for every future one)", 409)
+            if not sends("categories"):
+                bad("this transaction comes from Firefly III: change its category there, or switch on sending categories in Settings, Firefly III", 409)
+            try:
+                return in_firefly(W.set_category, tid, body.category.strip()[:60], body.make_rule)
+            except KeyError:
+                bad("transaction not found", 404)
         try:
             return ledger.set_category(store, tid, body.category, body.make_rule)
         except KeyError:
@@ -422,7 +453,19 @@ def register(app, ctx):
         every, unit = check_sub(s)
         with store.tx() as c:
             cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+        to_bill(cur.lastrowid)
         return ledger.subscription(store, cur.lastrowid, ctx.today())
+
+    def to_bill(sid: int) -> None:
+        """With "send subscriptions" on, the new subscription becomes a Firefly III bill. If Firefly III cannot take it, it stays a Coinpile subscription and says why."""
+        if not sends("bills"):
+            return
+        from coinpile import firefly
+        try:
+            W.sub_created(sid)
+        except firefly.FireflyError as e:
+            with store.tx() as c:
+                c.execute("UPDATE subscriptions SET notes=trim(coalesce(notes,'') || ' ' || ?) WHERE id=?", (f"(not in Firefly III: {e})", sid))
 
     ctx.create_sub = create_sub
 
@@ -432,8 +475,8 @@ def register(app, ctx):
         return create_sub(s.model_dump())
 
     def from_firefly(sid: int) -> None:
-        if (store.one("SELECT source FROM subscriptions WHERE id=?", (sid,)) or {}).get("source") == "firefly":
-            bad("this is a bill in Firefly III: change or remove it there", 409)
+        if not sends("bills") and (store.one("SELECT source FROM subscriptions WHERE id=?", (sid,)) or {}).get("source") == "firefly":
+            bad("this is a bill in Firefly III: change or remove it there, or switch on sending subscriptions in Settings, Firefly III", 409)
 
     @app.put("/api/subscriptions/{sid}")
     def subs_update(request: Request, sid: int, s: Sub):
@@ -445,12 +488,16 @@ def register(app, ctx):
             cur = c.execute(f"UPDATE subscriptions SET {sets} WHERE id=?", sub_row(s, every, unit) + (sid,))
         if not cur.rowcount:
             bad("not found", 404)
+        if sends("bills"):
+            in_firefly(W.sub_updated, sid)
         return ledger.subscription(store, sid, ctx.today())
 
     @app.delete("/api/subscriptions/{sid}")
     def subs_delete(request: Request, sid: int):
         auth(request)
         from_firefly(sid)
+        if sends("bills"):
+            in_firefly(W.sub_deleted, store.one("SELECT * FROM subscriptions WHERE id=?", (sid,)))
         with store.tx() as c:
             c.execute("DELETE FROM subscriptions WHERE id=?", (sid,))
         return {"deleted": sid}
@@ -500,6 +547,7 @@ def register(app, ctx):
                 c.execute("UPDATE proposals SET status='accepted' WHERE id=?", (sug["proposal_id"],))
             else:
                 c.execute("UPDATE subscriptions SET match_key=? WHERE id=?", (sug["key"], cur.lastrowid))
+        to_bill(cur.lastrowid)
         return ledger.subscription(store, cur.lastrowid, ctx.today())
 
     class Dismiss(BaseModel):

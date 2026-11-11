@@ -56,9 +56,10 @@ def _piggies(db) -> list[dict]:
     import json
     try:
         rows = db.all("SELECT data FROM ff_piggy ORDER BY id")
+        ours = {r["piggy_id"] for r in db.all("SELECT piggy_id FROM ff_goal_piggy")}
     except Exception:
         return []
-    return [p for p in (json.loads(r["data"]) for r in rows) if p.get("active", True)]
+    return [p for p in (json.loads(r["data"]) for r in rows) if p.get("active", True) and p["id"] not in ours]     # a goal's own piggy bank is that goal, not extra money set aside
 
 
 def goals_view(db, today: date) -> dict:
