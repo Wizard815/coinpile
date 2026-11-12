@@ -147,7 +147,7 @@ td.mono{white-space:nowrap}
 </style>
 
 <div id="app"></div>
-<script>window.GOBLIN_DEMO = null; /*DEMO*/</script>
+<script>window.COINPILE_DEMO = null; /*DEMO*/</script>
 <script>
 "use strict";
 /* ---------- tiny DOM helper: strings are always text nodes, so bank data can never inject HTML ---------- */
@@ -668,7 +668,7 @@ async function viewAgent(root, rerender) {
       h("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, c.title), h("button", { class: "btn sm danger", "aria-label": "Delete chat", onclick: (e) => { e.stopPropagation(); sure(null, "Sure?", async () => { await api("/api/chats/" + c.id, { method: "DELETE" }); if (S.chatId === c.id) S.chatId = null; rerender(); })(e); } }, "×"))) : h("p", { class: "muted small" }, "No chats yet."));
   add(root,
     !pv.items.length ? h("div", { class: "panel" }, h("h3", {}, "Set up a model first"), h("p", { class: "muted" }, "Add a local model (Ollama, LM Studio, llama.cpp) or a cloud one in Settings, then come back."), h("button", { class: "btn primary", onclick: () => { S.tab = "settings"; S.settingsTab = "models"; render(); } }, "Open model settings")) : null,
-    h("div", { class: "split" }, sidebar, h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, chat && chat.title !== "New chat" ? chat.title : "Ask Goblin"),
+    h("div", { class: "split" }, sidebar, h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, chat && chat.title !== "New chat" ? chat.title : "Ask Coinpile"),
       pv.items.length ? h("div", { class: "chips" }, h("select", { class: "bare", "aria-label": "Model", onchange: (e) => { S.provider = +e.target.value; S.tools = null; rerender(); } }, pv.items.map((p) => h("option", { value: p.id, selected: p.id === S.provider }, `${p.name} · ${p.model}`))),
         cur ? h("span", { class: "pill " + (cur.local ? "t" : "r") }, cur.local ? "on your machine" : cur.allow_cloud ? "cloud" : "cloud, blocked") : null,
         h("label", { class: "check", title: "Off = the model gets a snapshot of your data instead of calling tools. Use it for small models." }, h("input", { type: "checkbox", id: "ag-tools", checked: toolsOn, onchange: (e) => { S.tools = e.target.checked; } }), "Tools")) : null),
@@ -967,7 +967,7 @@ async function tabLinks(root, rerender) {
     r.waiting ? h("p", { class: "small" }, `${r.waiting} update${r.waiting === 1 ? "" : "s"} waiting to be delivered (the other person has not opened Coinpile yet). `, h("button", { class: "btn sm", onclick: async () => { await api("/api/links/flush", send("POST", {})); rerender(); } }, "Try now")) : null,
     free.length ? h("form", { class: "row", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/links", send("POST", { peer: val("lk-peer") })); toast("Request sent. They will be asked right away"); rerender(); } catch (err) { fail(err); } } },
       select("lk-peer", "Link with", free.map((x) => [x, x]), free[0]), h("button", { class: "btn primary", type: "submit" }, "Ask to link"))
-      : h("p", { class: "muted small", style: "margin-top:10px" }, ppl.people.length ? "You are linked or waiting with everyone on this server." : "No other goblins on this server yet. The server's admin adds people on the admin page."),
+      : h("p", { class: "muted small", style: "margin-top:10px" }, ppl.people.length ? "You are linked or waiting with everyone on this server." : "No other people on this server yet. The server's admin adds people on the admin page."),
     h("p", { class: "muted small" }, `Others see you as ${r.me}.`)),
   sh.map((p) => h("div", { class: "panel" }, h("h3", {}, "Sharing with " + p.peer),
     h("p", { class: "muted small" }, `${p.peer} sees only what is ticked here: the account's name and your part of its balance, kept up to date. Nothing else about it.`),
@@ -1191,7 +1191,7 @@ async function login() {
 }
 async function boot() {
   const want = location.hash.slice(1); if (TABS.some((t) => t[0] === want)) S.tab = want;
-  if (new URLSearchParams(location.search).has("demo") && window.GOBLIN_DEMO) { DEMO = window.GOBLIN_DEMO; S.demo = true; S.provider = DEMO.chatProvider; return render(); }
+  if (new URLSearchParams(location.search).has("demo") && window.COINPILE_DEMO) { DEMO = window.COINPILE_DEMO; S.demo = true; S.provider = DEMO.chatProvider; return render(); }
   let me = {}; try { me = await (await fetch("/auth/me", { credentials: "same-origin", cache: "no-store" })).json(); } catch {}
   if (!me.signed_in) return login();
   S.authed = true; S.name = me.email || "";

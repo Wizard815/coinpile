@@ -40,7 +40,7 @@ class AccountIn(BaseModel):
     nickname: str | None = None            # your own label for any account ("" clears it)
     category: str | None = None            # what the account is for ("" clears it): Checking, Bills, Savings, Emergency fund...
     pinned: bool | None = None             # show its balance on the Overview
-    joint_with: str | None = None          # "" clears; the other goblin that also links this account
+    joint_with: str | None = None          # "" clears; the other person who also links this account
     my_share: float | None = None          # percent of its balance that is mine (joint accounts); -1 clears
     coinpile_only: bool = False            # with "send accounts to Firefly III" on: keep this new one in Coinpile anyway
 

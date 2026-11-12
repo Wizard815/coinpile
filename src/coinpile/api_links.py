@@ -1,4 +1,4 @@
-"""Routes for linking goblins and sharing goals. Logic lives in links.py."""
+"""Routes for linking people and sharing goals. Logic lives in links.py."""
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
@@ -80,7 +80,7 @@ def register(app, ctx):
 
     @app.get("/api/links/people")
     def link_people(request: Request):
-        """The other goblins on this gateway (names only), so linking is a pick, not a guess."""
+        """The other people on this Coinpile (names only), so linking is a pick, not a guess."""
         auth(request)
         return {"people": [x for x in ctx.link_people() if x != name]}
 

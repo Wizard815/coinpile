@@ -1,8 +1,8 @@
 # Coinpile
 
-A simple, friendly view of your **Firefly III**, with an **agent** you can ask about your money, and a remote control for the **Plaid connector** ([plaid-firefly-connector](https://github.com/Wizard815/plaid-firefly-connector)).
+A simple, friendly view of your **Firefly III**, with an **agent** you can ask about your money, and a remote control for the **Plaid connector** (plaid-proxy, from [plaid-firefly-connector](https://github.com/Wizard815/plaid-firefly-connector)).
 
-Firefly III stays in charge of your data. Coinpile reads it every few minutes and shows it the way the old Goblin Bank app did:
+Firefly III stays in charge of your data. Coinpile reads it every few minutes and shows it in one place (it took over the screens of the old Goblin Bank app):
 
 - **Overview**: net worth, what you owe on cards, subscriptions per month, bills in the next 30 days, spending this month and a forecast, where the money sits, latest movement. Panels can be moved, resized and hidden (Arrange panels).
 - **Money movement**: search and filter every transaction.
@@ -94,6 +94,10 @@ Tokens are stored encrypted with a key kept in `/data/.field_key` (or `FIELD_KEY
 ## Banks (Plaid connector)
 
 Settings, Banks: enter the connector's address, your name there and your connector password (or the login token the connector printed for you). From then on you can see your banks, link a new one in Plaid's window, fix a bank sign-in (relink) and pull your banks now. A newly linked bank's accounts wait for the connector admin's approval before they are sent to Firefly III.
+
+**Moved the connector from Goblin Bank to plaid-proxy?** Nothing changes here: the connector's address (its gateway), your name and your
+password or login token are the same after `migrate_from_goblin_bank.sh`, so Coinpile's Banks settings keep working as they are. Banks stay
+linked, and transactions keep arriving in Firefly III under the same Personal Access Token without any being sent twice.
 
 Banks that sign you in on their own website (OAuth banks) return you to the address the connector registered with Plaid, not to Coinpile; link those from the connector's own `/link` page or admin page.
 

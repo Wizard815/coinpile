@@ -1,4 +1,4 @@
-"""Links between goblins: two people agree to share a goal (and its notes), nothing else.
+"""Links between people: two people agree to share a goal (and its notes), nothing else.
 
 What crosses a link, and only for a goal both sides have agreed to share: its name, cost, deadline, priority, status, the notes thread, and one number per
 person: how much that person has set aside for it. Never an account, a balance, a transaction or a private note. The gateway only relays the messages;
@@ -55,7 +55,7 @@ def flush(db, send) -> int:
 def invite(db, me: str, peer: str) -> dict:
     peer = (peer or "").strip().lower()
     if not NAME.match(peer) or peer == me:
-        raise LinkError("that is not another goblin's name")
+        raise LinkError("that is not another person's name")
     cur = status(db, peer)
     if cur == "active":
         raise LinkError("already linked")

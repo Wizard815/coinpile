@@ -194,9 +194,9 @@ def main(out: str, artifact: bool):
                    "provider": {"id": rec["chatProvider"], "name": "Ollama (this machine)", "model": "llama3.1", "local": True}, "steps": 2}
     rec["models"] = {"models": [{"id": "llama3.1:8b", "context": None}, {"id": "qwen2.5:32b", "context": None}], "local": True}
     html = (ROOT / "ui" / "index.html").read_text()
-    html = html.replace("window.GOBLIN_DEMO = null; /*DEMO*/", "window.GOBLIN_DEMO = " + json.dumps(rec, default=str).replace("</", "<\\/") + ";")
+    html = html.replace("window.COINPILE_DEMO = null; /*DEMO*/", "window.COINPILE_DEMO = " + json.dumps(rec, default=str).replace("</", "<\\/") + ";")
     if artifact:
-        html = html.replace('if (new URLSearchParams(location.search).has("demo") && window.GOBLIN_DEMO)', "if (window.GOBLIN_DEMO)")
+        html = html.replace('if (new URLSearchParams(location.search).has("demo") && window.COINPILE_DEMO)', "if (window.COINPILE_DEMO)")
         html = "\n".join(html.split("\n")[2:])
     Path(out).write_text(html)
     print(f"wrote {out} ({len(html) // 1024} KB, {len(rec['transactions']['items'])} transactions)")
