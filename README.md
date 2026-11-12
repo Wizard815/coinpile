@@ -8,8 +8,19 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Money movement**: search and filter every transaction.
 - **Accounts**: every Firefly III asset account, credit card and liability, with balance history (net worth has a past from day one: it is read from Firefly III).
 - **Subscriptions**: your Firefly III bills, plus the subscription catcher (repeating payments found in your transactions that are not a bill yet).
-- **Savings**: Firefly III piggy banks, and Coinpile's own goal planner (set money aside for goals, free vs. promised money, CDs and when they mature).
-- **Budgets & notes**: monthly plan, incomes, notes.
+  Repeats: daily, weekly, every 2 or 4 weeks, monthly, every 2, 3 or 6 months, yearly, every 2 years, or any custom "every N days/weeks/months/years".
+  **Ends**: never (the default), on a date, or **after a number of payments**: "3 more, of 4 in all" for PayPal Pay in 4 shows "payment 2 of 4" and counts
+  down; after the last one it moves to **Finished**, kept so you can look back (Extend or Delete it there). The end date also goes to the Firefly III bill.
+  **Missing subscriptions**: when a subscription's usual payment does not show up (3 days of grace), it is called out on this page, on the Overview and in
+  notifications. With "Paid from" set, that account is checked; without it, every account is, by the payee's name, once that payee has been seen before.
+- **Savings**: Coinpile's own goal planner (set money aside for goals, free vs. promised money, CDs and when they mature).
+- **Piggy banks**: your Firefly III piggy banks with progress, what is still needed, by when, which account holds the money, and their history. With the
+  Piggy banks switch on: make new ones, change name, target, date and notes, and put money in or take it out. Firefly III 6.7.9 has a bug that stops any
+  app changing a piggy bank's amount through its API; Coinpile then says so and links straight to that piggy bank in Firefly III. Piggy banks that follow a
+  Coinpile goal are left to the goal.
+- **Budgets**: the monthly plan (budgets per category, bills, what is spent, what is left) and income.
+- **Notes**: search, filter (pinned, mine, by the agent, by tag), tags, templates (monthly review, checklist, big purchase), a read view with headings,
+  lists and tick-off checklists, download as Markdown, and the agent writing a note for you from your real numbers.
 - **Agent**: chat with a model (a local one such as Ollama by default) that can look up your accounts, transactions, subscriptions, savings and bills, and write notes.
 - **Settings, Banks**: your banks at the Plaid connector: link a bank, fix a bank sign-in, pull now.
 
@@ -26,6 +37,7 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 | Switch | What goes into Firefly III |
 |---|---|
 | Goals as piggy banks | each goal becomes a piggy bank holding what you set aside for it on Firefly III accounts; closing or deleting the goal removes it |
+| Piggy banks | from the Piggy banks page: new piggy banks, their name, target, date and notes, and money put in or taken out |
 | Subscriptions as bills | a subscription you add or accept becomes a bill; editing or deleting it changes the bill (daily ones stay in Coinpile) |
 | Categories | a category you set on a transaction; "always" also makes a Firefly III rule in a rule group called Coinpile |
 | Accounts and transactions | new accounts; transactions you add to a Firefly III account; bank or PayPal/Venmo/Cash App CSVs you import into one (rows already there are skipped) |

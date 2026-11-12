@@ -56,7 +56,7 @@ class FakeFirefly:
             key = "bills" if p == "/bills" else "piggies"
             att = {**b, "amount_avg": b.get("amount_min"), "date": (b.get("date") or "2026-01-01") + "T00:00:00+00:00", "pay_dates": [], "active": True}
             if key == "piggies":
-                att = {"name": b["name"], "target_amount": b["target_amount"], "active": True, "target_date": b.get("target_date"),
+                att = {"name": b["name"], "target_amount": b.get("target_amount"), "active": True, "target_date": b.get("target_date"),
                        "accounts": [{"account_id": a["account_id"], "name": "x", "current_amount": a["current_amount"]} for a in b["accounts"]],
                        "current_amount": str(sum(float(a["current_amount"]) for a in b["accounts"]))}
             row = {"type": key, "id": self._next(), "attributes": att}
@@ -71,10 +71,19 @@ class FakeFirefly:
                 d[key].remove(row)
                 return httpx.Response(204)
             if key == "piggies":
-                if getattr(self, "piggy_update_breaks", False):
+                if "accounts" in b and getattr(self, "piggy_update_breaks", False):       # like Firefly III 6.7.9: changing an amount fails, a name or target does not
                     return httpx.Response(500, json={"message": "Internal Firefly III Exception: bcsub(): Argument #2 ($num2) must be of type string, int given"})
-                row["attributes"].update({"name": b["name"], "target_amount": b["target_amount"], "accounts": [{"account_id": a["account_id"], "name": "x", "current_amount": a["current_amount"]} for a in b["accounts"]],
-                                          "current_amount": str(sum(float(a["current_amount"]) for a in b["accounts"]))})
+                at = row["attributes"]
+                at.update({k: b[k] for k in ("name", "target_amount", "target_date", "notes") if k in b})
+                if "accounts" in b:
+                    before = {str(x["account_id"]): float(x["current_amount"]) for x in at.get("accounts") or []}
+                    at["accounts"] = [{"account_id": a["account_id"], "name": "x", "current_amount": a["current_amount"]} for a in b["accounts"]]
+                    at["current_amount"] = str(sum(float(a["current_amount"]) for a in b["accounts"]))
+                    for a in b["accounts"]:
+                        moved = float(a["current_amount"]) - before.get(str(a["account_id"]), 0)
+                        if moved:
+                            self.piggy_events = getattr(self, "piggy_events", {})
+                            self.piggy_events.setdefault(row["id"], []).append({"type": "piggy_bank_events", "id": self._next(), "attributes": {"amount": f"{moved:.2f}", "created_at": "2026-11-10T10:00:00+00:00", "account_name": "Axos"}})
             else:
                 row["attributes"].update({**b, "amount_avg": b["amount_min"], "date": b["date"] + "T00:00:00+00:00"})
             return httpx.Response(200, json={"data": row})
@@ -116,6 +125,8 @@ class FakeFirefly:
                 rows = d.setdefault("rule_groups", [])
             elif p == "/piggy-banks":
                 rows = d["piggies"]
+            elif p.startswith("/piggy-banks/") and p.endswith("/events"):
+                rows = getattr(self, "piggy_events", {}).get(p.split("/")[2], [])
             else:
                 return httpx.Response(404, json={"message": "not here"})
             per, page = int(q.get("limit", 50)), int(q.get("page", 1))

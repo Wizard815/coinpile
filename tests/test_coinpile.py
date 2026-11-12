@@ -352,7 +352,7 @@ def test_a_robinhood_connector_with_a_value_adds_an_investment_account(tmp_path,
 def test_nothing_is_sent_to_firefly_iii_until_each_part_is_switched_on(tmp_path):
     ff = world()
     c = signed_in(app(tmp_path, ff))
-    assert c.get("/api/status").json()["sends"] == {"piggies": False, "bills": False, "categories": False, "accounts": False}
+    assert c.get("/api/status").json()["sends"] == {"piggies": False, "piggy_banks": False, "bills": False, "categories": False, "accounts": False}
     g = c.post("/api/goals", json={"name": "Roof", "target": 3000}).json()
     c.post(f"/api/goals/{g['id']}/allocate", json={"place": "a:ff:3", "amount": 1000})
     c.post("/api/subscriptions", json={"name": "Hulu", "amount": 9.99, "next_date": "2026-11-25", "cycle": "monthly"})

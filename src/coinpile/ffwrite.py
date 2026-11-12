@@ -15,7 +15,7 @@ from datetime import date
 from coinpile import firefly, importers, recur, settings as cfg
 
 RULE_GROUP = "Coinpile"
-PARTS = {"piggies": "ff_send_goals", "bills": "ff_send_bills", "categories": "ff_send_categories", "accounts": "ff_send_accounts"}
+PARTS = {"piggies": "ff_send_goals", "piggy_banks": "ff_send_piggies", "bills": "ff_send_bills", "categories": "ff_send_categories", "accounts": "ff_send_accounts"}
 
 
 def bill_freq(every: int, unit: str) -> tuple[str, int] | None:
