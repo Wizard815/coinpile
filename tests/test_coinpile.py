@@ -318,6 +318,7 @@ def test_robinhood_lives_in_coinpile(tmp_path):
     assert c.post("/api/robinhood/csv-upload", content=RH).status_code == 200
     m = c.get("/api/robinhood/main").json()
     assert {p["symbol"]: p["quantity"] for p in m["positions"]}["AAPL"] == 6
+    assert m["monthly"][0] == {"month": "2026-01", "deposits": 2000.0, "bought": 1000.0, "sold": 440.0, "dividends": 0.0, "fees": 0.0, "trades": 2}
     assert c.get("/api/status").json()["robinhood"]["csv_files"]
     # an activity report has no account value in it, so it does not invent one; a connector that reports one (live, agent) adds an investment account
     assert not any(a["id"] == "rh:main" for a in c.get("/api/accounts").json()) and c.get("/api/overview").json()["net_worth"] == before
@@ -636,31 +637,129 @@ def test_net_worth_history_ends_at_net_worth_with_savings_kept_by_hand(tmp_path)
     assert h[-1]["net_worth"] == c.get("/api/overview").json()["net_worth"]
 
 
-def test_investments_can_follow_an_existing_account_without_double_counting_net_worth(tmp_path):
-    c = signed_in(app(tmp_path, world()))
-    before = c.get("/api/overview").json()["net_worth"]
-    r = c.post("/api/investments", json={"name": "Robinhood", "kind": "brokerage", "account_id": "ff:1"})
-    assert r.status_code == 200, r.text
-    inv = r.json()
-    assert inv["linked"] and inv["balance"] == 1200.5                                 # follows ff:1's balance, not a typed one
-    assert c.get("/api/overview").json()["net_worth"] == before                       # already counted via the account; not added again
-    assert any(i["id"] == inv["id"] for i in c.get("/api/accounts/ff:1").json()["investments"])
+def test_a_coinpile_password_signs_in_and_can_be_reset_with_a_token(tmp_path):
+    a = app(tmp_path, world())
+    c = signed_in(a)
+    anon = TestClient(a)
+    assert anon.post("/auth/password", json={"email": "alice@example.com", "password": "whatever-it-is"}).status_code == 401      # none set yet
+    assert c.put("/api/password", json={"new": "short"}).status_code == 422
+    assert c.put("/api/password", json={"new": "a long kitchen table"}).json() == {"password_set": True}
+    assert c.get("/auth/me").json()["has_password"] is True
+    raw = (tmp_path / "users.db").read_bytes()
+    assert b"a long kitchen table" not in raw and b"scrypt$" in raw                                            # only a salted hash is kept
+    # sign in with it, in a fresh browser (email is not case sensitive)
+    b = TestClient(a)
+    assert b.post("/auth/password", json={"email": "Alice@Example.com", "password": "a long kitchen table"}).status_code == 200
+    assert b.get("/api/overview").status_code == 200
+    # a wrong guess, again and again, is slowed down
+    w = TestClient(a)
+    codes = [w.post("/auth/password", json={"email": "alice@example.com", "password": f"wrong guess {i}"}).status_code for i in range(8)]
+    assert codes[:5] == [401] * 5 and 429 in codes
+    # changing it needs the current one, and signs out other browsers
+    assert c.put("/api/password", json={"new": "another long phrase", "current": "nope"}).status_code == 403
+    assert c.put("/api/password", json={"new": "another long phrase", "current": "a long kitchen table"}).status_code == 200
+    assert b.get("/api/overview").status_code == 401 and c.get("/api/overview").status_code == 200
+    # forgot it: a Personal Access Token proves who you are, and the new password is set
+    f = TestClient(a)
+    assert f.post("/auth/password/reset", json={"token": "not-a-real-token-" + "z" * 20, "new": "brand new long phrase"}).status_code == 401
+    assert f.post("/auth/password/reset", json={"token": ALICE, "new": "brand new long phrase"}).json()["password_set"] is True
+    assert c.get("/api/overview").status_code == 401                                                           # every other browser is signed out
+    assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "brand new long phrase"}).status_code == 200
+    assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "another long phrase"}).status_code == 401
+    # removing it, and forgetting the person, both clear it
+    assert f.request("DELETE", "/api/password", json={"current": "brand new long phrase"}).json() == {"password_set": False}
+    f.put("/api/password", json={"new": "one more long phrase"})
+    f.post("/api/forget")
+    assert TestClient(a).post("/auth/password", json={"email": "alice@example.com", "password": "one more long phrase"}).status_code == 401
 
 
-def test_investments_kept_by_hand_count_in_net_worth_and_a_bad_kind_is_rejected(tmp_path):
-    c = signed_in(app(tmp_path, world()))
-    before = c.get("/api/overview").json()["net_worth"]
-    r = c.post("/api/investments", json={"name": "Coinbase", "kind": "crypto", "balance": 300})
-    assert r.status_code == 200, r.text
-    assert c.get("/api/overview").json()["net_worth"] == round(before + 300, 2)
-    assert c.post("/api/investments", json={"name": "x", "kind": "not-a-kind", "balance": 1}).status_code == 422
-    assert c.get("/api/investments").json()["total"] == 300
+def test_any_account_can_be_tracked_as_an_investment(tmp_path):
+    ff = world()
+    ff.acct("1", 9, "Fidelity - 401k ••5555", balance="42000")
+    c = signed_in(app(tmp_path, ff))
+    inv = c.get("/api/investments").json()
+    assert inv["accounts"] == [] and any(x["id"] == "ff:9" for x in inv["candidates"]) and [p["id"] for p in inv["providers"]] == ["robinhood", "foliofox"]
+    assert next(p for p in inv["providers"] if p["id"] == "foliofox")["available"] is False
+    assert c.put("/api/investments/ff:9", json={"investment": True, "category": "Bonds"}).status_code == 422
+    inv = c.put("/api/investments/ff:9", json={"investment": True, "category": "Retirement"}).json()
+    assert [(a["id"], a["category"], a["balance"]) for a in inv["accounts"]] == [("ff:9", "Retirement", 42000)] and inv["total"] == 42000
+    ov = c.get("/api/overview").json()
+    assert ov["by_kind"]["investment"] == 42000 and ov["by_kind"]["cash"] == round(1200.5 + 5000, 2)                  # shown as an investment, still in net worth
+    c.post("/api/refresh?full=true")
+    assert c.get("/api/investments").json()["total"] == 42000                                                         # survives reading Firefly III again
+    assert c.put("/api/investments/ff:9", json={"investment": False}).json()["accounts"] == []
 
 
-def test_deleting_a_manual_account_unlinks_its_investment_instead_of_breaking(tmp_path):
-    c = signed_in(app(tmp_path, world()))
-    aid = c.post("/api/accounts", json={"name": "Side brokerage", "kind": "investment", "balance": 900, "coinpile_only": True}).json()["id"]
-    inv = c.post("/api/investments", json={"name": "Side brokerage", "account_id": aid}).json()
-    assert c.delete(f"/api/accounts/{aid}").status_code == 200
-    again = next(i for i in c.get("/api/investments").json()["items"] if i["id"] == inv["id"])
-    assert again["account_id"] is None and again["balance"] == 0
+def test_robinhood_mcp_signs_in_on_robinhood_and_only_ever_reads(tmp_path, monkeypatch):
+    from tests.fake_mcp import FakeRobinhood, MCP
+    rh = FakeRobinhood()
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), mcp_transport=rh.transport(),
+                       today=lambda: TODAY, public_url="http://testserver")
+    c = signed_in(a)
+    c.put("/api/settings", json={"rh_mcp_url": MCP})
+    url = c.post("/api/robinhood/connect").json()["url"]
+    assert url.startswith("https://auth.example.com/authorize?") and url.endswith("&scope=read") and "trade" not in url        # only reading is asked for
+    back = rh.approve(url).split("testserver", 1)[1]
+    assert TestClient(a).get(back, follow_redirects=False).headers["location"] == "/?robinhood=failed#settings"       # another browser cannot finish it
+    url = c.post("/api/robinhood/connect").json()["url"]
+    assert c.get(rh.approve(url).split("testserver", 1)[1], follow_redirects=False).headers["location"] == "/?robinhood=connected#investments"
+    t = c.post("/api/robinhood/test").json()
+    assert t["reads_used"] == ["get_accounts", "get_crypto_positions", "get_equity_positions", "get_portfolio"] and "place_equity_order" in t["never_called"]
+    ag = c.get("/api/robinhood/agent").json()
+    assert ag["balances"]["equity"] == 7340.25 and {p["symbol"]: (p["quantity"], p["net_cost"], p["equity"]) for p in ag["positions"]} == {"NVDA": (10, 1200, 1450), "VTI": (20, 5000, 5890.25)}
+    c.post("/api/refresh")
+    inv = c.get("/api/investments").json()
+    assert any(x["id"] == "rh:agent" and x["balance"] == 7340.25 for x in inv["accounts"]) and inv["monthly"][-1]["value"] == 7340.25
+    assert not any("place_" in x or "cancel_" in x for x in rh.calls)                                                 # never an order tool
+    # the token is renewed by itself when it is about to run out
+    db = a.person_db("1")
+    from coinpile import settings as cfg
+    cfg.set_value(db, "rh_mcp_expires", "1")
+    assert c.get("/api/robinhood/agent").json()["balances"]["equity"] == 7340.25
+    # a tool outside the read list cannot even be asked for
+    from coinpile import robinhood as R, mcp
+    cl = R.Robinhood(db, str(tmp_path), None, "", rh.transport()).mcp_client()
+    with pytest.raises(PermissionError):
+        cl.call("place_equity_order", {"symbol": "NVDA", "quantity": 1})
+    assert c.post("/api/robinhood/disconnect").json() == {"connected": False} and not any(x["id"] == "rh:agent" for x in c.get("/api/investments").json()["accounts"])
+
+
+def test_data_files_are_readable_by_coinpile_only(tmp_path):
+    import stat
+    signed_in(app(tmp_path, world()))
+    for f in [tmp_path / "users.db", *(tmp_path / "people").glob("*.db")]:
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f
+
+
+def test_audit2_regressions(tmp_path):
+    from coinpile import mcp, security, webhooks as wh
+    from tests.fake_mcp import FakeRobinhood, MCP
+    # sign-in addresses from an MCP server must be https; only plainly read-only scopes are asked for
+    with pytest.raises(mcp.MCPError):
+        mcp._https("javascript:alert(1)", "sign-in")
+    assert mcp.read_scopes(["read", "account:read", "trading:read_write", "orders.readwrite", "trade", "positions.read"]) == ["read", "account:read", "positions.read"]
+    # a flood of junk names never frees a locked-out one
+    t = security.Throttle()
+    t.MAX_KEYS = 50
+    for _ in range(10):
+        t.fail("pw:victim")
+    for i in range(200):
+        t.fail(f"pw:junk{i}")
+    assert t.wait_for("pw:victim") > 0
+    # changing the MCP address forgets the old server's tokens
+    rh = FakeRobinhood()
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), mcp_transport=rh.transport(),
+                       webhook_transport=httpx.MockTransport(lambda r: httpx.Response(200)), today=lambda: TODAY, public_url="http://testserver")
+    c = signed_in(a)
+    c.put("/api/settings", json={"rh_mcp_url": MCP})
+    c.get(rh.approve(c.post("/api/robinhood/connect").json()["url"]).split("testserver", 1)[1])
+    assert c.get("/api/status").json()["robinhood"]["mcp"] is True
+    c.put("/api/settings", json={"rh_mcp_url": "https://other.example.com/mcp"})
+    assert c.get("/api/status").json()["robinhood"]["mcp"] is False
+    # pausing a webhook keeps its name
+    h = c.post("/api/webhooks", json={"name": "My HA", "url": "https://hooks.example.com/x", "events": ["refresh.done"]}).json()
+    assert c.put(f"/api/webhooks/{h['id']}", json={"active": False}).json()["name"] == "My HA"
+    # a password reset also ends API tokens made before it
+    tok = c.post("/api/tokens", json={"name": "HA", "scopes": ["summary"]}).json()["token"]
+    assert TestClient(a).post("/auth/password/reset", json={"token": ALICE, "new": "a fresh long phrase"}).status_code == 200
+    assert TestClient(a).get("/api/v1/me/summary", headers={"Authorization": "Bearer " + tok}).status_code == 401

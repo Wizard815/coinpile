@@ -1,6 +1,6 @@
 """Read a person's Firefly III through its API and keep a local copy that the Coinpile screens and the agent work from.
 
-Firefly III stays the source of truth. The copy uses the same tables the old Goblin Bank screens were built on, so the overview, forecasts,
+Firefly III stays the source of truth. The copy uses the same tables Coinpile's screens are built on, so the overview, forecasts,
 subscription finder, planner and agent work unchanged. Rows that came from Firefly III carry source='firefly' and are refreshed from it;
 what you add in Coinpile itself (goals, notes, savings you track by hand, chats) is kept as Coinpile's own.
 

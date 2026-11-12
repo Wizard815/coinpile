@@ -1,4 +1,4 @@
-"""Encrypt secrets (Plaid access tokens) at rest with a per-goblin Fernet key."""
+"""Encrypt secrets (Plaid access tokens) at rest with a per-person Fernet key."""
 import os
 
 from cryptography.fernet import Fernet

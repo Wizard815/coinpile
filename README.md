@@ -1,8 +1,8 @@
 # Coinpile
 
-A simple, friendly view of your **Firefly III**, with an **agent** you can ask about your money, and a remote control for the **Plaid connector** ([plaid-firefly-connector](https://github.com/Wizard815/plaid-firefly-connector)).
+A simple, friendly view of your **Firefly III**, with an **agent** you can ask about your money, and a remote control for the **Plaid connector** (plaid-proxy, from [plaid-firefly-connector](https://github.com/Wizard815/plaid-firefly-connector)).
 
-Firefly III stays in charge of your data. Coinpile reads it every few minutes and shows it the way the old Goblin Bank app did:
+Firefly III stays in charge of your data. Coinpile reads it every few minutes and shows it in one place (it took over the screens of the old Goblin Bank app):
 
 - **Overview**: net worth, what you owe on cards, subscriptions per month, bills in the next 30 days, spending this month and a forecast, where the money sits, latest movement. Panels can be moved, resized and hidden (Arrange panels).
 - **Money movement**: search and filter every transaction.
@@ -13,6 +13,8 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Agent**: chat with a model (a local one such as Ollama by default) that can look up your accounts, transactions, subscriptions, savings and bills, and write notes.
 - **Settings, Banks**: your banks at the Plaid connector: link a bank, fix a bank sign-in, pull now.
 
+- **Investments**: every account you track as an investment, with a total. Mark any account (a Firefly III brokerage or 401k, an account from the Plaid connector, one you keep in Coinpile) as Investment or Retirement, on the Investments tab or on the account's page; it then shows here and under Investments on the Overview (Firefly III is not changed). Sources that know positions plug in: Robinhood now, Foliofox planned.
+- **Robinhood MCP**: Settings, Robinhood, Connect Robinhood: you sign in on Robinhood's own site (its official MCP server, `https://agent.robinhood.com/mcp/trading`, for the Agentic Trading account) and Coinpile gets permission to read. Coinpile asks only for reading and can only call read tools (portfolio and positions); there is no code path to place, cancel or change an order. Its value is recorded each time it is read, so Investments shows value by month from then on. Robinhood's own documentation of the server was not available to test against; the sign-in follows the MCP standard (OAuth 2.1 with PKCE and app registration), and a token can be pasted instead if needed.
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
 - **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
@@ -83,13 +85,19 @@ Coinpile has no passwords of its own: you sign in with your Firefly III account.
 2. Copy the client's ID and set on the container: `FIREFLY_CLIENT_ID` (that ID) and `COINPILE_PUBLIC_URL` (e.g. `http://192.168.1.50:8190`).
 3. If your browser reaches Firefly III at a different address than the container does, also set `FIREFLY_PUBLIC_URL` (e.g. `https://firefly.example.com`).
 
-Coinpile renews this sign-in by itself. Tested against Firefly III 6.7.9.
+Coinpile renews this sign-in by itself.
+
+**A Coinpile password** (optional): once signed in, set one under Settings, Firefly III, Coinpile password. From then on sign in with your Firefly III email and that password; Firefly III is still read with your token. Only a salted scrypt hash is kept (in `/data/users.db`); wrong guesses are slowed down. Changing it needs the current one and signs out your other browsers. Forgot it? On the sign-in page, **Forgot your Coinpile password?** asks for a Personal Access Token to prove it is you, then lets you choose a new one (and the new token becomes the one Coinpile uses). Tested against Firefly III 6.7.9.
 
 Tokens are stored encrypted with a key kept in `/data/.field_key` (or `FIELD_KEY` if you set one). Back up `/data` as a whole; without that key the stored tokens cannot be read (you would just sign in again).
 
 ## Banks (Plaid connector)
 
 Settings, Banks: enter the connector's address, your name there and your connector password (or the login token the connector printed for you). From then on you can see your banks, link a new one in Plaid's window, fix a bank sign-in (relink) and pull your banks now. A newly linked bank's accounts wait for the connector admin's approval before they are sent to Firefly III.
+
+**Moved the connector from Goblin Bank to plaid-proxy?** Nothing changes here: the connector's address (its gateway), your name and your
+password or login token are the same after `migrate_from_goblin_bank.sh`, so Coinpile's Banks settings keep working as they are. Banks stay
+linked, and transactions keep arriving in Firefly III under the same Personal Access Token without any being sent twice.
 
 Banks that sign you in on their own website (OAuth banks) return you to the address the connector registered with Plaid, not to Coinpile; link those from the connector's own `/link` page or admin page.
 

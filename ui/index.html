@@ -147,7 +147,7 @@ td.mono{white-space:nowrap}
 </style>
 
 <div id="app"></div>
-<script>window.GOBLIN_DEMO = null; /*DEMO*/</script>
+<script>window.COINPILE_DEMO = null; /*DEMO*/</script>
 <script>
 "use strict";
 /* ---------- tiny DOM helper: strings are always text nodes, so bank data can never inject HTML ---------- */
@@ -386,6 +386,7 @@ async function accountDetail(root, rerender) {
   const a = d.account, manual = a.source === "manual", toFF = a.source === "firefly" && !!S.sends?.accounts, local = manual || toFF;
   add(root, 
     h("div", { class: "bar" }, h("button", { class: "btn sm", onclick: () => { S.acct = null; rerender(); } }, "‹ All accounts"), h("span", { class: "muted small" }, `${a.institution} · ${a.kind}${a.category_effective ? " · " + a.category_effective : ""}${manual ? " · tracked by hand" : " · linked"}`),
+      a.kind !== "credit" && a.kind !== "loan" ? h("button", { class: "btn sm", onclick: async () => { const on = !["investment", "retirement"].includes((a.category || "").toLowerCase()); try { await api("/api/investments/" + encodeURIComponent(a.id), send("PUT", { investment: on })); toast(on ? "Now tracked as an investment" : "No longer tracked as an investment"); rerender(); } catch (e) { fail(e); } } }, ["investment", "retirement"].includes((a.category || "").toLowerCase()) ? "Stop tracking as an investment" : "Track as an investment") : null,
       h("button", { class: "btn sm", title: "Look through this account's transactions for repeating payments", onclick: () => { S.scanAcct = a.id; S.scan = null; S.tab = "subs"; S.acct = null; render(); } }, "Check for subscriptions")),
     d.alerts.length ? h("div", { class: "panel" }, h("div", { class: "alerts" }, d.alerts.map(alertRow))) : null,
     h("div", { class: "grid" }, kpi(an(a), usd(a.balance), a.updated ? "updated " + ago(a.updated) : ""), kpi("In, last 30 days", usd(d.last_30_days.in), "", "pos"), kpi("Out, last 30 days", usd(d.last_30_days.out), `${d.last_30_days.count} transactions`, "neg")),
@@ -479,7 +480,6 @@ async function viewSubs(root, rerender) {
 
 /* ================================ SAVINGS: where the money is, and what it is for ================================ */
 const SK = [["savings", "Savings account"], ["cd", "Certificate of deposit"], ["money_market", "Money market"], ["bond", "Bond / I-bond"], ["hsa", "HSA"], ["529", "529 plan"], ["cash", "Cash"], ["other", "Other"]];
-const IK = [["brokerage", "Brokerage"], ["stock", "Stocks"], ["crypto", "Crypto"], ["retirement", "Retirement"], ["other", "Other"]];
 const PRIO = [[1, "High"], [2, "Normal"], [3, "Low"]];
 const goalCard = (g, v, rerender, lk = { me: "", links: [] }) => {
   const peers = lk.links.filter((l) => l.status === "active").map((l) => l.peer);
@@ -668,7 +668,7 @@ async function viewAgent(root, rerender) {
       h("span", { style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap" }, c.title), h("button", { class: "btn sm danger", "aria-label": "Delete chat", onclick: (e) => { e.stopPropagation(); sure(null, "Sure?", async () => { await api("/api/chats/" + c.id, { method: "DELETE" }); if (S.chatId === c.id) S.chatId = null; rerender(); })(e); } }, "×"))) : h("p", { class: "muted small" }, "No chats yet."));
   add(root,
     !pv.items.length ? h("div", { class: "panel" }, h("h3", {}, "Set up a model first"), h("p", { class: "muted" }, "Add a local model (Ollama, LM Studio, llama.cpp) or a cloud one in Settings, then come back."), h("button", { class: "btn primary", onclick: () => { S.tab = "settings"; S.settingsTab = "models"; render(); } }, "Open model settings")) : null,
-    h("div", { class: "split" }, sidebar, h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, chat && chat.title !== "New chat" ? chat.title : "Ask Goblin"),
+    h("div", { class: "split" }, sidebar, h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, chat && chat.title !== "New chat" ? chat.title : "Ask Coinpile"),
       pv.items.length ? h("div", { class: "chips" }, h("select", { class: "bare", "aria-label": "Model", onchange: (e) => { S.provider = +e.target.value; S.tools = null; rerender(); } }, pv.items.map((p) => h("option", { value: p.id, selected: p.id === S.provider }, `${p.name} · ${p.model}`))),
         cur ? h("span", { class: "pill " + (cur.local ? "t" : "r") }, cur.local ? "on your machine" : cur.allow_cloud ? "cloud" : "cloud, blocked") : null,
         h("label", { class: "check", title: "Off = the model gets a snapshot of your data instead of calling tools. Use it for small models." }, h("input", { type: "checkbox", id: "ag-tools", checked: toolsOn, onchange: (e) => { S.tools = e.target.checked; } }), "Tools")) : null),
@@ -691,7 +691,7 @@ function bubble(m) {
     m.trace?.length ? h("details", { class: "trace" }, h("summary", {}, `Looked at: ${[...new Set(m.trace.map((t) => t.tool))].join(", ")}`), m.trace.map((t) => h("div", { class: "small mono muted" }, `${t.ok ? "✓" : "✗"} ${t.tool}(${JSON.stringify(t.args)})`))) : null);
 }
 
-/* ================================ INVESTMENTS (stocks, crypto, brokerage; Robinhood lives here too) ================================ */
+/* ================================ ROBINHOOD ================================ */
 function portfolio(title, badge, d) {
   if (!d || d.error) return h("div", { class: "panel" }, h("h3", {}, title), h("p", { class: "muted" }, d?.error || "Not configured."));
   const eq = d.balances && (d.balances.equity ?? d.balances.net_transfers);
@@ -700,26 +700,46 @@ function portfolio(title, badge, d) {
     Array.isArray(d.positions) && d.positions.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Symbol"), h("th", { class: "r" }, "Shares"), h("th", { class: "r" }, "Value / cost"))), h("tbody", {}, d.positions.map((p) => h("tr", {}, h("td", { class: "mono" }, p.symbol), h("td", { class: "num r" }, p.quantity), h("td", { class: "num r" }, usd(p.equity ?? p.net_cost)))))) : h("p", { class: "muted small" }, "No positions reported."));
 }
 async function viewInvestments(root, rerender) {
-  const [v, accts, m, a] = await Promise.all([api("/api/investments"), api("/api/accounts"), api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
-  const ep = S.edit?.inv ?? null, e = ep ? v.items.find((i) => i.id === ep) : null;
+  const inv = await api("/api/investments"), money = (v) => usd(v);
+  const track = async (id, on, category) => { try { await api("/api/investments/" + encodeURIComponent(id), send("PUT", { investment: on, category: category || "Investment" })); toast(on ? "Now tracked as an investment" : "No longer tracked as an investment"); rerender(); } catch (e) { fail(e); } };
   add(root,
-    h("div", { class: "panel scroll" }, h("h3", {}, "Investments"), h("p", { class: "muted small" }, "Link an account that already shows up elsewhere (a brokerage account Plaid only reports a dollar total for, a retirement account, anything Firefly III syncs) so it counts here too, or add one by hand."),
-      v.items.length ? h("table", {}, h("thead", {}, h("tr", {}, ["Name", "Type", "Balance", ""].map((x, i) => h("th", { class: i === 2 ? "r" : "" }, x)))),
-        h("tbody", {}, v.items.map((i) => h("tr", {}, h("td", {}, i.name, h("div", { class: "muted small" }, i.institution)), h("td", { class: "small" }, (IK.find(([k]) => k === i.kind) || [0, i.kind])[1], i.linked ? h("span", { class: "pill t" }, "linked") : null),
-          h("td", { class: "num r" }, usd(i.balance)),
-          h("td", { class: "r", style: "white-space:nowrap" }, h("button", { class: "btn sm", onclick: () => { S.edit = { inv: i.id }; rerender(); window.scrollTo(0, 0); } }, "Edit"), " ",
-            h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/investments/${i.id}`, { method: "DELETE" }); rerender(); }) }, "Remove"))))) ,
-        h("tfoot", {}, h("tr", {}, h("td", {}, h("b", {}, "Total")), h("td", {}), h("td", { class: "num r" }, h("b", {}, usd(v.total))), h("td", {})))) : h("p", { class: "muted" }, "No investments yet.")),
-    h("div", { class: "panel" }, h("h3", {}, e ? "Edit investment" : "Add an investment"), h("p", { class: "muted small" }, "Follow an existing account's balance, or type one by hand (handy before a connector like FolioFox is wired up)."),
-      h("form", { class: "subform", onsubmit: async (ev) => { ev.preventDefault();
-        const body = { name: val("iv-name"), kind: val("iv-kind"), institution: val("iv-inst"), balance: num("iv-bal") ?? 0, account_id: val("iv-acct") || null, notes: "", active: true };
-        try { await api(e ? `/api/investments/${e.id}` : "/api/investments", send(e ? "PUT" : "POST", body)); S.edit = null; toast("Saved"); rerender(); } catch (err) { fail(err); } } },
-        field("iv-name", "Name", e?.name, { required: true }), select("iv-kind", "Type", IK, e?.kind ?? "brokerage"), field("iv-inst", "Institution", e?.institution),
-        select("iv-acct", "Follow an account's balance", [["", "None, I type the balance"], ...accts.map((a2) => [a2.id, `${a2.institution} · ${an(a2)}`])], e?.account_id ?? ""),
-        field("iv-bal", "Balance (if not following an account)", e?.balance, { type: "number", step: "0.01", min: "0" }),
-        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, e ? "Save" : "Add"), e ? h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel") : null))),
-    h("div", { class: "two" }, portfolio("Robinhood main", "read-only", m), portfolio("Robinhood agent", "read-only", a)),
-    h("p", { class: "muted small" }, "Robinhood above is an uploaded activity report or the optional agent connector (Settings > Robinhood) — read-only, and separate from the linked accounts above. Nothing on this page can place a trade."));
+    h("div", { class: "grid" }, kpi("Investments", money(inv.total), `${inv.accounts.length} account${inv.accounts.length === 1 ? "" : "s"}`), kpi("Sources", String(inv.providers.filter((p) => p.connected).length), inv.providers.filter((p) => p.connected).map((p) => p.name).join(", ") || "none connected yet")),
+    h("div", { class: "panel scroll" }, h("h3", {}, "Investment accounts"),
+      h("p", { class: "muted small" }, "Any account can be tracked as an investment: a brokerage or retirement account in Firefly III, an account the Plaid connector brought in, or one you keep in Coinpile. Tracked accounts show here and under Investments on the Overview. Firefly III is not changed."),
+      inv.accounts.length ? h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Account"), h("th", {}, "Kind"), h("th", { class: "r" }, "Balance"), h("th", {}, ""))),
+        h("tbody", {}, inv.accounts.map((a) => h("tr", {}, h("td", {}, h("b", {}, a.name), h("div", { class: "muted small" }, a.institution || "")),
+          h("td", { class: "small" }, a.category || "Investment", a.how === "type" ? h("span", { class: "pill", style: "margin-left:6px" }, "by type") : null),
+          h("td", { class: "r num" }, money(a.balance), a.native_currency ? h("div", { class: "muted small" }, `${a.native_balance} ${a.native_currency}`) : null),
+          h("td", { class: "r" }, a.how === "type" ? null : h("button", { class: "btn sm", onclick: () => track(a.id, false) }, "Stop tracking"))))))
+        : h("p", { class: "muted" }, "No investment accounts yet. Pick one below."),
+      inv.candidates.length ? h("form", { class: "row", style: "margin-top:12px", onsubmit: (e) => { e.preventDefault(); if (!val("iv-acct")) return toast("Choose an account"); track(val("iv-acct"), true, val("iv-cat")); } },
+        select("iv-acct", "Track an account as an investment", [["", "Choose an account..."], ...inv.candidates.map((a) => [a.id, `${a.name} (${a.institution || ""})`])], ""),
+        select("iv-cat", "As", [["Investment", "Investment"], ["Retirement", "Retirement"]], "Investment"),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Track it"))) : null),
+    (inv.monthly || []).length >= 2 ? h("div", { class: "panel wide" }, h("h3", {}, "Investments by month"), spark(inv.monthly.map((m) => ({ date: m.month, net_worth: m.value })))) : null,
+    ...inv.providers.map((p) => h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, p.name), h("span", { class: "pill " + (p.connected ? "t" : p.available ? "" : "b") }, p.connected ? "connected" : p.available ? "not set up" : "planned")),
+      h("p", { class: "muted small", style: "margin:0" }, p.how + (p.id === "robinhood" ? ". An activity report has no prices, so it shows shares, cost and money moved, not value over time; a live connector adds value." : "")), p.id === "robinhood" ? h("div", { id: "rh-box" }) : null)));
+  const box = $("#rh-box");
+  if (box && inv.providers.find((p) => p.id === "robinhood")?.connected) {
+    const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
+    box.replaceChildren(...[rhCompact("Main account", m), a && !a.error ? rhCompact("Agent account", a) : null].filter(Boolean));
+  } else if (box) box.replaceChildren(h("p", { class: "muted small" }, "Upload a Robinhood activity report under Settings, Robinhood to see positions here."));
+}
+function rhCompact(title, d) {
+  if (!d || d.error) return h("p", { class: "muted small" }, title + ": " + (d?.error || "nothing yet"));
+  const pos = d.positions || [], cost = pos.reduce((t, p) => t + (Number(p.net_cost) || 0), 0), eq = d.balances?.equity, months = d.monthly || [];
+  const div = months.reduce((t, m) => t + (m.dividends || 0), 0), dep = d.balances?.net_transfers;
+  return h("div", { style: "display:grid;gap:4px;margin-top:6px" },
+    h("div", { class: "small" }, h("b", {}, title), " · ", `${pos.length} position${pos.length === 1 ? "" : "s"}`, eq != null ? ` · worth ${usd(Number(eq))}` : "", ` · cost ${usd(cost)}`,
+      dep != null ? ` · deposited ${usd(dep)}` : "", div ? ` · dividends ${usd(div)}` : "", d.as_of ? h("span", { class: "muted" }, ` · ${d.source || ""} ${ago(d.as_of)}`) : null),
+    pos.length ? h("details", {}, h("summary", { class: "small" }, "Positions"), h("table", { class: "small" }, h("tbody", {}, pos.map((p) => h("tr", {}, h("td", { class: "mono" }, p.symbol), h("td", { class: "r num" }, String(p.quantity)), h("td", { class: "r num" }, p.equity != null ? usd(p.equity) : usd(p.net_cost))))))) : null,
+    months.length ? h("details", {}, h("summary", { class: "small" }, "By month"), h("div", { class: "scroll" }, h("table", { class: "small" }, h("thead", {}, h("tr", {}, ["Month", "Deposited", "Bought", "Sold", "Dividends"].map((x, i) => h("th", i ? { class: "r" } : {}, x)))),
+      h("tbody", {}, months.slice(0, 24).map((m) => h("tr", {}, h("td", {}, m.month), h("td", { class: "r num" }, usd(m.deposits)), h("td", { class: "r num" }, usd(m.bought)), h("td", { class: "r num" }, usd(m.sold)), h("td", { class: "r num" }, usd(m.dividends)))))))) : null,
+  );
+}
+async function viewRobinhood(root) {
+  const [m, a] = await Promise.all([api("/api/robinhood/main").catch((e) => ({ error: e.message })), api("/api/robinhood/agent").catch((e) => ({ error: e.message }))]);
+  add(root, h("div", { class: "two" }, portfolio("Main account", "read-only", m), portfolio("Agent account", "read-only", a)), h("p", { class: "muted small" }, "Choose where the main account's data comes from under Settings > Robinhood. Nothing on this page can place a trade."));
 }
 
 /* ================================ SETTINGS (tabs) ================================ */
@@ -762,6 +782,15 @@ async function tabFirefly(root, rerender) {
       h("form", { class: "row", onsubmit: (e) => { e.preventDefault(); saveCfg({ refresh_minutes: val("rf-min") }, rerender); } },
         select("rf-min", "Read Firefly III every", [["5", "5 minutes"], ["10", "10 minutes"], ["30", "30 minutes"], ["60", "hour"], ["0", "only when I press the button"]], String(cfg.refresh_minutes ?? "10")),
         h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Save")))),
+    h("div", { class: "panel" }, h("h3", {}, "Coinpile password"),
+      h("p", { class: "muted small" }, f.has_password ? "You can sign in with your Firefly III email and this password. It opens Coinpile only; Firefly III is still read with your token. Forgot it? Sign out and use Forgot your Coinpile password on the sign-in page." : "Set a password to sign in to Coinpile with your Firefly III email, without pasting the token again. It opens Coinpile only. Only a salted hash of it is kept."),
+      h("form", { class: "row", onsubmit: async (e) => { e.preventDefault(); if (val("cp-new") !== val("cp-new2")) return toast("The new passwords do not match");
+          try { await api("/api/password", send("PUT", { new: val("cp-new"), current: f.has_password ? val("cp-cur") : null })); toast(f.has_password ? "Password changed. Other browsers are signed out." : "Password set"); rerender(); } catch (err) { fail(err); } } },
+        f.has_password ? field("cp-cur", "Current password", "", { type: "password", autocomplete: "current-password", required: true }) : null,
+        field("cp-new", f.has_password ? "New password" : "Password", "", { type: "password", autocomplete: "new-password", minlength: "12", required: true }),
+        field("cp-new2", "Type it again", "", { type: "password", autocomplete: "new-password", minlength: "12", required: true }),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, f.has_password ? "Change password" : "Set password"),
+          f.has_password ? h("button", { class: "btn danger", type: "button", onclick: async () => { if (!val("cp-cur")) return toast("Type the current password first"); try { await api("/api/password", send("DELETE", { current: val("cp-cur") })); toast("Password removed"); rerender(); } catch (err) { fail(err); } } }, "Remove password") : null))),
     h("div", { class: "panel" }, h("h3", {}, "Leave"),
       h("p", { class: "muted small" }, "Sign out ends this browser's session. Forget me also stops reading your Firefly III and deletes everything Coinpile keeps for you (goals, notes, chats). Firefly III itself is not touched."),
       h("div", { class: "chips" }, h("button", { class: "btn", onclick: async () => { await fetch("/auth/logout", { method: "POST", credentials: "same-origin" }); location.reload(); } }, "Sign out"),
@@ -825,7 +854,18 @@ async function tabRobinhood(root, rerender) {
     h("p", { class: "muted small" }, "Live uses an unofficial library that breaks Robinhood's terms and can get a login locked. It stays off until you enable it in the container's env file.")),
     h("div", { class: "panel" }, h("h3", {}, "Main account CSV"), h("p", { class: "muted small" }, rh.csv_files.length ? `${rh.csv_files.length} file(s) imported. Latest: ${rh.csv_files.at(-1)}` : "No files yet. Download the account activity report as CSV from Robinhood and upload it here."),
       h("input", { type: "file", id: "rhcsv", accept: ".csv,text/csv", disabled: S.demo }), " ", h("button", { class: "btn", disabled: S.demo, onclick: async () => { const f = $("#rhcsv").files[0]; if (!f) return toast("Choose a CSV first"); try { const r = await api("/api/robinhood/csv-upload", { method: "POST", headers: { "Content-Type": "text/csv" }, body: await f.text() }); toast("Saved " + r.saved); rerender(); } catch (e) { fail(e); } } }, "Upload")),
-    h("div", { class: "panel" }, h("h3", {}, "Agent account (official MCP)"), h("p", { class: "muted small" }, "Runs as its own small container (rh-agent) with Robinhood's official MCP and read tools only; Coinpile reads it at RH_AGENT_URL. " + (rh.agent === "not deployed" ? "Not set up." : "Status: " + rh.agent))));
+    h("div", { class: "panel" }, h("h3", {}, "Robinhood MCP (agentic account)"),
+      h("p", { class: "muted small" }, "Robinhood's official MCP server: you sign in on Robinhood's own site and Coinpile gets permission to read. Coinpile asks only for reading and only ever calls read tools (portfolio, positions); it cannot place, cancel or change an order. It reads your Robinhood agentic account, records its value each time, and shows positions and value by month on the Investments tab."),
+      h("div", { class: "legend", style: "margin:6px 0 10px" }, h("span", {}, "Status ", dot(rh.mcp ? "up" : "not connected"))),
+      h("div", { class: "chips" },
+        h("button", { class: "btn primary", disabled: S.demo, onclick: async () => { try { const r = await api("/api/robinhood/connect", { method: "POST" }); if (!/^https:\/\//.test(r.url || "")) throw new Error("Robinhood gave an unsafe sign-in address"); location.href = r.url; } catch (e) { fail(e); } } }, rh.mcp ? "Sign in to Robinhood again" : "Connect Robinhood"),
+        rh.mcp ? h("button", { class: "btn", onclick: async () => { try { const r = await api("/api/robinhood/test", { method: "POST" }); toast(`Connected. Reads used: ${r.reads_used.join(", ") || "none found"}. ${r.never_called.length} other tools are never called.`); } catch (e) { fail(e); } } }, "Test") : null,
+        rh.mcp ? h("button", { class: "btn danger", onclick: sure(null, "Disconnect Robinhood? Coinpile stops reading it.", async () => { await api("/api/robinhood/disconnect", { method: "POST" }); rerender(); }) }, "Disconnect") : null),
+      h("details", { style: "margin-top:10px" }, h("summary", { class: "small" }, "Other address, or paste a token"),
+        h("form", { class: "row", onsubmit: async (e) => { e.preventDefault(); try { if (val("rh-tok")) { await api("/api/robinhood/token", send("POST", { token: val("rh-tok"), url: val("rh-url") || null })); } else { await api("/api/settings", send("PUT", { rh_mcp_url: val("rh-url") })); } toast("Saved"); rerender(); } catch (err) { fail(err); } } },
+          field("rh-url", "MCP server address", cfg.rh_mcp_url || "https://agent.robinhood.com/mcp/trading", { type: "url" }),
+          field("rh-tok", "Access token (only if signing in here does not work)", "", { type: "password", autocomplete: "off" }),
+          h("div", { class: "formbtns" }, h("button", { class: "btn", type: "submit" }, "Save"))))));
 }
 async function tabCalendar(root, rerender) {
   const cfg = await api("/api/settings");
@@ -927,7 +967,7 @@ async function tabLinks(root, rerender) {
     r.waiting ? h("p", { class: "small" }, `${r.waiting} update${r.waiting === 1 ? "" : "s"} waiting to be delivered (the other person has not opened Coinpile yet). `, h("button", { class: "btn sm", onclick: async () => { await api("/api/links/flush", send("POST", {})); rerender(); } }, "Try now")) : null,
     free.length ? h("form", { class: "row", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/links", send("POST", { peer: val("lk-peer") })); toast("Request sent. They will be asked right away"); rerender(); } catch (err) { fail(err); } } },
       select("lk-peer", "Link with", free.map((x) => [x, x]), free[0]), h("button", { class: "btn primary", type: "submit" }, "Ask to link"))
-      : h("p", { class: "muted small", style: "margin-top:10px" }, ppl.people.length ? "You are linked or waiting with everyone on this server." : "No other goblins on this server yet. The server's admin adds people on the admin page."),
+      : h("p", { class: "muted small", style: "margin-top:10px" }, ppl.people.length ? "You are linked or waiting with everyone on this server." : "No other people on this server yet. The server's admin adds people on the admin page."),
     h("p", { class: "muted small" }, `Others see you as ${r.me}.`)),
   sh.map((p) => h("div", { class: "panel" }, h("h3", {}, "Sharing with " + p.peer),
     h("p", { class: "muted small" }, `${p.peer} sees only what is ticked here: the account's name and your part of its balance, kept up to date. Nothing else about it.`),
@@ -1121,24 +1161,44 @@ async function login() {
     h("h2", {}, "Coinpile"), h("p", { class: "muted" }, "A simple view of your Firefly III, with an agent you can ask about your money."),
     why ? h("p", { class: "neg small" }, why) : null,
     me.configured === false ? h("p", { class: "neg small" }, "Coinpile does not know your Firefly III address yet: set FIREFLY_URL on the container.") : null,
-    me.oauth ? h("a", { class: "btn primary", href: "/auth/firefly", style: "text-align:center;text-decoration:none" }, "Sign in with Firefly III") : null,
-    h("details", { open: !me.oauth }, h("summary", { class: "small" }, me.oauth ? "Or use a Personal Access Token" : "Sign in with a Personal Access Token"),
+    h("form", { style: "display:grid;gap:10px", onsubmit: async (e) => { e.preventDefault();
+        try { const r = await fetch("/auth/password", { method: "POST", credentials: "same-origin", headers: JSONH, body: JSON.stringify({ email: $("#lg-email").value.trim(), password: $("#lg-pw").value }) }); const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(r.status === 429 ? (j.detail || "Too many attempts, wait a little") : "Wrong email or password");
+          history.replaceState(null, "", location.pathname); boot(); } catch (err) { toast(err.message); } } },
+      h("label", {}, "Firefly III email", h("input", { id: "lg-email", type: "email", autocomplete: "username", required: true })),
+      h("label", {}, "Coinpile password", h("input", { id: "lg-pw", type: "password", autocomplete: "current-password", required: true })),
+      h("button", { class: "btn primary", type: "submit" }, "Sign in")),
+    h("p", { class: "muted small", style: "margin:0" }, "No Coinpile password yet? Sign in once with Firefly III below, then set one under Settings, Firefly III."),
+    me.oauth ? h("a", { class: "btn", href: "/auth/firefly", style: "text-align:center;text-decoration:none" }, "Sign in with Firefly III") : null,
+    h("details", {}, h("summary", { class: "small" }, me.oauth ? "Or use a Personal Access Token" : "Sign in with a Personal Access Token"),
       h("p", { class: "muted small" }, `In Firefly III (${me.firefly || "your Firefly III"}): Options, Profile, OAuth, Personal Access Tokens, Create new token. Paste it here. It is kept encrypted and only used to read your Firefly III.`),
       h("form", { style: "display:grid;gap:10px", onsubmit: async (e) => { e.preventDefault();
         try { const r = await fetch("/auth/token", { method: "POST", credentials: "same-origin", headers: JSONH, body: JSON.stringify({ token: $("#pat").value.trim() }) }); const j = await r.json().catch(() => ({}));
           if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : "Sign-in failed");
           toast("Signed in. Reading your Firefly III..."); history.replaceState(null, "", location.pathname); boot(); } catch (err) { toast(err.message); } } },
         h("textarea", { id: "pat", rows: 3, required: true, placeholder: "eyJ0eXAiOiJKV1Qi...", autocomplete: "off", spellcheck: "false" }),
-        h("button", { class: "btn" + (me.oauth ? "" : " primary"), type: "submit" }, "Sign in")))));
+        h("button", { class: "btn", type: "submit" }, "Sign in with the token"))),
+    h("details", {}, h("summary", { class: "small" }, "Forgot your Coinpile password?"),
+      h("p", { class: "muted small" }, "Make a Personal Access Token in Firefly III (Options, Profile, OAuth, Personal Access Tokens) to prove it is you, then choose a new Coinpile password. Every other browser is signed out."),
+      h("form", { style: "display:grid;gap:10px", onsubmit: async (e) => { e.preventDefault(); if ($("#rs-new").value !== $("#rs-new2").value) return toast("The new passwords do not match");
+        try { const r = await fetch("/auth/password/reset", { method: "POST", credentials: "same-origin", headers: JSONH, body: JSON.stringify({ token: $("#rs-tok").value.trim(), new: $("#rs-new").value }) }); const j = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : "Could not reset it");
+          toast("New password set. You are signed in."); history.replaceState(null, "", location.pathname); boot(); } catch (err) { toast(err.message); } } },
+        h("textarea", { id: "rs-tok", rows: 3, required: true, placeholder: "Personal Access Token", autocomplete: "off", spellcheck: "false" }),
+        h("label", {}, "New Coinpile password", h("input", { id: "rs-new", type: "password", autocomplete: "new-password", minlength: "12", required: true })),
+        h("label", {}, "Type it again", h("input", { id: "rs-new2", type: "password", autocomplete: "new-password", minlength: "12", required: true })),
+        h("button", { class: "btn", type: "submit" }, "Set the new password")))));
 }
 async function boot() {
   const want = location.hash.slice(1); if (TABS.some((t) => t[0] === want)) S.tab = want;
-  if (new URLSearchParams(location.search).has("demo") && window.GOBLIN_DEMO) { DEMO = window.GOBLIN_DEMO; S.demo = true; S.provider = DEMO.chatProvider; return render(); }
+  if (new URLSearchParams(location.search).has("demo") && window.COINPILE_DEMO) { DEMO = window.COINPILE_DEMO; S.demo = true; S.provider = DEMO.chatProvider; return render(); }
   let me = {}; try { me = await (await fetch("/auth/me", { credentials: "same-origin", cache: "no-store" })).json(); } catch {}
   if (!me.signed_in) return login();
   S.authed = true; S.name = me.email || "";
   try { const st0 = await api("/api/status"); S.sends = st0.sends || {}; S.cur = st0.currency || "USD"; } catch { S.sends = {}; }
   if (me.problem) toast("Firefly III needs you to sign in again (Settings, Firefly III)");
+  const rhBack = new URLSearchParams(location.search).get("robinhood");
+  if (rhBack) { toast({ connected: "Robinhood connected", failed: "Signing in to Robinhood did not finish", refused: "Robinhood refused the sign-in" }[rhBack] || "Robinhood"); history.replaceState(null, "", location.pathname + location.hash); }
   try { const st = await api("/api/status"); if (!st.firefly.last_refresh) { toast("Reading your Firefly III for the first time..."); await api("/api/refresh", { method: "POST" }).catch(() => {}); } } catch {}
   resumeOAuth(); render();
 }

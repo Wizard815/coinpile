@@ -274,7 +274,7 @@ def build_tools(ctx):
 
 # ------------------------------------------------------------------ provider adapters
 def system_prompt(name: str, today: date) -> str:
-    return (f"You are Goblin, the finance assistant for {name}'s private bank dashboard. Today is {today.isoformat()}.\n"
+    return (f"You are Coinpile, the finance assistant for {name}'s private bank dashboard. Today is {today.isoformat()}.\n"
             "You can only see data through the tools. Use them for every figure; never guess or invent numbers. Use calculate for arithmetic and show the working briefly.\n"
             "Amounts are signed: positive is money in, negative is money out. Projections are estimates that leave out everyday spending, so say so.\n"
             "You cannot move money. You may save planner notes. Add a subscription, add a goal or earmark savings only when the user explicitly asks (add_subscription, add_goal, fund_goal); otherwise propose it. "

@@ -75,6 +75,36 @@ class CsvConnector:
             for s, q in sorted(qty.items()) if abs(q) > 1e-9
         ]
 
+    def monthly(self) -> list[dict]:
+        """Per month: money deposited (or withdrawn), bought, sold, dividends and fees. An activity report has no prices, so no value over time."""
+        from datetime import datetime
+        by = defaultdict(lambda: {"deposits": 0.0, "bought": 0.0, "sold": 0.0, "dividends": 0.0, "fees": 0.0, "trades": 0})
+        for r in self._rows():
+            d = None
+            for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m/%d/%y"):
+                try:
+                    d = datetime.strptime(r["date"].strip(), fmt)
+                    break
+                except ValueError:
+                    pass
+            if not d:
+                continue
+            m = by[d.strftime("%Y-%m")]
+            code = r["code"].upper()
+            if code in ("ACH", "RTP", "XENT_CC"):
+                m["deposits"] += r["amount"]
+            elif code == "BUY":
+                m["bought"] += -r["amount"]
+                m["trades"] += 1
+            elif code == "SELL":
+                m["sold"] += r["amount"]
+                m["trades"] += 1
+            elif code in ("CDIV", "DIV", "MDIV", "QDIV"):
+                m["dividends"] += r["amount"]
+            elif code in ("GOLD", "MINT", "AFEE", "DFEE", "SLIP"):
+                m["fees"] += -r["amount"]
+        return [{"month": k, **{f: round(v, 2) if isinstance(v, float) else v for f, v in m.items()}} for k, m in sorted(by.items(), reverse=True)]
+
     def balances(self) -> dict:
         # Activity reports contain no cash balance; report net deposits instead.
         dep = sum(r["amount"] for r in self._rows() if r["code"] in ("ACH", "RTP", "XENT_CC"))
