@@ -18,9 +18,6 @@ CREATE TABLE IF NOT EXISTS subscriptions(
   cycle TEXT NOT NULL, next_date TEXT NOT NULL, category TEXT DEFAULT '', url TEXT DEFAULT '', notes TEXT DEFAULT '',
   source TEXT DEFAULT 'manual', plaid_stream_id TEXT UNIQUE, active INTEGER DEFAULT 1);
 CREATE TABLE IF NOT EXISTS holdings(account_id TEXT, symbol TEXT, name TEXT, quantity REAL, price REAL, value REAL, PRIMARY KEY(account_id, symbol));
-CREATE TABLE IF NOT EXISTS investments(
-  id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, kind TEXT DEFAULT 'brokerage', institution TEXT DEFAULT '',
-  balance REAL DEFAULT 0, account_id TEXT, notes TEXT DEFAULT '', active INTEGER DEFAULT 1);   -- an account linked here follows that account's balance (Robinhood via Plaid, or anything else)
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT, secret INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS plaid_usage(day TEXT, endpoint TEXT, calls INTEGER DEFAULT 0, PRIMARY KEY(day, endpoint));
 CREATE TABLE IF NOT EXISTS categories(name TEXT PRIMARY KEY, kind TEXT DEFAULT 'expense', builtin INTEGER DEFAULT 0);
@@ -85,6 +82,11 @@ class DB:
         if path != ":memory:":
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self.conn = sqlite3.connect(path, check_same_thread=False)
+        if path != ":memory:":
+            try:
+                os.chmod(path, 0o600)                       # a person's money data: readable by Coinpile only
+            except OSError:
+                pass
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         with self.tx() as c:

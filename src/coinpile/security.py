@@ -33,7 +33,7 @@ def require_internal(request: Request, secret: str) -> None:
 # ---------------------------------------------------------------- passwords people choose
 # A password a person picks has far less entropy than a random 256-bit token, so it is never kept as a plain sha256: it is salted and run through scrypt
 # with the OWASP-recommended minimum cost (N=2^17, r=8, p=1, about 128 MiB and a fraction of a second). Random tokens (api tokens, the admin password,
-# the per-goblin fallback token) are high entropy, so the fast sha256 check above stays correct for them.
+# the per-person fallback token) are high entropy, so the fast sha256 check above stays correct for them.
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 17, 8, 1
 MIN_PASSWORD = 12
 
@@ -95,7 +95,10 @@ class Throttle:
 
     def fail(self, key: str) -> None:
         if key not in self.state and len(self.state) >= self.MAX_KEYS:
-            self.state.pop(next(iter(self.state)))
+            # make room by dropping an entry that is not locked out (or the one whose lock ends first): a flood of junk names never frees a locked one
+            now = self.clock()
+            free = next((k for k, v in self.state.items() if v[1] <= now), None)
+            self.state.pop(free if free is not None else min(self.state, key=lambda k: self.state[k][1]))
         s = self.state.setdefault(key, [0, 0.0])
         s[0] += 1
         if s[0] > self.FREE:

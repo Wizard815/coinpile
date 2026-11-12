@@ -216,7 +216,7 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
 
 # ------------------------------------------------------------------ joint accounts
 def mine(a: dict, bal: float | None = None) -> float:
-    """My part of an account's balance. A joint account is linked in both people's goblins, so each counts only their share (default all of it)."""
+    """My part of an account's balance. A joint account is linked by both people, so each counts only their share (default all of it)."""
     b = a["balance"] if bal is None else bal
     s = a.get("my_share")
     return (b or 0.0) * (100.0 if s is None else s) / 100.0
@@ -250,22 +250,6 @@ def savings_summary(db, today: date) -> dict:
             "maturing_soon": maturing, "by_kind": {k: round(sum(i["balance"] for i in items if i["kind"] == k), 2) for k in sorted({i["kind"] for i in items})}}
 
 
-# ------------------------------------------------------------------ investments (stocks, crypto, brokerage: Robinhood and anything else, by hand or linked to an account)
-def investments_view(db, row: dict) -> dict:
-    bal = row["balance"] or 0.0
-    if row.get("account_id"):
-        a = db.one("SELECT balance, my_share FROM accounts WHERE id=?", (row["account_id"],))
-        if a and a["balance"] is not None:
-            bal = mine(a)
-    return {**row, "balance": round(bal, 2), "linked": bool(row.get("account_id"))}
-
-
-def investments_summary(db) -> dict:
-    items = [investments_view(db, r) for r in db.all("SELECT * FROM investments WHERE active=1 ORDER BY kind, name")]
-    total = round(sum(i["balance"] for i in items), 2)
-    return {"items": items, "total": total, "by_kind": {k: round(sum(i["balance"] for i in items if i["kind"] == k), 2) for k in sorted({i["kind"] for i in items})}}
-
-
 # ------------------------------------------------------------------ net worth, projection, alerts
 def net_worth(db, today: date | None = None) -> float:
     total = 0.0
@@ -273,8 +257,6 @@ def net_worth(db, today: date | None = None) -> float:
         total += mine(a) * (-1 if a["kind"] in OUT_KINDS else 1)
     for s in db.all("SELECT * FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')"):
         total += s["balance"] or 0                       # savings linked to an account are already counted via that account
-    for i in db.all("SELECT * FROM investments WHERE active=1 AND (account_id IS NULL OR account_id='')"):
-        total += i["balance"] or 0                        # investments linked to an account are already counted via that account
     return round(total, 2)
 
 
@@ -446,8 +428,10 @@ def budget_status(db, month: str, today: date) -> list[dict]:
 def overview(db, days: int, today: date) -> dict:
     accts = db.all("SELECT * FROM accounts")
     by_kind = {}
+    from coinpile import investments
     for a in accts:
-        by_kind[a["kind"]] = round(by_kind.get(a["kind"], 0) + mine(a), 2)
+        k = "investment" if investments.is_investment(a) else a["kind"]          # an account you track as an investment shows as one
+        by_kind[k] = round(by_kind.get(k, 0) + mine(a), 2)
     sav = savings_summary(db, today)
     from coinpile import plan
     gv = plan.goals_view(db, today)
