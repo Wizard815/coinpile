@@ -143,7 +143,16 @@ def sub_view(row: dict, today: date) -> dict:
     stop = d(row["end_date"]) if row.get("end_date") else None
     nd = recur.next_due(d(row["next_date"]), every, unit, today, stop)
     ended = stop is not None and nd is None                  # past its end date: nothing more to pay
+    left = last = None
+    if stop is not None:                                     # a set number of payments: how many are still to come, and the last one
+        occ = recur.occurrences(d(row["next_date"]), every, unit, today, stop, stop)
+        left, last = len(occ), (occ[-1].isoformat() if occ else None)
+        if last is None:
+            past = recur.occurrences(d(row["next_date"]), every, unit, d(row["next_date"]), stop, stop)
+            last = past[-1].isoformat() if past else None
+    total = row.get("plan_total")
     return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended,
+            "payments_left": left, "last_payment": last, "payment_no": (total - left + 1) if total and left is not None and 0 < left <= total else None,
             "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended else 0.0}
 
 
@@ -180,13 +189,21 @@ def upcoming(db, days: int, today: date) -> dict:
 
 
 def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[dict]:
-    """For subscriptions bound to an account: was each expected payment actually seen? Counts consecutive misses."""
+    """Was each expected payment of a subscription actually seen? Counts consecutive misses, newest first.
+    With an account set, that account is searched. Without one, every account is, but only for the payee's own name (an amount alone
+    could be anything), and only once that payee has been seen paying this subscription before (so a name your bank spells differently
+    is not called missing for ever)."""
     out = []
-    for s in db.all("SELECT * FROM subscriptions WHERE active=1 AND account_id IS NOT NULL AND account_id != '' AND coalesce(payer,'me')='me'"):
-        acct = db.one("SELECT * FROM accounts WHERE id=?", (s["account_id"],))
-        first = db.one("SELECT MIN(date) m, MAX(date) x FROM transactions WHERE account_id=?", (s["account_id"],))
+    for s in db.all("SELECT * FROM subscriptions WHERE active=1 AND coalesce(payer,'me')='me'"):
+        bound = bool(s["account_id"])
+        acct = db.one("SELECT * FROM accounts WHERE id=?", (s["account_id"],)) if bound else {"name": "any account"}
+        first = db.one("SELECT MIN(date) m, MAX(date) x FROM transactions" + (" WHERE account_id=?" if bound else ""), (s["account_id"],) if bound else ())
         if not acct or not first["m"]:
             continue
+        if not bound:
+            seen = db.all("SELECT name, amount FROM transactions WHERE amount<0 AND date < ?", ((today - timedelta(days=grace)).isoformat(),))
+            if not any(recur.same_payee(t["name"], s["name"]) and abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] for t in seen):
+                continue
         every, unit = s["every"] or 1, s["unit"] or "month"
         anchor = d(s["next_date"])
         k = recur.first_k_on_or_after(anchor, every, unit, today - timedelta(days=grace))
@@ -201,9 +218,10 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
                 break                                     # we do not have data covering that date, so we cannot call it missed
             # A hit is an outflow near the expected date that is EITHER (almost) exactly the bill's amount OR looks like the same payee at a
             # similar amount (variable bills). Amount alone is not enough: an unrelated $60 purchase must not hide a missing $61 bill.
-            cands = db.all("SELECT name, amount FROM transactions WHERE account_id=? AND amount<0 AND date BETWEEN ? AND ?",
-                           (s["account_id"], (exp - timedelta(days=3)).isoformat(), (exp + timedelta(days=grace)).isoformat()))
-            hit = any(abs(abs(t["amount"]) - s["amount"]) <= max(0.5, 0.01 * s["amount"])
+            span = ((exp - timedelta(days=3)).isoformat(), (exp + timedelta(days=grace)).isoformat())
+            cands = db.all("SELECT name, amount FROM transactions WHERE " + ("account_id=? AND " if bound else "") + "amount<0 AND date BETWEEN ? AND ?",
+                           ((s["account_id"],) if bound else ()) + span)
+            hit = any((bound and abs(abs(t["amount"]) - s["amount"]) <= max(0.5, 0.01 * s["amount"]))
                       or (abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] and recur.same_payee(t["name"], s["name"])) for t in cands)
             if hit:
                 break                                     # misses must be consecutive, newest first
@@ -378,8 +396,8 @@ def _alerts(db, today: date) -> list[dict]:
                         "detail": ", ".join(x["name"] for x in found[:4]) + (" and more" if len(found) > 4 else ""), "count": len(found)})
     for m in (late_payments(db, today) if cfg.get(db, "alert_missed") != "off" else []):
         out.append({"kind": "missed_payment", "severity": "critical" if m["misses"] >= 2 else "warning", "sub_id": m["sub_id"],
-                    "title": f"{m['name']} not seen in {m['account']}" + (f" ({m['misses']} times in a row)" if m["misses"] > 1 else ""),
-                    "detail": "Expected " + ", ".join(m["missed_dates"])})
+                    "title": f"Missing subscription: {m['name']} ({m['amount']:,.2f}) not seen in {m['account']}" + (f", {m['misses']} times in a row" if m["misses"] > 1 else ""),
+                    "detail": "Expected " + ", ".join(m["missed_dates"]) + ". Paid another way, or cancelled? Update or pause it in Subscriptions."})
     from coinpile import plan                       # imported here: plan builds on this module
     gv = plan.goals_view(db, today)
     if gv["overallocated"]:

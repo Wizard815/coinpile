@@ -28,6 +28,8 @@ class Sub(BaseModel):
     payer_name: str = ""
     notify_days: int = 3
     end_date: str | None = None
+    times_left: int | None = None       # "this many more payments, then it is done" (pay in 4, a loan): sets end_date from next_date
+    plan_total: int | None = None       # optional: how many payments the whole plan has (4 for pay in 4), to show "payment 2 of 4"
 
 
 class AccountIn(BaseModel):
@@ -72,6 +74,7 @@ class NoteIn(BaseModel):
     title: str
     body: str = ""
     pinned: bool = False
+    tags: str = ""                      # comma separated, e.g. "taxes, house"
 
 
 KINDS = {"cash", "credit", "investment", "loan"}
@@ -418,6 +421,12 @@ def register(app, ctx):
         except ValueError as e:
             bad(str(e))
         date_ok(s.next_date, "next_date")
+        if s.times_left is not None:
+            if not 1 <= s.times_left <= 1000:
+                bad("times_left must be 1-1000")
+            s.end_date = recur.shift(date.fromisoformat(s.next_date), every, unit, s.times_left - 1).isoformat()     # the last of them
+        if s.plan_total is not None and not 1 <= s.plan_total <= 1000:
+            bad("plan_total must be 1-1000")
         if s.end_date:
             date_ok(s.end_date, "end_date")
             if s.end_date < s.next_date:
@@ -440,9 +449,10 @@ def register(app, ctx):
 
     def sub_row(s: Sub, every, unit):
         return (s.name.strip(), s.amount, s.currency, recur.label(every, unit), every, unit, s.next_date, s.category, s.url, s.notes, int(s.active),
-                s.account_id or None, s.payment_method, s.payer, s.payer_name.strip() if s.payer == "other" else "", s.notify_days, s.end_date or None)
+                s.account_id or None, s.payment_method, s.payer, s.payer_name.strip() if s.payer == "other" else "", s.notify_days, s.end_date or None, s.plan_total)
 
-    COLS = "name,amount,currency,cycle,every,unit,next_date,category,url,notes,active,account_id,payment_method,payer,payer_name,notify_days,end_date"
+    COLS = "name,amount,currency,cycle,every,unit,next_date,category,url,notes,active,account_id,payment_method,payer,payer_name,notify_days,end_date,plan_total"
+    PH = ",".join("?" * len(COLS.split(",")))
 
     @app.get("/api/subscriptions")
     def subs_list(request: Request):
@@ -460,7 +470,7 @@ def register(app, ctx):
             raise HTTPException(422, str(e)[:200])
         every, unit = check_sub(s)
         with store.tx() as c:
-            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({PH},?)", sub_row(s, every, unit) + (sync.now(),))
         to_bill(cur.lastrowid)
         return ledger.subscription(store, cur.lastrowid, ctx.today())
 
@@ -483,7 +493,7 @@ def register(app, ctx):
             raise HTTPException(422, str(e)[:200])
         every, unit = check_sub(s)
         with store.tx() as c:
-            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({PH},?)", sub_row(s, every, unit) + (sync.now(),))
         return ledger.subscription(store, cur.lastrowid, ctx.today())
 
     ctx.create_sub = create_sub_from_agent
@@ -641,6 +651,15 @@ def register(app, ctx):
         return {"deleted": sid}
 
     # ------------------------------------------------------------ planner: notes + budgets
+    def tags(s: str) -> str:
+        """Tidy tags: lowercase, trimmed, no duplicates, at most 12 of 30 characters."""
+        out = []
+        for t in (s or "").split(","):
+            t = t.strip().lower()[:30]
+            if t and t not in out:
+                out.append(t)
+        return ",".join(out[:12])
+
     @app.get("/api/notes")
     def notes(request: Request):
         auth(request)
@@ -653,14 +672,16 @@ def register(app, ctx):
             bad("title required")
         ts = sync.now()
         with store.tx() as c:
-            cur = c.execute("INSERT INTO notes(title,body,author,pinned,created,updated) VALUES(?,?,?,?,?,?)", (n.title.strip(), n.body, "me", int(n.pinned), ts, ts))
+            cur = c.execute("INSERT INTO notes(title,body,author,pinned,tags,created,updated) VALUES(?,?,?,?,?,?,?)", (n.title.strip(), n.body, "me", int(n.pinned), tags(n.tags), ts, ts))
         return store.one("SELECT * FROM notes WHERE id=?", (cur.lastrowid,))
 
     @app.put("/api/notes/{nid}")
     def note_update(request: Request, nid: int, n: NoteIn):
         auth(request)
+        if not n.title.strip():
+            bad("title required")
         with store.tx() as c:
-            cur = c.execute("UPDATE notes SET title=?, body=?, pinned=?, updated=? WHERE id=?", (n.title.strip(), n.body, int(n.pinned), sync.now(), nid))
+            cur = c.execute("UPDATE notes SET title=?, body=?, pinned=?, tags=?, updated=? WHERE id=?", (n.title.strip(), n.body, int(n.pinned), tags(n.tags), sync.now(), nid))
         if not cur.rowcount:
             bad("not found", 404)
         return store.one("SELECT * FROM notes WHERE id=?", (nid,))

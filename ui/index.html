@@ -431,12 +431,15 @@ async function viewSubs(root, rerender) {
   const [d, sugs, accts, cats, alerts] = await Promise.all([api("/api/subscriptions"), api("/api/suggestions"), api("/api/accounts"), api("/api/categories"), api("/api/alerts")]);
   const acctOpts = [["", "None (no account)"], ...accts.map((a) => [a.id, `${a.institution} · ${a.name}${a.source === "manual" ? " (manual)" : ""}`])];
   const e = S.edit, label = (s) => PRESETS.find(([k]) => k === s.label) ? s.label : "custom";
+  const endsMode = !e?.end_date ? "never" : e.plan_total ? "count" : "date";
   const form = () => {
     const f = h("form", { class: "subform", onsubmit: async (ev) => {
       ev.preventDefault();
-      const preset = val("sf-cycle"), payer = val("sf-payer");
+      const preset = val("sf-cycle"), payer = val("sf-payer"), ends = val("sf-ends");
+      if (ends === "count" && !(parseInt(val("sf-count")) >= 1)) return toast("How many more payments?");
       const body = { name: val("sf-name"), amount: num("sf-amount"), next_date: val("sf-next"), category: val("sf-cat"), account_id: val("sf-acct") || null, payment_method: val("sf-pm"), payer, payer_name: payer === "other" ? val("sf-pname") : "",
-        notify_days: parseInt(val("sf-notify")) || 0, end_date: val("sf-end") || null, url: val("sf-url"), notes: val("sf-notes"), active: e ? !!e.active : true, ...(preset === "custom" ? { every: parseInt(val("sf-every")), unit: val("sf-unit") } : { cycle: preset }) };
+        notify_days: parseInt(val("sf-notify")) || 0, end_date: ends === "date" ? val("sf-end") || null : null,
+        times_left: ends === "count" ? parseInt(val("sf-count")) : null, plan_total: ends === "count" ? parseInt(val("sf-total")) || null : null, url: val("sf-url"), notes: val("sf-notes"), active: e ? !!e.active : true, ...(preset === "custom" ? { every: parseInt(val("sf-every")), unit: val("sf-unit") } : { cycle: preset }) };
       try { await api(e ? `/api/subscriptions/${e.id}` : "/api/subscriptions", send(e ? "PUT" : "POST", body)); S.edit = null; toast(e ? "Saved" : "Added"); rerender(); } catch (err) { fail(err); }
     } },
       field("sf-name", "Name", e?.name, { required: true }), field("sf-amount", "Amount", e?.amount, { type: "number", step: "0.01", min: "0", required: true }),
@@ -446,14 +449,20 @@ async function viewSubs(root, rerender) {
       select("sf-payer", "Who pays", [["me", "I pay"], ["other", "Someone else pays"]], e?.payer ?? "me", { onchange: (ev) => { $(".pname", f).hidden = ev.target.value !== "other"; $("#sf-pname", f).required = ev.target.value === "other"; } }),
       h("div", { class: "pname", hidden: (e?.payer ?? "me") !== "other" }, field("sf-pname", "Their name", e?.payer_name, { required: (e?.payer ?? "me") === "other", placeholder: "who pays?" })),
       select("sf-acct", "Paid from (account)", acctOpts, e?.account_id ?? ""), field("sf-pm", "Or how it's paid", e?.payment_method, { placeholder: "cash, Dad's card…" }),
-      field("sf-notify", "Remind me (days before)", e?.notify_days ?? 3, { type: "number", min: "0", max: "60" }), field("sf-end", "Ends (optional)", e?.end_date ?? "", { type: "date" }),
+      field("sf-notify", "Remind me (days before)", e?.notify_days ?? 3, { type: "number", min: "0", max: "60" }),
+      select("sf-ends", "Ends", [["never", "Never (keeps going)"], ["count", "After a number of payments"], ["date", "On a date"]], endsMode,
+        { onchange: (ev) => { $(".ends-date", f).hidden = ev.target.value !== "date"; $(".ends-count", f).hidden = ev.target.value !== "count"; } }),
+      h("div", { class: "ends-date", hidden: endsMode !== "date" }, field("sf-end", "Last payment on or before", e?.end_date ?? "", { type: "date" })),
+      h("div", { class: "ends-count", hidden: endsMode !== "count" }, field("sf-count", "Payments still to come (the next one included)", e?.payments_left ?? "", { type: "number", min: "1", max: "1000", placeholder: "e.g. 3" }),
+        field("sf-total", "Payments in the whole plan (optional)", e?.plan_total ?? "", { type: "number", min: "1", max: "1000", placeholder: "e.g. 4 for pay in 4" })),
       field("sf-url", "Website", e?.url), field("sf-notes", "Notes", e?.notes),
       h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, e ? "Save changes" : "Add subscription"), e ? h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel") : null));
     return f;
   };
-  const late = alerts.filter((a) => a.kind === "missed_payment");
-  add(root, 
-    late.length ? h("div", { class: "panel" }, h("h3", {}, "Payments that did not show up"), h("div", { class: "alerts" }, late.map(alertRow))) : null,
+  const late = alerts.filter((a) => a.kind === "missed_payment"), running = d.items.filter((s) => !s.ended), done = d.items.filter((s) => s.ended);
+  const plan = (s) => s.payments_left == null ? null : s.payment_no ? `payment ${s.payment_no} of ${s.plan_total} next · last ${s.last_payment}` : `${s.payments_left} more payment${s.payments_left === 1 ? "" : "s"} · last ${s.last_payment}`;
+  add(root,
+    late.length ? h("div", { class: "panel" }, h("h3", {}, "Missing subscriptions"), h("p", { class: "muted small" }, "Expected on their usual day but not seen in your transactions (a few days of grace). Paid another way or cancelled? Edit, pause or end it below."), h("div", { class: "alerts" }, late.map(alertRow))) : null,
     h("div", { class: "grid" }, kpi("Monthly", usd(d.monthly_total), "what you pay, paused and others' bills excluded"), kpi("Yearly", usd(d.yearly_total), `${d.items.filter((s) => s.active && s.payer === "me").length} active`)),
     sugs.length ? h("div", { class: "panel" }, h("h3", {}, "Payments that look like subscriptions"), h("p", { class: "muted small" }, "Found in your transactions: same payee, steady amount, steady timing. Name it, check the interval and account, then add it."),
       h("div", { class: "cards" }, sugs.slice(0, 8).map((s, i) => h("div", { class: "card" },
@@ -465,13 +474,17 @@ async function viewSubs(root, rerender) {
     scanPanel(accts, acctOpts, rerender),
     h("div", { class: "panel" }, h("h3", {}, e ? "Edit subscription" : "Add a subscription"), form()),
     h("div", { class: "panel scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Name", "Repeats", "Next", "Paid from", "Amount", "Per month", ""].map((x, i) => h("th", { class: i > 3 ? "r" : "" }, x)))),
-      h("tbody", {}, d.items.map((s) => h("tr", { style: s.active ? "" : "opacity:.5" },
+      h("tbody", {}, running.map((s) => h("tr", { style: s.active ? "" : "opacity:.5" },
         h("td", {}, s.name, " ", s.source === "plaid" ? h("span", { class: "pill t" }, "auto") : null, s.active ? null : h("span", { class: "pill" }, "paused"), s.payer === "other" ? h("span", { class: "pill b" }, s.payer_name + " pays") : null, h("div", { class: "muted small" }, s.category)),
-        h("td", {}, s.label), h("td", { class: "mono" }, s.next_due || "ended"), h("td", { class: "small" }, s.account_name ? `${s.account_institution} · ${s.account_name}` : s.payment_method || h("span", { class: "muted" }, "not set")),
+        h("td", {}, s.label, plan(s) ? h("div", { class: "small" }, h("span", { class: "pill b" }, plan(s))) : null), h("td", { class: "mono" }, s.next_due || "ended"), h("td", { class: "small" }, s.account_name ? `${s.account_institution} · ${s.account_name}` : s.payment_method || h("span", { class: "muted" }, "not set")),
         h("td", { class: "num r" }, usd(s.amount)), h("td", { class: "num r" }, s.monthly ? usd(s.monthly) : "–"),
         h("td", { class: "r", style: "white-space:nowrap" }, h("button", { class: "btn sm", onclick: () => { S.edit = s; rerender(); window.scrollTo(0, 0); } }, "Edit"), " ",
           h("button", { class: "btn sm", onclick: async () => { await api(`/api/subscriptions/${s.id}`, send("PUT", { ...s, cycle: undefined, every: s.every, unit: s.unit, active: !s.active })); rerender(); } }, s.active ? "Pause" : "Resume"), " ",
           h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/subscriptions/${s.id}`, { method: "DELETE" }); rerender(); }) }, "Delete"))))))),
+    done.length ? h("div", { class: "panel" }, h("details", {}, h("summary", {}, h("b", {}, `Finished (${done.length})`), h("span", { class: "muted small" }, "  plans that ran their course, kept so you can look back")),
+      done.map((s) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto auto" }, h("span", {}, s.name, h("div", { class: "muted small" }, `${s.label}${s.plan_total ? ` · ${s.plan_total} payments` : ""} · last ${s.last_payment || s.end_date}`)), h("span", { class: "num" }, usd(s.amount)),
+        h("button", { class: "btn sm", onclick: () => { S.edit = s; rerender(); window.scrollTo(0, 0); } }, "Extend"),
+        h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/subscriptions/${s.id}`, { method: "DELETE" }); rerender(); }) }, "Delete"))))) : null,
     Object.keys(d.by_category).length ? h("div", { class: "panel" }, h("h3", {}, "By category, per month"), barList(Object.entries(d.by_category).sort((a, b) => b[1] - a[1]))) : null,
     h("div", { class: "panel" }, h("h3", {}, "Put them on your calendar"), h("p", { class: "muted small" }, "Each subscription becomes a repeating all-day event titled with its amount. Set up CalDAV in Settings to push them straight in."),
       h("div", { class: "chips" }, h("button", { class: "btn", onclick: async () => { if (S.demo) return toast("Sample preview: download is off"); const r = await fetch("/subscriptions.ics", { credentials: "same-origin" }); downloadText("coinpile-subscriptions.ics", await r.text(), "text/calendar"); } }, "Download .ics"),
@@ -526,13 +539,6 @@ async function discuss(link, title) {
 async function viewSavings(root, rerender) {
   const [v, accts, mat, lk, shr] = await Promise.all([api("/api/goals"), api("/api/accounts"), api("/api/maturities"), api("/api/links").catch(() => ({ me: "", links: [] })), api("/api/sharing").catch(() => [])]);
   const theirs = shr.flatMap((p) => p.from_them.map((x) => ({ ...x, peer: p.peer })));
-  const pigs = await api("/api/piggy-banks").catch(() => []);
-  if (pigs.length) add(root, h("div", { class: "panel" }, h("h3", {}, "Piggy banks in Firefly III"),
-    h("p", { class: "muted small" }, "Read from Firefly III; add money to them there. Goals below are Coinpile's own planner."),
-    pigs.filter((p) => p.active).map((p) => { const pct = p.target ? Math.min(100, Math.round(100 * p.current / p.target)) : null;
-      return h("div", { class: "card", style: "margin-top:8px" }, h("div", { class: "bar" }, h("b", {}, p.name), h("span", { class: "num" }, usd(p.current) + (p.target ? " of " + usd(p.target) : ""))),
-        pct != null ? h("div", { class: "comp", style: "margin:6px 0" }, h("i", { style: `width:${pct}%;background:var(--teal)` })) : null,
-        h("div", { class: "small muted" }, [p.accounts.map((x) => `${x.name}: ${usd(x.amount)}`).join(", "), p.target_date ? "by " + p.target_date : "", p.save_per_month ? usd(p.save_per_month) + " a month to get there" : ""].filter(Boolean).join(" · "))); })));
   const editing = null, ep = S.edit?.place ? S.edit.place : null;
   const active = v.items.filter((g) => g.status === "active"), closed = v.items.filter((g) => g.status !== "active");
   const gform = h("form", { class: "subform", onsubmit: async (ev) => { ev.preventDefault();
@@ -580,23 +586,68 @@ async function viewSavings(root, rerender) {
     h("div", { class: "panel" }, h("h3", {}, editing ? "Edit goal" : "Add a goal"), gform));
 }
 
-/* ================================ BUDGETS & NOTES: the monthly plan, goals and notes ================================ */
-async function viewPlanner(root, rerender) {
+/* ================================ PIGGY BANKS: Firefly III's piggy banks, read every refresh ================================ */
+async function viewPiggy(root, rerender) {
+  const v = await api("/api/piggy-banks/overview");
+  const act = v.items.filter((p) => p.active), off = v.items.filter((p) => !p.active);
+  const acctOpts = (p) => { const mine = new Set(p.accounts.map((x) => x.account_id)); return [...p.accounts.map((x) => [x.account_id, `${x.name} (${usd(x.amount)} in it)`]), ...v.accounts.filter((a) => !mine.has(a.id)).map((a) => [a.id, a.name])]; };
+  const card = (p) => {
+    const pct = p.target ? Math.min(1, (p.current || 0) / p.target) : null, k = "pg" + p.id;
+    const hist = h("div", { class: "small" });
+    if (S.edit?.piggy === p.id) return h("form", { class: "card", style: "display:grid;gap:8px", onsubmit: async (e) => { e.preventDefault();
+        try { await api(`/api/piggy-banks/${p.id}`, send("PUT", { name: val(k + "n"), target: num(k + "t") || 0, target_date: val(k + "d"), notes: val(k + "o") })); S.edit = null; toast("Saved in Firefly III"); rerender(); } catch (err) { fail(err); } } },
+      h("b", {}, "Edit piggy bank"), field(k + "n", "Name", p.name, { required: true }), field(k + "t", "Target (empty for none)", p.target ?? "", { type: "number", min: "0", step: "0.01" }),
+      field(k + "d", "Target date (empty for none)", p.target_date ?? "", { type: "date" }), field(k + "o", "Notes", p.notes || ""),
+      h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Save in Firefly III"), h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel")));
+    const move = async (sign) => { const amt = num(k + "a"); if (!amt) return toast("Enter an amount");
+      try { await api(`/api/piggy-banks/${p.id}/money`, send("POST", { account_id: val(k + "c"), amount: sign * amt })); toast(sign > 0 ? "Added" : "Taken out"); rerender(); } catch (err) { fail(err); } };
+    return h("div", { class: "card" + (p.active ? "" : " done") },
+      h("div", { class: "bar" }, h("b", {}, p.name, p.goal ? h("span", { class: "pill t", title: "Coinpile keeps it in step with this goal" }, "goal: " + p.goal) : null), h("span", { class: "num" }, usd(p.current) + (p.target ? " of " + usd(p.target) : ""))),
+      pct != null ? h("div", { style: "margin:8px 0" }, bar(pct, pct >= 1 ? "var(--teal)" : "var(--brass)")) : null,
+      h("div", { class: "small" }, p.target ? (p.left > 0 ? `${Math.round(pct * 100)}% there, ${usd(p.left)} to go` : "Target reached") : "No target: money set aside"),
+      h("div", { class: "small muted" }, [p.target_date ? "by " + p.target_date : "", p.save_per_month ? `save ${usd(p.save_per_month)} a month to make it` : ""].filter(Boolean).join(" · ")),
+      p.accounts.length ? h("div", { class: "small muted" }, "Held in: " + p.accounts.map((x) => `${x.name} ${usd(x.amount)}`).join(", ")) : null,
+      p.notes ? h("div", { class: "small muted", style: "margin-top:4px" }, p.notes) : null,
+      v.can_change && !p.goal && p.active ? h("div", { class: "filters", style: "margin:10px 0 4px" }, field(k + "a", "Amount", "", { type: "number", min: "0.01", step: "0.01" }), select(k + "c", "Account", acctOpts(p), p.accounts[0]?.account_id || "")) : null,
+      hist,
+      h("div", { class: "chips", style: "margin-top:8px" },
+        v.can_change && !p.goal && p.active ? [h("button", { class: "btn sm primary", onclick: () => move(1) }, "Add money"), h("button", { class: "btn sm", onclick: () => move(-1) }, "Take out"),
+          h("button", { class: "btn sm", onclick: () => { S.edit = { piggy: p.id }; rerender(); } }, "Edit")] : null,
+        h("button", { class: "btn sm", onclick: async (e) => { e.target.disabled = true; try { const ev = await api(`/api/piggy-banks/${p.id}/events`);
+          hist.replaceChildren(ev.length ? h("div", { style: "margin-top:8px" }, ev.slice(0, 12).map((x) => h("div", { class: "ev", style: "grid-template-columns:auto 1fr auto;padding:4px 0" }, h("span", { class: "when" }, x.date), h("span", { class: "muted" }, x.account), h("span", { class: "num " + (x.amount < 0 ? "neg" : "pos") }, (x.amount > 0 ? "+" : "") + usd(x.amount))))) : h("p", { class: "muted small" }, "No history yet."));
+        } catch (err) { fail(err); } e.target.disabled = false; } }, "History"),
+        p.link ? h("a", { class: "btn sm", href: p.link, target: "_blank", rel: "noopener" }, "Open in Firefly III") : null));
+  };
+  add(root,
+    h("div", { class: "grid" }, kpi("In piggy banks", usd(v.total), `${act.length} active piggy bank${act.length === 1 ? "" : "s"}`, "pos"), kpi("Targets", usd(v.targets), "what they are all saving toward"),
+      kpi("Still needed", usd(v.still_needed), v.still_needed > 0 ? "to fill every target" : "every target is reached")),
+    v.can_change ? null : h("div", { class: "panel" }, h("p", { class: "small", style: "margin:0" }, "These are your Firefly III piggy banks, read on every refresh. To make piggy banks and put money in or take it out from here, switch on ", h("b", {}, "Piggy banks"), " in Settings, Firefly III. Until then, change them in Firefly III."),
+      h("div", { class: "chips", style: "margin-top:8px" }, h("button", { class: "btn sm", onclick: () => { S.tab = "settings"; render(); } }, "Open Settings"), v.firefly ? h("a", { class: "btn sm", href: v.firefly + "/piggy-banks", target: "_blank", rel: "noopener" }, "Piggy banks in Firefly III") : null)),
+    h("div", { class: "panel" }, h("h3", {}, "Piggy banks"), act.length ? h("div", { class: "cards" }, act.map(card)) : h("p", { class: "muted" }, "No piggy banks in Firefly III yet." + (v.can_change ? " Make one below." : "")),
+      off.length ? h("details", { style: "margin-top:14px" }, h("summary", { class: "muted" }, `${off.length} inactive`), h("div", { class: "cards" }, off.map(card))) : null,
+      act.some((p) => p.goal) ? h("p", { class: "muted small", style: "margin-top:10px" }, "Piggy banks marked \"goal\" follow a Coinpile goal: change those on the Savings page.") : null),
+    v.can_change ? h("div", { class: "panel" }, h("h3", {}, "New piggy bank"), h("p", { class: "muted small" }, "Made in your Firefly III. The money stays in the account you pick; the piggy bank says what part of it is set aside."),
+      h("form", { class: "subform", onsubmit: async (e) => { e.preventDefault();
+        try { await api("/api/piggy-banks", send("POST", { name: val("np-name"), account_id: val("np-acct"), target: num("np-target") || null, target_date: val("np-date") || null, start_amount: num("np-start") || 0, notes: val("np-notes") })); toast("Made in Firefly III"); rerender(); } catch (err) { fail(err); } } },
+        field("np-name", "Name", "", { required: true, placeholder: "Vacation, new tires…" }), select("np-acct", "Money kept in", v.accounts.map((a) => [a.id, a.name]), v.accounts[0]?.id || ""),
+        field("np-target", "Target", "", { type: "number", min: "0", step: "0.01" }), field("np-date", "By (optional)", "", { type: "date" }),
+        field("np-start", "Already in it", "", { type: "number", min: "0", step: "0.01" }), field("np-notes", "Notes", ""),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Make piggy bank")))) : null);
+}
+
+/* ================================ BUDGETS: the monthly plan and income ================================ */
+async function viewBudgets(root, rerender) {
   const month = S.month || today().slice(0, 7);
-  const [notes, pl, cats, gv, accts, fcs] = await Promise.all([api("/api/notes"), api("/api/plan?month=" + month), api("/api/categories"), api("/api/goals"), api("/api/accounts"), api("/api/forecast").catch(() => null)]);
-  const cur = notes.find((n) => n.id === S.note) || null, activeGoals = gv.items.filter((g) => g.status === "active");
-  const ask = h("input", { id: "pl-ask", placeholder: "e.g. Draft a plan to save $500 a month using my real spending", style: "flex:1;min-width:0" });
+  const [pl, cats, accts, fcs] = await Promise.all([api("/api/plan?month=" + month), api("/api/categories"), api("/api/accounts"), api("/api/forecast").catch(() => null)]);
   const incomeRow = (i) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto auto" }, h("span", {}, i.name, " ", h("span", { class: "muted small" }, i.label), i.active ? null : h("span", { class: "pill" }, "paused")), h("span", { class: "muted small" }, i.paydays?.length ? `${i.paydays.length} payday${i.paydays.length === 1 ? "" : "s"}${i.extra_paycheck ? " (extra!)" : ""}` : `next ${i.next_due.slice(5)}`), h("span", { class: "num pos", title: `steady average ${usd(i.monthly)}/mo` }, usd(i.in_month ?? i.monthly) + "/mo"),
     h("button", { class: "btn sm danger", "aria-label": "Delete income", onclick: sure(null, "Sure?", async () => { await api(`/api/incomes/${i.id}`, { method: "DELETE" }); rerender(); }) }, "×"));
   add(root,
-    /* ---------- the plan ---------- */
     h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Monthly plan"), h("input", { type: "month", id: "bm", value: month, class: "tiny", style: "width:auto", onchange: (e) => { S.month = e.target.value; rerender(); } })),
-      h("p", { class: "muted small" }, "Income minus bills, budgets and what you plan to put toward goals. A budget covers everything in its category, bills included, so nothing is counted twice."),
-      pl.extra_income > 0 ? h("div", { class: "alert info", style: "margin-bottom:10px" }, h("b", {}, `An extra paycheck lands this month: ${usd(pl.extra_income)} beyond your usual.`),
-        pl.extra_for_goal ? h("span", { class: "muted small" }, ` It is already inside "Left to assign". Putting ${usd(pl.extra_for_goal.amount)} toward ${pl.extra_for_goal.goal} would move it forward.`) : h("span", { class: "muted small" }, " It is already inside \"Left to assign\".")) : null,
+      h("p", { class: "muted small" }, "Income minus bills and budgets. A budget covers everything in its category, bills included, so nothing is counted twice."),
+      pl.extra_income > 0 ? h("div", { class: "alert info", style: "margin-bottom:10px" }, h("b", {}, `An extra paycheck lands this month: ${usd(pl.extra_income)} beyond your usual.`), h("span", { class: "muted small" }, " It is already inside \"Left to assign\".")) : null,
       pl.warnings.length ? h("div", { class: "alerts", style: "margin-bottom:10px" }, pl.warnings.map((w) => alertRow({ severity: "warning", title: w }))) : null,
       h("div", { class: "grid" }, kpi("Expected income", usd(pl.income_month), (() => { const n = pl.incomes.reduce((a, i) => a + (i.paydays?.length || 0), 0); return `${n} payday${n === 1 ? "" : "s"} this month${pl.extra_paycheck_month ? ", an extra paycheck" : ""} · ${usd(pl.actual.income)} so far`; })(), "pos"), kpi("Planned spending", usd(pl.outflow_planned), `${usd(pl.actual.spent)} spent so far`),
-        kpi("Toward goals", usd(pl.goals_month), `${activeGoals.length} goal${activeGoals.length === 1 ? "" : "s"}`), kpi("Left to assign", usd(pl.left), pl.left >= 0 ? "free to budget or save" : "over your income", pl.left < 0 ? "neg" : "pos")),
+        pl.goals_month ? kpi("Saved each month", usd(pl.goals_month), "monthly amounts of your savings goals (Savings page)") : null, kpi("Left to assign", usd(pl.left), pl.left >= 0 ? "free to budget or save" : "over your income", pl.left < 0 ? "neg" : "pos")),
       h("div", { class: "scroll", style: "margin-top:12px" }, pl.rows.length ? h("table", {}, h("thead", {}, h("tr", {}, ["Category", "Budget", "Bills", "Planned", "Spent", ""].map((x, i) => h("th", { class: i > 0 && i < 5 ? "r" : "" }, x)))),
         h("tbody", {}, pl.rows.map((r) => h("tr", {}, h("td", {}, r.category), h("td", { class: "num r" }, r.budget == null ? h("span", { class: "muted" }, "none") : usd(r.budget)), h("td", { class: "num r" }, r.bills ? usd(r.bills) : "–"), h("td", { class: "num r" }, usd(r.planned)),
           h("td", { class: "num r " + (r.left < 0 ? "neg" : "") }, usd(r.spent)), h("td", { style: "min-width:90px" }, r.planned ? bar(r.pct || 0, r.pct > 1 ? "var(--red)" : r.pct > 0.85 ? "var(--brass)" : "var(--teal)") : null))))) : h("p", { class: "muted" }, "Set a budget or add a subscription to start the plan.")),
@@ -604,7 +655,6 @@ async function viewPlanner(root, rerender) {
       pl.actual.unbudgeted_spent ? h("p", { class: "muted small" }, `${usd(pl.actual.unbudgeted_spent)} was spent in categories with no budget or bill.`) : null,
       h("form", { class: "row", style: "margin-top:10px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/budgets", send("PUT", { category: val("bg-cat"), monthly_amount: num("bg-amt") })); rerender(); } catch (err) { fail(err); } } },
         select("bg-cat", "Budget for", cats.filter((c) => c.kind === "expense").map((c) => [c.name, c.name]), "Food"), field("bg-amt", "Per month ($)", "", { type: "number", step: "0.01", min: "0", required: true }), h("button", { class: "btn primary", type: "submit" }, "Set budget"))),
-    /* ---------- income ---------- */
     h("div", { class: "panel" }, h("h3", {}, "Income"), h("p", { class: "muted small" }, "What comes in each month. Steady deposits in your transactions are offered here; add anything else, like side income."),
       pl.incomes.length ? pl.incomes.map(incomeRow) : h("p", { class: "muted" }, "No income entered yet."),
       pl.income_suggestions.length ? h("div", { class: "cards" }, pl.income_suggestions.slice(0, 4).map((s, i) => h("div", { class: "card" }, h("div", { class: "bar" }, h("b", {}, s.name), h("span", { class: "num pos" }, usd(s.amount))), h("div", { class: "muted small" }, `${s.label} · seen ${s.occurrences}×`),
@@ -612,26 +662,79 @@ async function viewPlanner(root, rerender) {
           h("button", { class: "btn sm", onclick: async () => { await api("/api/suggestions/dismiss", send("POST", { key: s.key })); rerender(); } }, "Not income"))))) : null,
       h("form", { class: "subform", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); const preset = val("in-cycle"); try { await api("/api/incomes", send("POST", { name: val("in-name"), amount: num("in-amt"), next_date: val("in-next"), cycle: preset, account_id: val("in-acct") || null })); rerender(); } catch (err) { fail(err); } } },
         field("in-name", "Source", "", { required: true }), field("in-amt", "Amount", "", { type: "number", step: "0.01", min: "0.01", required: true }), select("in-cycle", "Paid", PRESETS.filter(([k]) => k !== "custom"), "monthly"), field("in-next", "Next payday", today(), { type: "date", required: true }),
-        select("in-acct", "Into account", [["", "Not set"], ...accts.map((a) => [a.id, `${a.institution} · ${an(a)}`])], ""), h("button", { class: "btn primary", type: "submit" }, "Add income"))),
-    /* ---------- goals ---------- */
-    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Goals"), h("button", { class: "btn sm", onclick: () => { S.tab = "savings"; render(); } }, "Manage on Savings")),
-      h("p", { class: "muted small" }, `Free savings: ${usd(gv.free)}. A goal's monthly amount comes out of the plan above.`),
-      activeGoals.length ? activeGoals.map((g) => h("div", { class: "ev", style: "grid-template-columns:1fr 130px auto auto" }, h("span", {}, g.name, g.deadline ? h("span", { class: "muted small" }, ` by ${g.deadline}`) : null), h("div", {}, bar(g.pct, g.funded ? "var(--teal)" : "var(--brass)")),
-        h("span", { class: "num small" }, `${usd(g.allocated)} / ${usd(g.target)}`), h("button", { class: "btn sm", onclick: () => discuss({ kind: "goal", ref_id: g.id }, `About my goal: ${g.name}`) }, "Discuss"))) : h("p", { class: "muted" }, "No goals. Add one on the Savings page, or ask the agent in a chat.")),
-    /* ---------- the agent writes a note ---------- */
-    h("div", { class: "panel" }, h("h3", {}, "Ask the agent to write a plan"), h("p", { class: "muted small" }, "It reads your accounts, bills, spending, goals and this plan, does the math, and saves the result as a note marked as written by the agent."),
-      h("div", { class: "url" }, ask, h("button", { class: "btn primary", id: "pl-go", onclick: async (ev) => {
-        if (!val("pl-ask")) return; ev.target.disabled = true; ev.target.textContent = "Thinking…";
-        try { const r = await api("/api/agent/chat", send("POST", { provider_id: S.provider, messages: [{ role: "user", content: `Look at my real data with your tools (monthly_plan, list_goals, savings_summary), then save a note in the Planner (use write_note) for this request: ${val("pl-ask")}. Keep the note practical and show the numbers.` }] })); toast(r.reply.slice(0, 120) || "Done"); rerender(); } catch (err) { fail(err); ev.target.disabled = false; ev.target.textContent = "Write it"; }
+        select("in-acct", "Into account", [["", "Not set"], ...accts.map((a) => [a.id, `${a.institution} · ${an(a)}`])], ""), h("button", { class: "btn primary", type: "submit" }, "Add income"))));
+}
+
+/* ================================ NOTES ================================ */
+const NOTE_TEMPLATES = [["Blank", ""], ["Monthly review", "## What went well\n- \n\n## What cost more than planned\n- \n\n## Next month\n- [ ] \n"],
+  ["Checklist", "- [ ] \n- [ ] \n- [ ] \n"], ["Big purchase", "## What\n\n## Cost\n\n## When\n\n## How I pay for it\n- [ ] save into a piggy bank\n- [ ] \n"]];
+/* A small, safe Markdown view: headings, lists, checklists, bold. Built from text nodes only. */
+function mdView(text, onToggle) {
+  const inline = (s) => s.split(/(\*\*[^*]+\*\*)/).map((p) => p.startsWith("**") && p.endsWith("**") && p.length > 4 ? h("b", {}, p.slice(2, -2)) : p);
+  const out = []; let list = null;
+  text.split("\n").forEach((line, i) => {
+    const cb = line.match(/^\s*[-*] \[( |x|X)\] ?(.*)$/), li = line.match(/^\s*[-*] (.*)$/), hd = line.match(/^(#{1,3}) (.*)$/);
+    if (cb || li) { if (!list) { list = h("ul", { style: "margin:4px 0;padding-left:20px" }); out.push(list); }
+      list.append(cb ? h("li", { style: "list-style:none;margin-left:-20px" }, h("label", { class: "check" }, h("input", { type: "checkbox", checked: cb[1] !== " ", onchange: () => onToggle(i) }), h("span", { style: cb[1] !== " " ? "text-decoration:line-through;color:var(--muted)" : "" }, ...inline(cb[2])))) : h("li", {}, ...inline(li[1]))); return; }
+    list = null;
+    if (hd) out.push(h("h" + (hd[1].length + 2), { style: "margin:10px 0 4px" }, ...inline(hd[2])));
+    else if (line.trim()) out.push(h("p", { style: "margin:4px 0" }, ...inline(line)));
+  });
+  return out.length ? out : [h("p", { class: "muted" }, "Nothing written yet.")];
+}
+async function viewNotes(root, rerender) {
+  const notes = await api("/api/notes");
+  const tagsOf = (n) => (n.tags || "").split(",").filter(Boolean);
+  const allTags = [...new Set(notes.flatMap(tagsOf))].sort();
+  const q = (S.noteQ || "").toLowerCase(), f = S.noteF || "all";
+  const shown = notes.filter((n) => (f === "all" || (f === "pinned" && n.pinned) || (f === "me" && n.author !== "agent") || (f === "agent" && n.author === "agent") || (f.startsWith("#") && tagsOf(n).includes(f.slice(1))))
+    && (!q || (n.title + " " + n.body + " " + (n.tags || "")).toLowerCase().includes(q)));
+  const cur = notes.find((n) => n.id === S.note) || null, isNew = S.note === "new";
+  const save = async (extra = {}) => { const body = { title: val("nt-title"), body: $("#nt-body").value, pinned: !!(extra.pinned ?? cur?.pinned), tags: val("nt-tags") };
+    if (!body.title.trim()) return toast("Give it a title");
+    try { const r = await api(cur ? `/api/notes/${cur.id}` : "/api/notes", send(cur ? "PUT" : "POST", body)); S.note = r.id; S.noteDirty = false; toast("Saved"); rerender(); } catch (err) { fail(err); } };
+  const ask = h("input", { id: "nt-ask", placeholder: "e.g. Draft a plan to save $500 a month using my real spending", style: "flex:1;min-width:0" });
+  const chip = (k, label) => h("button", { class: "btn sm" + (f === k ? " primary" : ""), onclick: () => { S.noteF = k; rerender(); } }, label);
+  const list = h("div", { class: "panel" },
+    h("div", { class: "bar" }, h("h3", {}, "Notes"), h("button", { class: "btn sm primary", onclick: () => { S.note = "new"; S.noteTpl = ""; S.notePrev = false; rerender(); } }, "New note")),
+    h("input", { type: "search", placeholder: "Search notes", value: S.noteQ || "", style: "width:100%;margin:6px 0", oninput: (e) => { S.noteQ = e.target.value; clearTimeout(S.nt); S.nt = setTimeout(rerender, 250); } }),
+    h("div", { class: "chips", style: "margin-bottom:8px" }, chip("all", `All ${notes.length}`), chip("pinned", "Pinned"), chip("me", "Mine"), chip("agent", "By the agent"), allTags.map((t) => chip("#" + t, "#" + t))),
+    shown.length ? shown.map((n) => h("div", { class: "ev note" + (n.id === S.note ? " on" : ""), style: "grid-template-columns:1fr auto;cursor:pointer", tabindex: 0, onclick: () => { S.note = n.id; S.notePrev = true; rerender(); }, onkeydown: (e) => { if (e.key === "Enter") { S.note = n.id; S.notePrev = true; rerender(); } } },
+      h("span", {}, h("b", {}, n.pinned ? "★ " : "", n.title), h("div", { class: "muted small", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px" }, (n.body || "").replace(/^#{1,3} /gm, "").replace(/^\s*[-*] (\[[ xX]\] )?/gm, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim().slice(0, 90) || "empty"),
+        tagsOf(n).length ? h("div", {}, tagsOf(n).map((t) => h("span", { class: "pill", style: "margin-right:4px" }, "#" + t))) : null),
+      h("span", { class: "small muted", style: "text-align:right" }, n.author === "agent" ? h("span", { class: "pill b" }, "agent") : null, h("div", {}, n.updated ? ago(n.updated) : "")))) : h("p", { class: "muted" }, notes.length ? "No note matches." : "No notes yet. Start one, or have the agent write one below."));
+  let editor;
+  if (isNew || cur) {
+    const body = isNew ? (S.noteTpl || "") : cur.body || "";
+    const ta = h("textarea", { id: "nt-body", rows: 18, style: "font-family:var(--mono);font-size:.9rem", oninput: () => { S.noteDirty = true; count.textContent = words(ta.value); } }, body);
+    const words = (s) => { const n = (s.trim().match(/\S+/g) || []).length; return `${n} word${n === 1 ? "" : "s"}`; };
+    const count = h("span", { class: "muted small" }, words(body));
+    const toggle = async (line) => { const L = (cur.body || "").split("\n"); L[line] = L[line].replace(/\[( |x|X)\]/, (m, c) => c === " " ? "[x]" : "[ ]");
+      try { await api(`/api/notes/${cur.id}`, send("PUT", { title: cur.title, body: L.join("\n"), pinned: !!cur.pinned, tags: cur.tags || "" })); rerender(); } catch (err) { fail(err); } };
+    const preview = !isNew && S.notePrev;
+    editor = h("div", { class: "panel", onkeydown: (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(); } } },
+      h("div", { class: "bar" }, h("h3", {}, isNew ? "New note" : cur.title), !isNew ? h("div", { class: "chips" }, h("button", { class: "btn sm" + (preview ? " primary" : ""), onclick: () => { S.notePrev = true; rerender(); } }, "Read"), h("button", { class: "btn sm" + (!preview ? " primary" : ""), onclick: () => { S.notePrev = false; rerender(); } }, "Edit")) : null),
+      isNew ? h("div", { class: "chips", style: "margin:6px 0" }, h("span", { class: "muted small" }, "Start from:"), NOTE_TEMPLATES.map(([t, b]) => h("button", { class: "btn sm" + ((S.noteTpl || "") === b ? " primary" : ""), onclick: () => { S.noteTpl = b; rerender(); } }, t))) : null,
+      preview ? h("div", {}, h("div", { class: "small muted", style: "margin-bottom:6px" }, [cur.author === "agent" ? "Written by the agent" : "", cur.updated ? "updated " + ago(cur.updated) : "", tagsOf(cur).map((t) => "#" + t).join(" ")].filter(Boolean).join(" · ")),
+          h("div", { style: "line-height:1.5" }, mdView(cur.body || "", toggle))) :
+        h("div", { style: "display:grid;gap:10px" }, field("nt-title", "Title", cur?.title ?? "", { required: true }), field("nt-tags", "Tags (comma separated)", cur?.tags ?? "", { placeholder: "taxes, house" }),
+          h("label", {}, "Note ", h("span", { class: "muted small" }, "(# heading, - list, - [ ] checklist, **bold**)"), ta), count),
+      h("div", { class: "chips", style: "margin-top:10px" },
+        preview ? null : h("button", { class: "btn primary", onclick: () => save() }, "Save"),
+        cur ? h("button", { class: "btn", onclick: () => save({ pinned: !cur.pinned }) }, cur.pinned ? "Unpin" : "Pin to top") : null,
+        cur ? h("button", { class: "btn", onclick: () => downloadText((cur.title || "note").replace(/[^\w -]+/g, "").trim() + ".md", `# ${cur.title}\n\n${cur.body || ""}`, "text/markdown") }, "Download") : null,
+        cur ? h("button", { class: "btn", onclick: () => discuss({ kind: "note", ref_id: cur.id }, `About my note: ${cur.title}`) }, "Discuss with agent") : null,
+        cur ? h("button", { class: "btn danger", onclick: sure(null, "Sure?", async () => { await api(`/api/notes/${cur.id}`, { method: "DELETE" }); S.note = null; rerender(); }) }, "Delete") : null,
+        isNew ? h("button", { class: "btn", onclick: () => { S.note = null; rerender(); } }, "Cancel") : null));
+    if (preview) { const hidden = h("div", { hidden: true }, h("input", { id: "nt-title", value: cur.title }), h("input", { id: "nt-tags", value: cur.tags || "" }), h("textarea", { id: "nt-body" }, cur.body || "")); editor.append(hidden); }
+  } else editor = h("div", { class: "panel" }, h("p", { class: "muted" }, "Pick a note, or start a new one."));
+  add(root,
+    h("div", { class: "panel" }, h("h3", {}, "Ask the agent to write a note"), h("p", { class: "muted small" }, "It reads your accounts, bills, spending, budgets and savings, does the math, and saves the result as a note marked as written by the agent."),
+      h("div", { class: "url" }, ask, h("button", { class: "btn primary", onclick: async (ev) => {
+        if (!val("nt-ask")) return; ev.target.disabled = true; ev.target.textContent = "Thinking…";
+        try { const r = await api("/api/agent/chat", send("POST", { provider_id: S.provider, messages: [{ role: "user", content: `Look at my real data with your tools (monthly_plan, list_goals, savings_summary), then save a note (use write_note) for this request: ${val("nt-ask")}. Keep the note practical and show the numbers. Use - [ ] for steps to do.` }] })); toast(r.reply.slice(0, 120) || "Done"); rerender(); } catch (err) { fail(err); ev.target.disabled = false; ev.target.textContent = "Write it"; }
       } }, "Write it"))),
-    h("div", { class: "split" },
-      h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Notes"), h("button", { class: "btn sm", onclick: () => { S.note = "new"; rerender(); } }, "New note")),
-        notes.length ? notes.map((n) => h("div", { class: "ev note" + (n.id === S.note ? " on" : ""), style: "grid-template-columns:1fr auto", tabindex: 0, onclick: () => { S.note = n.id; rerender(); } }, h("span", {}, n.pinned ? "★ " : "", n.title), h("span", { class: "pill " + (n.author === "agent" ? "b" : "") }, n.author))) : h("p", { class: "muted" }, "No notes yet.")),
-      h("div", { class: "panel" }, S.note === "new" || cur ? h("form", { onsubmit: async (e) => { e.preventDefault(); const body = { title: val("nt-title"), body: $("#nt-body").value, pinned: $("#nt-pin").checked }; try { const r = await api(cur ? `/api/notes/${cur.id}` : "/api/notes", send(cur ? "PUT" : "POST", body)); S.note = r.id; toast("Saved"); rerender(); } catch (err) { fail(err); } }, style: "display:grid;gap:10px" },
-        field("nt-title", "Title", cur?.title ?? "", { required: true }), h("label", {}, "Note", h("textarea", { id: "nt-body", rows: 14 }, cur?.body ?? "")), h("label", { class: "check" }, h("input", { type: "checkbox", id: "nt-pin", checked: !!cur?.pinned }), "Pin to top"),
-        h("div", { class: "chips" }, h("button", { class: "btn primary", type: "submit" }, "Save"), cur ? h("button", { class: "btn", type: "button", onclick: () => discuss({ kind: "note", ref_id: cur.id }, `About my note: ${cur.title}`) }, "Discuss with agent") : null,
-          cur ? h("button", { class: "btn danger", type: "button", onclick: sure(null, "Sure?", async () => { await api(`/api/notes/${cur.id}`, { method: "DELETE" }); S.note = null; rerender(); }) }, "Delete") : null,
-          cur?.author === "agent" ? h("span", { class: "muted small" }, "Written by the agent. Edit freely.") : null)) : h("p", { class: "muted" }, "Pick a note, or start a new one. Write your own, or have the agent draft one above."))));
+    h("div", { class: "split" }, list, editor));
 }
 
 /* ================================ AGENT ================================ */
@@ -764,8 +867,9 @@ async function tabFirefly(root, rerender) {
         h("button", { class: "btn", onclick: async () => { try { await api("/api/refresh?full=true", { method: "POST" }); toast("Read everything again"); rerender(); } catch (e) { fail(e); } } }, "Read everything again"))),
     h("div", { class: "panel" }, h("h3", {}, "Send to Firefly III"),
       h("p", { class: "muted small" }, "Off means Coinpile only reads Firefly III. Switch on the parts you want Coinpile to write into Firefly III. Only what you do on a Coinpile screen is sent, and only things Coinpile made are ever changed or removed."),
-      h("form", { style: "display:grid;gap:8px", onsubmit: (e) => { e.preventDefault(); const on = (id) => $("#" + id).checked ? "on" : "off"; saveCfg({ ff_send_goals: on("sw-g"), ff_send_bills: on("sw-b"), ff_send_categories: on("sw-c"), ff_send_accounts: on("sw-a") }, rerender); } },
+      h("form", { style: "display:grid;gap:8px", onsubmit: (e) => { e.preventDefault(); const on = (id) => $("#" + id).checked ? "on" : "off"; saveCfg({ ff_send_goals: on("sw-g"), ff_send_piggies: on("sw-p"), ff_send_bills: on("sw-b"), ff_send_categories: on("sw-c"), ff_send_accounts: on("sw-a") }, rerender); } },
         [["sw-g", "ff_send_goals", "Goals as piggy banks", "Each goal becomes a Firefly III piggy bank holding what you set aside for it on a Firefly III account. Closing or deleting the goal removes its piggy bank."],
+         ["sw-p", "ff_send_piggies", "Piggy banks", "On the Piggy banks page: make new piggy banks, change their name, target, date and notes, and put money in or take it out. Piggy banks that follow a goal are left to the goal."],
          ["sw-b", "ff_send_bills", "Subscriptions as bills", "A subscription you add, or one the subscription catcher found and you accepted, becomes a Firefly III bill. Editing or deleting it changes the bill. Daily ones stay in Coinpile (Firefly III has no daily bills)."],
          ["sw-c", "ff_send_categories", "Categories", "Changing a transaction's category changes it in Firefly III. Ticking \"always\" also makes a Firefly III rule (in a rule group called Coinpile)."],
          ["sw-a", "ff_send_accounts", "Accounts and transactions", "An account you add is made in Firefly III. Transactions you add to a Firefly III account, and bank or PayPal CSVs you import into one, go there; rows Firefly III already has are skipped."]]
@@ -1051,7 +1155,7 @@ async function tabSharing(root, rerender) {
 }
 
 /* ================================ SHELL ================================ */
-const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["planner", "Budgets & notes", viewPlanner], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["settings", "Settings", viewSettings]];
+const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["piggy", "Piggy banks", viewPiggy], ["budgets", "Budgets", viewBudgets], ["notes", "Notes", viewNotes], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["settings", "Settings", viewSettings]];
 /* ---------- movable panels: order is remembered per tab in this browser ---------- */
 function layoutKey() { return "gb_layout_" + S.tab + (S.tab === "settings" ? ":" + S.settingsTab : "") + (S.acct ? ":acct" : ""); }
 function blocksOf(main) {
@@ -1190,7 +1294,7 @@ async function login() {
         h("button", { class: "btn", type: "submit" }, "Set the new password")))));
 }
 async function boot() {
-  const want = location.hash.slice(1); if (TABS.some((t) => t[0] === want)) S.tab = want;
+  const want = location.hash.slice(1) === "planner" ? "budgets" : location.hash.slice(1); if (TABS.some((t) => t[0] === want)) S.tab = want;
   if (new URLSearchParams(location.search).has("demo") && window.COINPILE_DEMO) { DEMO = window.COINPILE_DEMO; S.demo = true; S.provider = DEMO.chatProvider; return render(); }
   let me = {}; try { me = await (await fetch("/auth/me", { credentials: "same-origin", cache: "no-store" })).json(); } catch {}
   if (!me.signed_in) return login();
