@@ -666,7 +666,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         ctx.robinhood = rh
 
-        # CSV imports, as in Goblin Bank: into accounts you keep in Coinpile only. Firefly III is never written to.
+        # CSV imports: into accounts you keep in Coinpile only. Firefly III is never written to.
         @app.post("/api/import/bank-csv")
         async def import_bank_csv(request: Request, account_id: str, flip: bool = False):
             """A CSV from a bank's website, into an account you added in Coinpile (an account from Firefly III gets its transactions from Firefly III)."""
@@ -1088,7 +1088,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
     @front.get("/api/v1/summary")
     def orb(request: Request):
-        """For the Pondering Orb (its 'goblinbank' widget): a token with the 'orb' scope reads that person's shared summary."""
+        """For the Pondering Orb (its 'goblinbank' widget): a token with the 'orb' scope reads that person's shared summary.
+        The 'goblins' key is the shape the Orb reads (the same as plaid-proxy's /api/v1/summary), so it keeps that name."""
         uid, _, _ = token_holder(request, "orb")
         s = orb_summary(uid)
         return {"goblins": {s["name"] or "me": s}}
