@@ -113,3 +113,81 @@ def test_notes_have_tags_and_stay_in_order(tmp_path):
     assert [n["title"] for n in c.get("/api/notes").json()] == ["Pinned", "Taxes"]
     assert c.put(f"/api/notes/{a['id']}", json={"title": " ", "body": ""}).status_code == 422
     assert c.put(f"/api/notes/{a['id']}", json={"title": "Taxes 2026", "body": "- [x] W-2", "tags": ""}).json()["tags"] == ""
+
+
+# ---------------------------------------------------------------- read from Firefly III instead of typed into Coinpile
+def rec(rid, type_, title, amount, first, occ, unit="weekly", skip=0, n=None, until=None, src="1", dst="92"):
+    return {"type": "recurrences", "id": str(rid), "attributes": {"type": type_, "title": title, "first_date": first + "T00:00:00+00:00", "nr_of_repetitions": n,
+            "repeat_until": until, "active": True, "repetitions": [{"type": unit, "moment": "5", "skip": skip, "occurrences": [o + "T00:00:00+00:00" for o in occ]}],
+            "transactions": [{"amount": str(amount), "currency_code": "USD", "source_id": src, "destination_id": dst, "category_name": "Shopping" if type_ == "withdrawal" else None}]}}
+
+
+def test_recurring_transactions_in_firefly_become_subscriptions_and_income(tmp_path):
+    ff = world()
+    ff.data["1"]["recurrences"] = [
+        rec(1, "withdrawal", "PayPal Pay in 4: headphones", 37.5, "2026-11-06", ["2026-11-20", "2026-12-04", "2026-12-18", "2027-01-01"], skip=1, n=4),     # Firefly III's own "4 times"
+        rec(2, "deposit", "ACME paycheck", 2500, "2026-10-01", ["2026-12-01"], unit="monthly", src="90", dst="1"),
+        rec(3, "withdrawal", "Rent", 1500, "2026-01-01", ["2026-12-01"], unit="monthly"),                                                              # also a bill: the bill wins
+    ]
+    c = signed_in(app(tmp_path, ff))
+    subs = {s["name"]: s for s in c.get("/api/subscriptions").json()["items"]}
+    p4 = subs["PayPal Pay in 4: headphones"]
+    assert p4["source"] == "ff-recurring" and p4["label"] == "biweekly" and p4["account_id"] == "ff:1" and p4["category"] == "Shopping"
+    assert p4["end_date"] == "2026-12-18" and p4["plan_total"] == 4 and p4["payments_left"] == 3 and p4["payment_no"] == 2
+    assert [s["source"] for s in subs.values() if s["name"] == "Rent"] == ["firefly"]
+    inc = next(i for i in c.get("/api/incomes").json()["items"] if i["name"] == "ACME paycheck")
+    assert inc["source"] == "firefly" and inc["amount"] == 2500 and inc["account_id"] == "ff:1"
+    assert c.delete(f"/api/incomes/{inc['id']}").status_code == 409                                                  # changed in Firefly III, not here
+    assert c.delete(f"/api/subscriptions/{p4['id']}").status_code == 409
+    # your own details stay in Coinpile, on Firefly III's own items too, and survive the next read
+    body = {**{k: p4[k] for k in ("name", "amount", "next_date", "end_date", "notes", "every", "unit", "active")}, "category": "Shopping", "payer": "other", "payer_name": "Sam", "notify_days": 7}
+    r = c.put(f"/api/subscriptions/{p4['id']}", json=body)
+    assert r.status_code == 200 and r.json()["payer_name"] == "Sam" and r.json()["notify_days"] == 7
+    assert c.put(f"/api/subscriptions/{p4['id']}", json={**body, "amount": 40}).status_code == 409                    # Firefly III's side is not changed from here
+    ff.data["1"]["recurrences"] = []
+    c.post("/api/refresh")
+    assert "PayPal Pay in 4: headphones" not in {s["name"] for s in c.get("/api/subscriptions").json()["items"]}       # removed in Firefly III: gone here
+    assert not any(i["source"] == "firefly" for i in c.get("/api/incomes").json()["items"])
+    assert not [w for w in getattr(ff, "writes", [])]                                                                # and nothing was ever written
+
+
+def test_details_on_a_firefly_bill_are_kept_here_without_writing_to_firefly(tmp_path):
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
+    rent = next(s for s in c.get("/api/subscriptions").json()["items"] if s["name"] == "Rent")
+    body = {**{k: rent[k] for k in ("name", "amount", "next_date", "end_date", "notes", "every", "unit", "active")}, "category": "Subscriptions", "account_id": "ff:1", "notify_days": 5}
+    assert c.put(f"/api/subscriptions/{rent['id']}", json=body).status_code == 200
+    c.post("/api/refresh")
+    rent = next(s for s in c.get("/api/subscriptions").json()["items"] if s["name"] == "Rent")
+    assert rent["account_id"] == "ff:1" and rent["notify_days"] == 5
+    assert c.put(f"/api/subscriptions/{rent['id']}", json={**body, "active": False}).status_code == 409
+    assert not getattr(ff, "writes", [])
+
+
+def test_firefly_budgets_show_their_limit_and_spending(tmp_path):
+    ff = world()
+    ff.data["1"]["budgets"] = [{"type": "budgets", "id": "1", "attributes": {"name": "Groceries", "active": True, "spent": [{"sum": "-82.40", "currency_code": "USD"}]}},
+                               {"type": "budgets", "id": "2", "attributes": {"name": "Fun", "active": True, "spent": [], "auto_budget_type": "reset", "auto_budget_amount": "100"}},
+                               {"type": "budgets", "id": "3", "attributes": {"name": "Old", "active": False, "spent": []}}]
+    ff.data["1"]["budget-limits"] = [{"type": "budget_limits", "id": "9", "attributes": {"budget_id": "1", "amount": "400", "start": "2026-11-01T00:00:00+00:00"}}]
+    c = signed_in(app(tmp_path, ff))
+    b = c.get("/api/firefly/budgets?month=2026-11").json()
+    assert [x["name"] for x in b["items"]] == ["Groceries", "Fun"]
+    g = b["items"][0]
+    assert g["limit"] == 400 and g["spent"] == 82.4 and g["left"] == 317.6 and b["items"][1]["limit"] == 100 and b["items"][1]["auto"] == "reset"
+    assert b["limit"] == 500 and b["link"].endswith("/budgets")
+    assert c.get("/api/firefly/budgets?month=nope").status_code == 422
+
+
+def test_a_payment_firefly_linked_to_the_bill_counts_as_paid(tmp_path):
+    ff = world()
+    for i, dt in enumerate(("2026-08-01", "2026-09-01", "2026-10-01", "2026-11-01")):
+        ff.tx("1", 60 + i, "withdrawal", 1500, "ONLINE PMT 88213 LANDLORD LLC", 1, 95, dt)                            # the bank's wording, nothing like "Rent"
+        ff.data["1"]["groups"][-1]["attributes"]["transactions"][0]["bill_id"] = "1"
+    ff.tx("1", 70, "withdrawal", 20, "SHELL OIL", 1, 94, "2026-11-09")
+    c = signed_in(app(tmp_path, ff))
+    assert not [a for a in c.get("/api/alerts").json() if a["kind"] == "missed_payment"]
+    ff.data["1"]["groups"] = [g for g in ff.data["1"]["groups"] if g["id"] != "63"]                                     # November's payment never came
+    c.post("/api/refresh?full=true")
+    miss = [a for a in c.get("/api/alerts").json() if a["kind"] == "missed_payment"]
+    assert len(miss) == 1 and "Rent" in miss[0]["title"] and "2026-11-01" in miss[0]["detail"]

@@ -405,6 +405,115 @@ def sync_history(db, ff: Firefly, accounts: dict, today: date, days: int = HISTO
 FULL_EVERY = 24 * 3600
 
 
+# ---------------------------------------------------------------- recurring transactions
+REC_UNIT = {"daily": "day", "weekly": "week", "monthly": "month", "ndom": "month", "yearly": "year"}
+
+
+def recurrence_row(r: dict, today: date) -> dict | None:
+    """A Firefly III recurring transaction as Coinpile's repeat: how often, the next date, and when it stops (repeat_until, or after
+    nr_of_repetitions: Firefly III's own "this many times", as for pay in 4). 'ndom' (the 2nd Friday ...) is read as monthly."""
+    at = r.get("attributes") or {}
+    reps, txs = at.get("repetitions") or [], at.get("transactions") or []
+    if not (at.get("title") and reps and txs) or at.get("type") not in ("withdrawal", "deposit"):
+        return None
+    rp, tx = reps[0], txs[0]
+    unit = REC_UNIT.get(rp.get("type") or "monthly", "month")
+    try:
+        every = max(0, int(rp.get("skip") or 0)) + 1
+    except (TypeError, ValueError):
+        every = 1
+    occ = sorted(str(x)[:10] for x in rp.get("occurrences") or [])
+    try:
+        first = date.fromisoformat(str(at.get("first_date"))[:10])
+    except ValueError:
+        return None
+    nxt = next((x for x in occ if x >= today.isoformat()), None)
+    anchor = date.fromisoformat(occ[0]) if occ else first
+    start = recur.shift(anchor, every, unit, recur.first_k_on_or_after(anchor, every, unit, first))     # the first time it ran or will run
+    end, total = None, None
+    try:
+        total = int(at.get("nr_of_repetitions") or 0) or None
+    except (TypeError, ValueError):
+        total = None
+    if total:
+        end = recur.shift(start, every, unit, total - 1).isoformat()
+    if at.get("repeat_until"):
+        until = str(at["repeat_until"])[:10]
+        end = min(end, until) if end else until
+    if not nxt:
+        n = recur.next_due(start, every, unit, today)
+        nxt = (n or start).isoformat()
+    if end and nxt > end:
+        nxt = end
+    amt = abs(_num(tx.get("amount")))
+    acct = tx.get("source_id") if at["type"] == "withdrawal" else tx.get("destination_id")
+    return {"kind": "out" if at["type"] == "withdrawal" else "in", "name": str(at["title"])[:120], "amount": round(amt, 2), "currency": tx.get("currency_code") or "USD",
+            "every": every, "unit": unit, "next_date": nxt, "end_date": end, "plan_total": total, "active": int(bool(at.get("active", True))),
+            "account_id": f"ff:{acct}" if acct else None, "category": tx.get("category_name") or None, "notes": at.get("notes") or at.get("description") or ""}
+
+
+def sync_recurring(db, ff: Firefly, today: date) -> int:
+    """Firefly III's recurring transactions: payments appear as subscriptions, deposits as income. Read only, like bills.
+    A payment Firefly III also has as a bill (same payee, about the same amount) is left to the bill so it is not counted twice."""
+    try:
+        rows = [(str(r["id"]), recurrence_row(r, today)) for r in ff.pages("/recurrences")]
+    except FireflyError:
+        return 0                                   # Firefly III cannot list them (it fails on a broken one): keep what was read before
+    bills = db.all("SELECT name, amount FROM subscriptions WHERE source='firefly'")
+    seen_sub, seen_inc = set(), set()
+    with db.tx() as c:
+        for rid, x in rows:
+            if not x:
+                continue
+            key = f"ff-rec:{rid}"
+            if x["kind"] == "out":
+                if any(recur.same_payee(b["name"], x["name"]) and abs(b["amount"] - x["amount"]) <= 0.2 * max(x["amount"], 0.01) for b in bills):
+                    continue
+                seen_sub.add(key)
+                c.execute("""INSERT INTO subscriptions(name,amount,currency,cycle,every,unit,next_date,active,end_date,notes,source,plaid_stream_id,category,account_id,plan_total,created)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,'ff-recurring',?,coalesce(?,'Subscriptions'),?,?,?)
+                             ON CONFLICT(plaid_stream_id) DO UPDATE SET name=excluded.name,amount=excluded.amount,currency=excluded.currency,cycle=excluded.cycle,every=excluded.every,
+                             unit=excluded.unit,next_date=excluded.next_date,active=excluded.active,end_date=excluded.end_date,notes=excluded.notes,
+                             plan_total=excluded.plan_total,account_id=coalesce(excluded.account_id,subscriptions.account_id)""",
+                          (x["name"], x["amount"], x["currency"], recur.label(x["every"], x["unit"]), x["every"], x["unit"], x["next_date"], x["active"], x["end_date"], x["notes"],
+                           key, x["category"], x["account_id"], x["plan_total"], sync.now()))
+            else:
+                seen_inc.add(key)
+                have = c.execute("SELECT id FROM incomes WHERE ff_key=?", (key,)).fetchone()
+                vals = (x["name"], x["amount"], x["every"], x["unit"], x["next_date"], x["account_id"], x["active"])
+                if have:
+                    c.execute("UPDATE incomes SET name=?,amount=?,every=?,unit=?,next_date=?,account_id=?,active=? WHERE id=?", vals + (have[0],))
+                else:
+                    c.execute("INSERT INTO incomes(name,amount,every,unit,next_date,account_id,active,source,ff_key) VALUES(?,?,?,?,?,?,?,'firefly',?)", vals + (key,))
+        for r in c.execute("SELECT id, plaid_stream_id k FROM subscriptions WHERE source='ff-recurring'").fetchall():
+            if r[1] not in seen_sub:
+                c.execute("DELETE FROM subscriptions WHERE id=?", (r[0],))
+        for r in c.execute("SELECT id, ff_key FROM incomes WHERE source='firefly'").fetchall():
+            if r[1] not in seen_inc:
+                c.execute("DELETE FROM incomes WHERE id=?", (r[0],))
+    return len(seen_sub) + len(seen_inc)
+
+
+# ---------------------------------------------------------------- budgets
+def budgets(ff: Firefly, start: date, end: date) -> list[dict]:
+    """Firefly III's budgets for one period, read live: the limit set for it (or the auto-budget amount) and what was spent."""
+    limits = {}
+    for lim in ff.pages("/budget-limits", start=start.isoformat(), end=end.isoformat()):
+        at = lim.get("attributes") or {}
+        limits[str(at.get("budget_id"))] = limits.get(str(at.get("budget_id")), 0) + (abs(_num(at.get("pc_amount"))) or abs(_num(at.get("amount"))))
+    out = []
+    for b in ff.pages("/budgets", start=start.isoformat(), end=end.isoformat()):
+        at = b.get("attributes") or {}
+        if at.get("active") is False:
+            continue
+        tot = lambda k: abs(sum(_num(s.get("sum")) for s in (at.get(k) or []) if isinstance(s, dict)))
+        spent = tot("pc_spent") or tot("spent")           # converted when Firefly III could (it says 0.00 when it has no exchange rate)
+        lim = limits.get(str(b["id"])) or (abs(_num(at.get("auto_budget_amount"))) if at.get("auto_budget_type") else 0) or None
+        out.append({"id": str(b["id"]), "name": at.get("name") or f"Budget {b['id']}", "limit": round(lim, 2) if lim else None, "spent": round(spent, 2),
+                    "left": round(lim - spent, 2) if lim else None, "pct": round(spent / lim, 3) if lim else None, "auto": at.get("auto_budget_type") or None})
+    return out
+
+
 def refresh(db, ff: Firefly, today: date, full: bool = False, now: float | None = None) -> dict:
     """Bring the local copy up to date. A full pass (every transaction) on the first run and once a day; otherwise the last 120 days, which is where edits happen."""
     import time
@@ -415,6 +524,7 @@ def refresh(db, ff: Firefly, today: date, full: bool = False, now: float | None 
     start = None if full else today - timedelta(days=120)
     tx = sync_transactions(db, ff, accounts, start, today + timedelta(days=30))
     out = {"accounts": len(accounts), **tx, "subscriptions": sync_bills(db, ff, today), "piggy_banks": sync_piggies(db, ff), "full": full}
+    out["recurring"] = sync_recurring(db, ff, today)
     if full:
         out["history_points"] = sync_history(db, ff, accounts, today)
     cfg.set_value(db, "ff_last_refresh", sync.now())

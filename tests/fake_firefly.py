@@ -125,6 +125,8 @@ class FakeFirefly:
                 rows = d.setdefault("rule_groups", [])
             elif p == "/piggy-banks":
                 rows = d["piggies"]
+            elif p in ("/recurrences", "/budgets", "/budget-limits"):
+                rows = d.get(p.strip("/"), [])
             elif p.startswith("/piggy-banks/") and p.endswith("/events"):
                 rows = getattr(self, "piggy_events", {}).get(p.split("/")[2], [])
             else:

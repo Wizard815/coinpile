@@ -198,9 +198,14 @@ def register(app, ctx):
             cur = c.execute("INSERT INTO incomes(name,amount,every,unit,next_date,account_id,active) VALUES(?,?,?,?,?,?,?)", (i.name.strip(), i.amount, every, unit, i.next_date, i.account_id or None, int(i.active)))
         return plan.income_view(store.one("SELECT * FROM incomes WHERE id=?", (cur.lastrowid,)), ctx.today())
 
+    def not_firefly(iid: int):
+        if (store.one("SELECT source FROM incomes WHERE id=?", (iid,)) or {}).get("source") == "firefly":
+            raise HTTPException(409, "this income is a recurring transaction in Firefly III: change or remove it there")
+
     @app.put("/api/incomes/{iid}")
     def income_update(request: Request, iid: int, i: IncomeIn):
         auth(request)
+        not_firefly(iid)
         every, unit = check_income(i)
         with store.tx() as c:
             cur = c.execute("UPDATE incomes SET name=?,amount=?,every=?,unit=?,next_date=?,account_id=?,active=? WHERE id=?", (i.name.strip(), i.amount, every, unit, i.next_date, i.account_id or None, int(i.active), iid))
@@ -211,6 +216,7 @@ def register(app, ctx):
     @app.delete("/api/incomes/{iid}")
     def income_delete(request: Request, iid: int):
         auth(request)
+        not_firefly(iid)
         with store.tx() as c:
             c.execute("DELETE FROM incomes WHERE id=?", (iid,))
         return {"deleted": iid}
