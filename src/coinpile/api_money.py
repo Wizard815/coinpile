@@ -503,15 +503,38 @@ def register(app, ctx):
         auth(request)
         return create_sub(s.model_dump())
 
+    def firefly_owned(sid: int) -> str | None:
+        """Why Coinpile may not change this subscription's Firefly III side: a bill while sending bills is off, or a recurring transaction (never written)."""
+        src = (store.one("SELECT source FROM subscriptions WHERE id=?", (sid,)) or {}).get("source")
+        if src == "firefly" and not sends("bills"):
+            return "this is a bill in Firefly III: change it there (or switch on sending subscriptions in Settings, Firefly III)"
+        if src == "ff-recurring":
+            return "this is a recurring transaction in Firefly III: change it there"
+        return None
+
     def from_firefly(sid: int) -> None:
-        if not sends("bills") and (store.one("SELECT source FROM subscriptions WHERE id=?", (sid,)) or {}).get("source") == "firefly":
-            bad("this is a bill in Firefly III: change or remove it there, or switch on sending subscriptions in Settings, Firefly III", 409)
+        why = firefly_owned(sid)
+        if why:
+            bad(why, 409)
+
+    # What Firefly III has no place for: kept in Coinpile on any subscription, Firefly III's included, and never sent anywhere.
+    LOCAL = ("account_id", "payment_method", "payer", "payer_name", "notify_days", "plan_total", "category")
+    FROM_FF = ("name", "amount", "every", "unit", "end_date", "active", "notes")
 
     @app.put("/api/subscriptions/{sid}")
     def subs_update(request: Request, sid: int, s: Sub):
         auth(request)
-        from_firefly(sid)
         before = store.one("SELECT * FROM subscriptions WHERE id=?", (sid,))
+        why = firefly_owned(sid) if before else None
+        if why:
+            every, unit = check_sub(s)
+            new = dict(zip(COLS.split(","), sub_row(s, every, unit)))
+            changed = [k for k in FROM_FF if (new[k] or None) != (before[k] or None) and not (k == "amount" and abs((new[k] or 0) - (before[k] or 0)) < 0.005)]
+            if changed:
+                bad(f"{why} ({', '.join(changed)}). Your own details (paid from, who pays, reminder, category, plan size) are saved here", 409)
+            with store.tx() as c:
+                c.execute(f"UPDATE subscriptions SET {','.join(k + '=?' for k in LOCAL)} WHERE id=?", tuple(new[k] for k in LOCAL) + (sid,))
+            return ledger.subscription(store, sid, ctx.today())
         every, unit = check_sub(s)
         sets = ",".join(f"{c}=?" for c in COLS.split(","))
         with store.tx() as c:

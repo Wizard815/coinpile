@@ -909,6 +909,23 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             except firefly.FireflyError:
                 pass
 
+        @app.get("/api/firefly/budgets")
+        async def ff_budgets(month: str | None = None):
+            """Firefly III's own budgets for a month (limits and spending), read live. Coinpile's per-category plan stays separate."""
+            m = month or today().isoformat()[:7]
+            try:
+                first = date.fromisoformat(m + "-01")
+            except ValueError:
+                raise HTTPException(422, "month is YYYY-MM")
+            last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            try:
+                rows = await run_in_threadpool(firefly.budgets, ff_for(uid), first, last)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+            with_limit = [r for r in rows if r["limit"]]
+            return {"month": m, "items": rows, "limit": round(sum(r["limit"] for r in with_limit), 2), "spent": round(sum(r["spent"] for r in rows), 2),
+                    "left": round(sum(r["left"] for r in with_limit), 2), "link": f"{ff_public}/budgets" if ff_public else None}
+
         @app.get("/api/piggy-banks/overview")
         def piggy_overview():
             items, goals = firefly.piggies(db), goal_piggies()

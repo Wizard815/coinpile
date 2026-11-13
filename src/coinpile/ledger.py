@@ -194,7 +194,8 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
     could be anything), and only once that payee has been seen paying this subscription before (so a name your bank spells differently
     is not called missing for ever)."""
     out = []
-    for s in db.all("SELECT * FROM subscriptions WHERE active=1 AND coalesce(payer,'me')='me'"):
+    for s in db.all("SELECT * FROM subscriptions WHERE active=1 AND coalesce(payer,'me')='me' AND source != 'ff-recurring'"):   # Firefly III makes those itself
+        bill = s["plaid_stream_id"][len("ff-bill:"):] if s["source"] == "firefly" and (s["plaid_stream_id"] or "").startswith("ff-bill:") else None
         bound = bool(s["account_id"])
         acct = db.one("SELECT * FROM accounts WHERE id=?", (s["account_id"],)) if bound else {"name": "any account"}
         first = db.one("SELECT MIN(date) m, MAX(date) x FROM transactions" + (" WHERE account_id=?" if bound else ""), (s["account_id"],) if bound else ())
@@ -202,7 +203,8 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
             continue
         if not bound:
             seen = db.all("SELECT name, amount FROM transactions WHERE amount<0 AND date < ?", ((today - timedelta(days=grace)).isoformat(),))
-            if not any(recur.same_payee(t["name"], s["name"]) and abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] for t in seen):
+            linked = bill and db.one("SELECT 1 FROM transactions WHERE ff_bill=?", (bill,))
+            if not linked and not any(recur.same_payee(t["name"], s["name"]) and abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] for t in seen):
                 continue
         every, unit = s["every"] or 1, s["unit"] or "month"
         anchor = d(s["next_date"])
@@ -223,6 +225,8 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
                            ((s["account_id"],) if bound else ()) + span)
             hit = any((bound and abs(abs(t["amount"]) - s["amount"]) <= max(0.5, 0.01 * s["amount"]))
                       or (abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] and recur.same_payee(t["name"], s["name"])) for t in cands)
+            if not hit and bill:                          # Firefly III linked a payment to this bill: that is the bill paid, whatever its name says
+                hit = bool(db.one("SELECT 1 FROM transactions WHERE ff_bill=? AND date BETWEEN ? AND ?", (bill,) + span))
             if hit:
                 break                                     # misses must be consecutive, newest first
             misses += 1

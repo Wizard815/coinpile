@@ -428,18 +428,21 @@ function scanPanel(accts, acctOpts, rerender) {
 /* ================================ SUBSCRIPTIONS ================================ */
 const PRESETS = [["daily", "Every day"], ["weekly", "Every week"], ["biweekly", "Every 2 weeks"], ["fourweekly", "Every 4 weeks"], ["monthly", "Every month"], ["bimonthly", "Every 2 months"], ["quarterly", "Every 3 months"], ["semiannual", "Every 6 months"], ["yearly", "Every year"], ["biennial", "Every 2 years"], ["custom", "Custom…"]];
 async function viewSubs(root, rerender) {
-  const [d, sugs, accts, cats, alerts] = await Promise.all([api("/api/subscriptions"), api("/api/suggestions"), api("/api/accounts"), api("/api/categories"), api("/api/alerts")]);
+  const [d, sugs, accts, cats, alerts, st] = await Promise.all([api("/api/subscriptions"), api("/api/suggestions"), api("/api/accounts"), api("/api/categories"), api("/api/alerts"), api("/api/status").catch(() => ({}))]);
+  const ffOwned = (s) => s && (s.source === "ff-recurring" || (s.source === "firefly" && !st.sends?.bills));     // its Firefly III side is changed in Firefly III
+  const srcPill = (s) => s.source === "firefly" ? h("span", { class: "pill t", title: "A bill in Firefly III" }, "Firefly III bill") : s.source === "ff-recurring" ? h("span", { class: "pill t", title: "A recurring transaction in Firefly III" }, "Firefly III recurring") : null;
   const acctOpts = [["", "None (no account)"], ...accts.map((a) => [a.id, `${a.institution} · ${a.name}${a.source === "manual" ? " (manual)" : ""}`])];
   const e = S.edit, label = (s) => PRESETS.find(([k]) => k === s.label) ? s.label : "custom";
   const endsMode = !e?.end_date ? "never" : e.plan_total ? "count" : "date";
   const form = () => {
     const f = h("form", { class: "subform", onsubmit: async (ev) => {
       ev.preventDefault();
-      const preset = val("sf-cycle"), payer = val("sf-payer"), ends = val("sf-ends");
+      const preset = val("sf-cycle"), payer = val("sf-payer"), ends = ffOwned(e) ? (e.end_date ? "date" : "never") : val("sf-ends");
       if (ends === "count" && !(parseInt(val("sf-count")) >= 1)) return toast("How many more payments?");
       const body = { name: val("sf-name"), amount: num("sf-amount"), next_date: val("sf-next"), category: val("sf-cat"), account_id: val("sf-acct") || null, payment_method: val("sf-pm"), payer, payer_name: payer === "other" ? val("sf-pname") : "",
-        notify_days: parseInt(val("sf-notify")) || 0, end_date: ends === "date" ? val("sf-end") || null : null,
-        times_left: ends === "count" ? parseInt(val("sf-count")) : null, plan_total: ends === "count" ? parseInt(val("sf-total")) || null : null, url: val("sf-url"), notes: val("sf-notes"), active: e ? !!e.active : true, ...(preset === "custom" ? { every: parseInt(val("sf-every")), unit: val("sf-unit") } : { cycle: preset }) };
+        notify_days: parseInt(val("sf-notify")) || 0, end_date: ffOwned(e) ? e.end_date : ends === "date" ? val("sf-end") || null : null,
+        times_left: ends === "count" && !ffOwned(e) ? parseInt(val("sf-count")) : null, plan_total: ffOwned(e) ? (num("sf-total") || null) : ends === "count" ? parseInt(val("sf-total")) || null : null, url: val("sf-url"), notes: val("sf-notes"), active: e ? !!e.active : true, ...(preset === "custom" ? { every: parseInt(val("sf-every")), unit: val("sf-unit") } : { cycle: preset }) };
+      if (ffOwned(e)) Object.assign(body, { name: e.name, amount: e.amount, next_date: e.next_date, notes: e.notes, every: e.every, unit: e.unit, cycle: undefined });
       try { await api(e ? `/api/subscriptions/${e.id}` : "/api/subscriptions", send(e ? "PUT" : "POST", body)); S.edit = null; toast(e ? "Saved" : "Added"); rerender(); } catch (err) { fail(err); }
     } },
       field("sf-name", "Name", e?.name, { required: true }), field("sf-amount", "Amount", e?.amount, { type: "number", step: "0.01", min: "0", required: true }),
@@ -457,6 +460,11 @@ async function viewSubs(root, rerender) {
         field("sf-total", "Payments in the whole plan (optional)", e?.plan_total ?? "", { type: "number", min: "1", max: "1000", placeholder: "e.g. 4 for pay in 4" })),
       field("sf-url", "Website", e?.url), field("sf-notes", "Notes", e?.notes),
       h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, e ? "Save changes" : "Add subscription"), e ? h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel") : null));
+    if (ffOwned(e)) {                    // only what Firefly III has no place for can be set here
+      for (const id of ["sf-name", "sf-amount", "sf-cycle", "sf-every", "sf-unit", "sf-next", "sf-ends", "sf-end", "sf-count", "sf-url", "sf-notes"]) { const x = $("#" + id, f); if (x) x.disabled = true; }
+      const tot = $(".ends-count", f); tot.hidden = false; $("#sf-count", f).closest("label") && ($("#sf-count", f).closest("label").hidden = true);
+      f.prepend(h("p", { class: "muted small", style: "grid-column:1/-1;margin:0" }, `This comes from Firefly III (${e.source === "ff-recurring" ? "a recurring transaction" : "a bill"}): its name, amount, schedule and end are changed there. Who pays, the account it is paid from, the reminder, the category and the plan size are yours and stay in Coinpile.`));
+    }
     return f;
   };
   const late = alerts.filter((a) => a.kind === "missed_payment"), running = d.items.filter((s) => !s.ended), done = d.items.filter((s) => s.ended);
@@ -475,12 +483,12 @@ async function viewSubs(root, rerender) {
     h("div", { class: "panel" }, h("h3", {}, e ? "Edit subscription" : "Add a subscription"), form()),
     h("div", { class: "panel scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Name", "Repeats", "Next", "Paid from", "Amount", "Per month", ""].map((x, i) => h("th", { class: i > 3 ? "r" : "" }, x)))),
       h("tbody", {}, running.map((s) => h("tr", { style: s.active ? "" : "opacity:.5" },
-        h("td", {}, s.name, " ", s.source === "plaid" ? h("span", { class: "pill t" }, "auto") : null, s.active ? null : h("span", { class: "pill" }, "paused"), s.payer === "other" ? h("span", { class: "pill b" }, s.payer_name + " pays") : null, h("div", { class: "muted small" }, s.category)),
+        h("td", {}, s.name, " ", s.source === "plaid" ? h("span", { class: "pill t" }, "auto") : srcPill(s), s.active ? null : h("span", { class: "pill" }, "paused"), s.payer === "other" ? h("span", { class: "pill b" }, s.payer_name + " pays") : null, h("div", { class: "muted small" }, s.category)),
         h("td", {}, s.label, plan(s) ? h("div", { class: "small" }, h("span", { class: "pill b" }, plan(s))) : null), h("td", { class: "mono" }, s.next_due || "ended"), h("td", { class: "small" }, s.account_name ? `${s.account_institution} · ${s.account_name}` : s.payment_method || h("span", { class: "muted" }, "not set")),
         h("td", { class: "num r" }, usd(s.amount)), h("td", { class: "num r" }, s.monthly ? usd(s.monthly) : "–"),
         h("td", { class: "r", style: "white-space:nowrap" }, h("button", { class: "btn sm", onclick: () => { S.edit = s; rerender(); window.scrollTo(0, 0); } }, "Edit"), " ",
-          h("button", { class: "btn sm", onclick: async () => { await api(`/api/subscriptions/${s.id}`, send("PUT", { ...s, cycle: undefined, every: s.every, unit: s.unit, active: !s.active })); rerender(); } }, s.active ? "Pause" : "Resume"), " ",
-          h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/subscriptions/${s.id}`, { method: "DELETE" }); rerender(); }) }, "Delete"))))))),
+          ffOwned(s) ? null : [h("button", { class: "btn sm", onclick: async () => { await api(`/api/subscriptions/${s.id}`, send("PUT", { ...s, cycle: undefined, every: s.every, unit: s.unit, active: !s.active })); rerender(); } }, s.active ? "Pause" : "Resume"), " ",
+          h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/subscriptions/${s.id}`, { method: "DELETE" }); rerender(); }) }, "Delete")])))))),
     done.length ? h("div", { class: "panel" }, h("details", {}, h("summary", {}, h("b", {}, `Finished (${done.length})`), h("span", { class: "muted small" }, "  plans that ran their course, kept so you can look back")),
       done.map((s) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto auto" }, h("span", {}, s.name, h("div", { class: "muted small" }, `${s.label}${s.plan_total ? ` · ${s.plan_total} payments` : ""} · last ${s.last_payment || s.end_date}`)), h("span", { class: "num" }, usd(s.amount)),
         h("button", { class: "btn sm", onclick: () => { S.edit = s; rerender(); window.scrollTo(0, 0); } }, "Extend"),
@@ -638,12 +646,19 @@ async function viewPiggy(root, rerender) {
 /* ================================ BUDGETS: the monthly plan and income ================================ */
 async function viewBudgets(root, rerender) {
   const month = S.month || today().slice(0, 7);
-  const [pl, cats, accts, fcs] = await Promise.all([api("/api/plan?month=" + month), api("/api/categories"), api("/api/accounts"), api("/api/forecast").catch(() => null)]);
-  const incomeRow = (i) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto auto" }, h("span", {}, i.name, " ", h("span", { class: "muted small" }, i.label), i.active ? null : h("span", { class: "pill" }, "paused")), h("span", { class: "muted small" }, i.paydays?.length ? `${i.paydays.length} payday${i.paydays.length === 1 ? "" : "s"}${i.extra_paycheck ? " (extra!)" : ""}` : `next ${i.next_due.slice(5)}`), h("span", { class: "num pos", title: `steady average ${usd(i.monthly)}/mo` }, usd(i.in_month ?? i.monthly) + "/mo"),
-    h("button", { class: "btn sm danger", "aria-label": "Delete income", onclick: sure(null, "Sure?", async () => { await api(`/api/incomes/${i.id}`, { method: "DELETE" }); rerender(); }) }, "×"));
+  const [pl, cats, accts, fcs, fb] = await Promise.all([api("/api/plan?month=" + month), api("/api/categories"), api("/api/accounts"), api("/api/forecast").catch(() => null), api("/api/firefly/budgets?month=" + month).catch(() => null)]);
+  const incomeRow = (i) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto auto" }, h("span", {}, i.name, " ", h("span", { class: "muted small" }, i.label), i.source === "firefly" ? h("span", { class: "pill t", title: "A recurring deposit in Firefly III" }, "Firefly III") : null, i.active ? null : h("span", { class: "pill" }, "paused")), h("span", { class: "muted small" }, i.paydays?.length ? `${i.paydays.length} payday${i.paydays.length === 1 ? "" : "s"}${i.extra_paycheck ? " (extra!)" : ""}` : `next ${i.next_due.slice(5)}`), h("span", { class: "num pos", title: `steady average ${usd(i.monthly)}/mo` }, usd(i.in_month ?? i.monthly) + "/mo"),
+    i.source === "firefly" ? h("span", {}) : h("button", { class: "btn sm danger", "aria-label": "Delete income", onclick: sure(null, "Sure?", async () => { await api(`/api/incomes/${i.id}`, { method: "DELETE" }); rerender(); }) }, "×"));
   add(root,
-    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Monthly plan"), h("input", { type: "month", id: "bm", value: month, class: "tiny", style: "width:auto", onchange: (e) => { S.month = e.target.value; rerender(); } })),
-      h("p", { class: "muted small" }, "Income minus bills and budgets. A budget covers everything in its category, bills included, so nothing is counted twice."),
+    fb && fb.items.length ? h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Budgets in Firefly III"), fb.link ? h("a", { class: "btn sm", href: fb.link, target: "_blank", rel: "noopener" }, "Open in Firefly III") : null),
+      h("p", { class: "muted small" }, `Read from Firefly III for ${month}: the limit you set there and what was spent from it. Change them in Firefly III.`),
+      h("div", { class: "grid" }, kpi("Budgeted", usd(fb.limit), `${fb.items.filter((b) => b.limit).length} budget${fb.items.filter((b) => b.limit).length === 1 ? "" : "s"} with a limit`), kpi("Spent", usd(fb.spent), "from those budgets"), kpi("Left", usd(fb.left), fb.left >= 0 ? "still to spend" : "over", fb.left < 0 ? "neg" : "pos")),
+      h("div", { class: "scroll", style: "margin-top:12px" }, h("table", {}, h("thead", {}, h("tr", {}, ["Budget", "Limit", "Spent", "Left", ""].map((x, i) => h("th", { class: i > 0 && i < 4 ? "r" : "" }, x)))),
+        h("tbody", {}, fb.items.map((b) => h("tr", {}, h("td", {}, b.name, b.auto ? h("span", { class: "pill", title: "Firefly III sets this limit each period" }, "auto") : null), h("td", { class: "num r" }, b.limit ? usd(b.limit) : h("span", { class: "muted" }, "none")),
+          h("td", { class: "num r" }, usd(b.spent)), h("td", { class: "num r " + (b.left < 0 ? "neg" : "") }, b.left == null ? "–" : usd(b.left)),
+          h("td", { style: "min-width:90px" }, b.pct != null ? bar(b.pct, b.pct > 1 ? "var(--red)" : b.pct > 0.85 ? "var(--brass)" : "var(--teal)") : null))))))) : null,
+    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, fb && fb.items.length ? "Coinpile plan by category" : "Monthly plan"), h("input", { type: "month", id: "bm", value: month, class: "tiny", style: "width:auto", onchange: (e) => { S.month = e.target.value; rerender(); } })),
+      h("p", { class: "muted small" }, "Income minus bills and budgets per category. A budget covers everything in its category, bills included, so nothing is counted twice. This plan is Coinpile's own (Firefly III budgets work by budget, not category) and stays here."),
       pl.extra_income > 0 ? h("div", { class: "alert info", style: "margin-bottom:10px" }, h("b", {}, `An extra paycheck lands this month: ${usd(pl.extra_income)} beyond your usual.`), h("span", { class: "muted small" }, " It is already inside \"Left to assign\".")) : null,
       pl.warnings.length ? h("div", { class: "alerts", style: "margin-bottom:10px" }, pl.warnings.map((w) => alertRow({ severity: "warning", title: w }))) : null,
       h("div", { class: "grid" }, kpi("Expected income", usd(pl.income_month), (() => { const n = pl.incomes.reduce((a, i) => a + (i.paydays?.length || 0), 0); return `${n} payday${n === 1 ? "" : "s"} this month${pl.extra_paycheck_month ? ", an extra paycheck" : ""} · ${usd(pl.actual.income)} so far`; })(), "pos"), kpi("Planned spending", usd(pl.outflow_planned), `${usd(pl.actual.spent)} spent so far`),

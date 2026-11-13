@@ -30,6 +30,26 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
 - **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
 
+### Read from Firefly III, or kept in Coinpile
+
+Coinpile reads everything Firefly III has, so you set it up once, in Firefly III:
+
+| From Firefly III (read only, refreshed every few minutes) | Shown as |
+|---|---|
+| Accounts, balances, transactions, net worth history | Overview, Accounts, Money movement |
+| Bills | Subscriptions ("Firefly III bill"); a payment Firefly III linked to the bill counts as paid, whatever the bank called it |
+| Recurring transactions | payments: Subscriptions ("Firefly III recurring"), with Firefly III's "repeat N times" or "until" as the countdown (pay in 4: payment 2 of 4); deposits: Income on Budgets |
+| Budgets and budget limits | Budgets page, "Budgets in Firefly III" (limit, spent, left, auto-budgets), for any month |
+| Piggy banks | Piggy banks page, with their history |
+
+What Firefly III has no place for stays in Coinpile, and is never sent anywhere: notes; goals and free vs. set-aside money; CDs, APY and maturities;
+the per-category plan; income you add yourself; who pays a subscription, which account pays it, its reminder, its category and the size of its plan
+(these can be set on Firefly III bills and recurring transactions too: their name, amount, schedule and end stay Firefly III's); nicknames; alerts.
+
+Firefly III has no websocket or inbound hook: other apps change it only through its API, which is what the switches below use. Not offered, on purpose:
+Coinpile income as Firefly III recurring deposits (Firefly III would make deposits on its own and duplicate the real ones your bank sends), and
+category budgets as Firefly III budgets (Firefly III budgets count only transactions given that budget, not a category).
+
 ### What Coinpile changes in Firefly III
 
 **Nothing, unless you switch it on** (Settings, Firefly III, Send to Firefly III). Each part is separate:
