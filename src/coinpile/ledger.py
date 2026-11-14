@@ -92,12 +92,16 @@ def recategorize(db) -> int:
 
 # ------------------------------------------------------------------ transactions
 def query_transactions(db, q=None, account_id=None, category=None, min_amount=None, max_amount=None, start=None, end=None,
-                       direction=None, limit=100, offset=0, sort="date_desc") -> dict:
+                       direction=None, limit=100, offset=0, sort="date_desc", tag=None, budget=None) -> dict:
     where, args = ["1=1"], []
     if q:
-        for tok in q.split():
-            where.append("lower(t.name) LIKE ?")
-            args.append(f"%{tok.lower()}%")
+        for tok in q.split():                       # the description, the payee or the notes
+            where.append("(lower(t.name) LIKE ? OR lower(coalesce(t.payee,'')) LIKE ? OR lower(coalesce(t.notes,'')) LIKE ?)")
+            args += [f"%{tok.lower()}%"] * 3
+    if tag:                                          # a Firefly III tag (exact, case does not matter)
+        where.append("(',' || lower(coalesce(t.tags,'')) || ',') LIKE ?"); args.append(f"%,{tag.strip().lower()},%")
+    if budget:
+        where.append("lower(coalesce(t.budget,'')) = ?"); args.append(budget.strip().lower())
     if account_id:
         where.append("t.account_id=?"); args.append(account_id)
     if category:

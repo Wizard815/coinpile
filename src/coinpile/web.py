@@ -273,6 +273,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     today = today or date.today
     users = Users(os.path.join(data_dir, "users.db"))
     apps: dict[str, FastAPI] = {}
+    contexts: dict = {}                              # each person's agent context, for the MCP endpoint
     dbs: dict[str, DB] = {}
     locks: dict[str, threading.Lock] = {}
     pending_oauth: dict[str, tuple[str, float]] = {}
@@ -525,6 +526,20 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         flushers[uid] = shared_changed
         ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
                                  link_flush=link_flush, link_people=users.handles)
+        contexts[uid] = ctx
+        last_agent_refresh = {"t": 0.0}
+
+        def refresh_now() -> dict:
+            if time.time() - last_agent_refresh["t"] < 60:
+                return {"refreshed": False, "note": "read less than a minute ago; the data is current", "read_from_firefly_at": cfg.get(db, "ff_last_refresh") or None}
+            last_agent_refresh["t"] = time.time()
+            try:
+                r = refresh(uid)
+            except firefly.FireflyError as e:
+                return {"error": f"could not read Firefly III: {e}"[:200]}
+            return {"refreshed": True, "read_from_firefly_at": cfg.get(db, "ff_last_refresh") or None, **{k: r[k] for k in ("accounts", "subscriptions", "piggy_banks") if k in (r or {})}}
+
+        ctx.refresh_now = refresh_now
         ctx.llm_transport = llm_transport
         ctx.search_transport = search_transport
         ctx.searx_url = lambda: cfg.get(db, "searx_url") or os.environ.get("SEARXNG_URL", "")
@@ -1268,8 +1283,21 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             out["alert_list"] = [{"severity": a["severity"], "kind": a["kind"], "title": a["title"], "detail": a.get("detail", ""), **({"date": a["date"]} if a.get("date") else {})} for a in ledger.alerts(db, t)][:30]
         if "savings" in share:
             out["savings"] = {"total": ext["savings_total"], "free": ext["savings_free"], "earmarked": ext["savings_earmarked"]}
-        if "goals" in share:
-            out["goals"] = [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"]
+        if "goals" in share:                  # goals are Firefly III piggy banks (older Coinpile goals still count until closed)
+            out["goals"] = ([{"name": p["name"], "target": p["target"], "allocated": p["current"], "pct": round(min(1.0, p["current"] / p["target"]), 3) if p["target"] else None,
+                              **({"by": p["target_date"]} if p.get("target_date") else {})} for p in plan._piggies(db)]
+                            + [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"])
+        if "budgets" in share:
+            try:
+                b = contexts[uid].ff_budgets(t.isoformat()[:7]) if uid in contexts and getattr(contexts[uid], "ff_budgets", None) else None
+                out["budgets"] = {"month": b["month"], "limit": b["limit"], "spent": b["spent"], "left": b["left"],
+                                  "items": [{k: x[k] for k in ("name", "limit", "spent", "left")} for x in b["items"] if x["limit"]]} if b else None
+            except Exception:
+                out["budgets"] = None
+        if "paycheck" in share:
+            pc = agent.paycheck_plan(db, t)
+            out["paycheck"] = None if pc.get("error") else {"date": pc["paycheck"]["date"], "amount": pc["paycheck"]["amount"], "bills": pc["bills_total"], "piggy_banks": pc["piggy_total"],
+                                                            "left": pc["left_for_spending"], "until": pc["covers_until"]}
         for key, acct in (("robinhood_main", "rh:main"), ("robinhood_agent", "rh:agent")):
             if key in share:
                 a = db.one("SELECT balance, updated FROM accounts WHERE id=?", (acct,))
@@ -1300,6 +1328,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         uid, _, _ = token_holder(request, "orb")
         s = orb_summary(uid)
         return {"goblins": {s["name"] or "me": s}}
+
+    # ---------------- MCP: the agent's tools for other AI assistants (Pondering Orb, Claude Desktop...), with a token that has the "mcp" scope
+    @front.post("/api/v1/mcp")
+    async def mcp_endpoint(request: Request):
+        uid, _, _ = token_holder(request, "mcp")
+        person_app(uid)                                       # builds this person's context if nobody has opened Coinpile since a restart
+        try:
+            msg = await request.json()
+        except ValueError:
+            return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "not JSON"}}, 400)
+        res = await run_in_threadpool(agent.mcp_handle, contexts[uid], msg)
+        return Response(status_code=202) if res is None else JSONResponse(res)
 
     @front.get("/api/v1/me")
     @front.get("/api/v1/me/{resource:path}")

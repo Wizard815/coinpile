@@ -216,8 +216,10 @@ def tx_rows(group: dict, mine, primary: str | None = None) -> list[dict]:
         else:
             out_cat = own_cat or ("Transfer" if typ == "reconciliation" else "Misc")
         in_cat = "Transfer" if both or typ == "transfer" else own_cat or ("Transfer" if typ == "reconciliation" else "Income")
+        tags = [str(x).strip() for x in (s.get("tags") or []) if str(x).strip()]
         base = {"date": str(s.get("date") or "")[:10], "notes": s.get("notes") or "", "type": s.get("type"), "group": str(group["id"]),
-                "bill": str(s.get("subscription_id") or s.get("bill_id") or "") or None}
+                "bill": str(s.get("subscription_id") or s.get("bill_id") or "") or None,
+                "tags": ",".join(tags)[:500] or None, "budget": s.get("budget_name") or None}
         cur_of = (lambda aid: (mine.get(aid) or {}).get("own_currency")) if isinstance(mine, dict) else (lambda aid: None)
         for aid, sign, suffix, cat, fallback in ((src, -1, ":out", out_cat, "destination_name"), (dst, 1, ":in", in_cat, "source_name")):
             if aid not in mine:
@@ -225,7 +227,7 @@ def tx_rows(group: dict, mine, primary: str | None = None) -> list[dict]:
             amt, cur, nat, ncur = _leg_money(s, cur_of(aid), primary)
             out.append({**base, "id": f"ff:{jid}" + (suffix if both else ""), "account_id": f"ff:{aid}", "amount": sign * amt, "currency": cur or "USD",
                         "native_amount": sign * nat if nat is not None else None, "native_currency": ncur,
-                        "name": s.get("description") or s.get(fallback) or "", "category": cat})
+                        "name": s.get("description") or s.get(fallback) or "", "category": cat, "payee": (s.get(fallback) or None)})
     return out
 
 
@@ -245,13 +247,13 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
             for r in tx_rows(g, mine, primary):
                 seen.add(r["id"])
                 cats.setdefault(r["category"], set()).add("in" if r["amount"] > 0 and (r["type"] or "").lower() == "deposit" else "out")
-                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill)
-                             VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?,?,?,?)
+                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill,tags,budget,payee)
+                             VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?,?,?,?,?,?,?)
                              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,date=excluded.date,name=excluded.name,amount=excluded.amount,
                              currency=excluded.currency,category=excluded.category,notes=excluded.notes,ff_group=excluded.ff_group,native_amount=excluded.native_amount,
-                             native_currency=excluded.native_currency,ff_bill=excluded.ff_bill""",
+                             native_currency=excluded.native_currency,ff_bill=excluded.ff_bill,tags=excluded.tags,budget=excluded.budget,payee=excluded.payee""",
                           (r["id"], r["account_id"], r["date"], r["name"][:255], r["amount"], r["currency"], r["category"], r["notes"], r["group"],
-                           r["native_amount"], r["native_currency"], r["bill"]))
+                           r["native_amount"], r["native_currency"], r["bill"], r["tags"], r["budget"], r["payee"]))
                 if r["id"] not in known and r["date"] >= recent:          # new and recent: it goes in the "latest movement" list and the feed
                     inst = (accounts.get(r["account_id"][3:]) or {}).get("institution", "")
                     c.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (f"tx:{r['id']}", f"{r['date']}T00:00:00+00:00", "transaction",

@@ -20,9 +20,10 @@ SCOPES = {
     "transactions": "Individual transactions (sensitive: every purchase)",
     "refresh": "May add ?refresh=1 to ask for a fresh read of Firefly III first (at most once every 5 minutes)",
     "orb": "Pondering Orb: the summary you chose to share with it (Settings, Home Assistant & API)",
+    "mcp": "AI assistants over MCP (Pondering Orb, Claude Desktop...): every read tool of the Coinpile agent and its skills; changes are only asked, and wait for your Yes in Coinpile",
 }
 REFRESH_MIN_SECONDS = 300
-RESOURCES = {"summary": "summary", "ha": "summary", "bills": "bills", "alerts": "alerts", "savings": "savings", "goals": "goals", "budgets": "budgets", "transactions": "transactions"}
+RESOURCES = {"mcp": "mcp", "summary": "summary", "ha": "summary", "bills": "bills", "alerts": "alerts", "savings": "savings", "goals": "goals", "budgets": "budgets", "transactions": "transactions"}
 
 
 def new_token(person: str) -> str:
