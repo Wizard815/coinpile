@@ -1342,6 +1342,11 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         if "spending" in share:
             fc = ledger.spending_forecast(db, t)
             out["spending"] = {"so_far": fc["spent_so_far"], "projected": fc["projected"], "income_avg": fc["income_avg"], "left_after": fc["left_after_projected"]}
+        if "holdings" in share:               # the last known positions (Robinhood: activity CSV, MCP or connector), one row per symbol per account
+            out["holdings"] = [{"symbol": h["symbol"], "quantity": h["quantity"], "net_cost": h["net_cost"], "equity": h["value"], "account": h["account_id"], "as_of": h["updated"]}
+                               for h in db.all("SELECT * FROM holdings WHERE quantity IS NOT NULL AND quantity != 0 ORDER BY account_id, symbol LIMIT 300")]
+        if "daily" in share:                  # per-day totals for the last 31 days, never the transactions behind them
+            out["daily"] = ledger.daily_totals(db, t, 31)
         return out
 
     def token_holder(request: Request, resource: str):

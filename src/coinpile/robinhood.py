@@ -209,9 +209,27 @@ class Robinhood:
         except httpx.HTTPError:
             return "down"
 
+    def store_holdings(self, acct: str, positions) -> None:
+        """The last known positions of one account (the holdings table). None means the read failed: keep what we had."""
+        if not isinstance(positions, list):
+            return
+        rows = []
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            q = p if "quantity" in p and "symbol" in p else (positions_from([p]) or [None])[0]   # the CSV, MCP and connector shapes
+            if not q or not q.get("symbol") or _num(q.get("quantity")) is None:
+                continue
+            rows.append((acct, str(q["symbol"]).upper()[:12], _num(q.get("quantity")), _num(q.get("net_cost")), _num(q.get("equity") if q.get("equity") is not None else q.get("value"))))
+        with self.db.tx() as c:
+            c.execute("DELETE FROM holdings WHERE account_id=?", (acct,))
+            c.executemany("INSERT OR REPLACE INTO holdings(account_id,symbol,quantity,net_cost,value,updated) VALUES(?,?,?,?,?,?)", [r + (sync.now(),) for r in rows if r[2]])
+
     def snapshot(self, pref: str = "auto") -> dict:
         got = {}
         for acct, label, data in (("rh:main", "Robinhood (main)", self.main(pref)), ("rh:agent", "Robinhood (agent)", self.fetch("agent"))):
+            if data:
+                self.store_holdings(acct, data.get("positions"))            # positions even when the source has no account value (an activity CSV)
             eq = equity(data.get("balances")) if data else None
             if eq is None:
                 continue
