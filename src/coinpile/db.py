@@ -72,6 +72,8 @@ COLUMNS = {  # added after the first release: (table, column) -> DDL fragment
     ("accounts", "native_balance"): "REAL", ("accounts", "native_currency"): "TEXT", ("accounts", "in_net_worth"): "INTEGER DEFAULT 1",
     ("transactions", "native_amount"): "REAL", ("transactions", "native_currency"): "TEXT", ("transactions", "ff_bill"): "TEXT",
     ("subscriptions", "native_amount"): "REAL", ("subscriptions", "native_currency"): "TEXT",
+    # holdings: last known positions per investment account (Robinhood), for the Orb's holdings share
+    ("holdings", "net_cost"): "REAL", ("holdings", "updated"): "TEXT",
 }
 DEFAULT_CATEGORIES = [("Income", "income"), ("Food", "expense"), ("Groceries", "expense"), ("Clothes", "expense"), ("Fun", "expense"), ("Games", "expense"),
                       ("Gas", "expense"), ("Transport", "expense"), ("Bills", "expense"), ("Housing", "expense"), ("Health", "expense"), ("Shopping", "expense"),

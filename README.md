@@ -216,7 +216,12 @@ changed something.
 **Coinpile as an MCP server** (for Pondering Orb, Claude Desktop or any MCP client): make a token with the **mcp** scope (Settings, Home
 Assistant & API) and point the client at `https://your-coinpile/api/v1/mcp` with `Authorization: Bearer <token>`. It gets every read tool, the
 calculator, and the skills as prompts. Change tools only ask: the request waits under "Waiting for your answer" on Coinpile's Agent page.
-The Orb's summary can also share goals (piggy banks), Firefly III budgets and the next paycheck (Settings, Home Assistant & API, Sharing).
+The Orb's summary can also share goals (piggy banks), Firefly III budgets and the next paycheck (Settings, Home Assistant & API, Sharing). Two more
+options feed the Orb's stock and journal pages: **Holdings** (the stocks you
+hold, from Robinhood's activity CSV, MCP or connector: symbol, shares, net
+cost, value, one row per account, as last read) and **Daily totals** (spent and
+income per day for the last 31 days; transfers between your own accounts and
+pending payments don't count; never the transactions themselves).
 
 **Money maths and outside facts.** loan_payoff (months, interest, and what an extra payment saves), savings_plan (monthly amount for a date, or
 the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.

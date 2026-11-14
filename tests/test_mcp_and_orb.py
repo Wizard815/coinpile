@@ -131,3 +131,36 @@ def test_week_changes_shared_expenses_and_the_new_skills(tmp_path):
     assert tl["record_transaction"]["asks_first"] and not tl["record_transaction"]["description"].startswith("ASKS")
     assert not tl["week_changes"]["asks_first"] and tl["week_changes"]["over_mcp"] and not tl["use_skill"]["over_mcp"]
     assert {s["name"] for s in c.get("/api/agent/skills").json()} >= {"weekly_brief", "joint_settle_up"}
+
+
+def test_the_orb_can_see_holdings_and_daily_totals_only_when_shared(tmp_path):
+    from tests.test_coinpile import RH, world as w
+    ff = w()
+    ff.tx("1", 120, "withdrawal", 60, "Hardware store", 1, 91, "2026-11-08", "Groceries")
+    ff.tx("1", 121, "deposit", 100, "Refund", 90, 1, "2026-11-08", "Income")
+    ff.tx("1", 122, "transfer", 300, "To savings", 1, 3, "2026-11-08")
+    c = signed_in(app(tmp_path, ff))
+    c.post("/api/refresh?full=true")
+    assert c.post("/api/robinhood/csv-upload", content=RH).status_code == 200
+    orb = c.post("/api/tokens", json={"name": "Orb", "scopes": ["orb"]}).json()["token"]
+    summary = lambda: next(iter(TestClient(c.app).get("/api/v1/summary", headers={"Authorization": "Bearer " + orb}).json()["goblins"].values()))
+    s = summary()
+    assert "holdings" not in s and "daily" not in s, "nothing until it is ticked"
+    assert c.put("/api/settings", json={"share": ["holdings", "daily"]}).status_code == 200
+    s = summary()
+    # Robinhood: bought 10 AAPL for $1000, sold 4 for $440 -> 6 shares, $560 net cost; an activity report has no prices, so no value
+    assert s["holdings"] == [{"symbol": "AAPL", "quantity": 6, "net_cost": 560.0, "equity": None, "account": "rh:main", "as_of": s["holdings"][0]["as_of"]}]
+    d = {x["date"]: x for x in s["daily"]}
+    assert len(s["daily"]) == 31 and s["daily"][0]["date"] == "2026-11-10" and s["daily"][-1]["date"] == "2026-10-11"
+    assert d["2026-11-08"] == {"date": "2026-11-08", "spent": 60.0, "income": 100.0}, "the transfer counts as neither"
+    assert d["2026-11-09"] == {"date": "2026-11-09", "spent": 0.0, "income": 0.0}
+    assert "transactions" not in s and all(set(x) == {"date", "spent", "income"} for x in s["daily"])
+    # a failed read keeps the last known positions
+    import glob
+    from coinpile import robinhood
+    from coinpile.db import DB
+    db = DB(glob.glob(str(tmp_path / "people" / "*.db"))[0])
+    robinhood.Robinhood(db, str(tmp_path / "nowhere")).store_holdings("rh:main", None)
+    assert summary()["holdings"][0]["symbol"] == "AAPL"
+    # and a settings value Coinpile doesn't know is still refused
+    assert c.put("/api/settings", json={"share": ["holdings", "everything"]}).status_code in (400, 422)

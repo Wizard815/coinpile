@@ -570,3 +570,17 @@ def net_worth_history(store) -> list[dict]:
     manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
     extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
     return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]
+
+
+def daily_totals(db, today: date, days: int = 31) -> list[dict]:
+    """Spent and income per day, newest first, for the last `days` days (today included). Totals only.
+    Spent is money out (a positive number), income is money in; transfers between your own accounts count as neither,
+    and pending transactions wait until they post (the same rules as the weekly brief)."""
+    days = max(1, min(int(days), 92))
+    start = today - timedelta(days=days - 1)
+    rows = db.all("SELECT t.date d, ROUND(-SUM(CASE WHEN t.amount<0 THEN t.amount ELSE 0 END),2) spent, ROUND(SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),2) income "
+                  "FROM transactions t LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN ? AND ? AND t.pending=0 AND coalesce(c.kind,'expense')!='transfer' GROUP BY t.date",
+                  (start.isoformat(), today.isoformat()))
+    by = {r["d"][:10]: r for r in rows}
+    return [{"date": d, "spent": (by[d]["spent"] or 0.0) if d in by else 0.0, "income": (by[d]["income"] or 0.0) if d in by else 0.0}
+            for d in ((today - timedelta(days=k)).isoformat() for k in range(days))]

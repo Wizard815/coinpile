@@ -6,7 +6,7 @@ import re
 from coinpile import crypto
 
 SOURCES = ("auto", "plaid", "csv", "live")
-SHAREABLE = ("net_worth", "subscriptions", "bills", "bill_list", "alerts", "alert_list", "savings", "goals", "spending", "budgets", "paycheck", "week", "robinhood_main", "robinhood_agent")
+SHAREABLE = ("net_worth", "subscriptions", "bills", "bill_list", "alerts", "alert_list", "savings", "goals", "spending", "budgets", "paycheck", "week", "robinhood_main", "robinhood_agent", "holdings", "daily")
 # key -> (kind, secret, env fallback)
 SPEC = {
     "share": ("list", False, ""),
