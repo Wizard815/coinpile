@@ -183,7 +183,10 @@ review, debt payoff (avalanche vs snowball), emergency fund, subscription audit,
 (with current rates from the web), spending spike, **tax prep** (tax_year: income by payer, spending by category, every Firefly III tag's total,
 lines that look tax related, then the standard deduction from the web; not tax advice), **paycheck splitter** (paycheck_plan: the next
 paycheck, the bills due before the one after it, what each piggy bank needs from it, what is left) and bill negotiation (price rises and a call
-script). They are buttons on the Agent page, and the agent picks one itself when a question fits.
+script), **year in review**, **insurance and renewals** (yearly bills coming up and whether they rose), **joint settle-up** (shared_expenses:
+joint accounts and payments tagged "shared" in Firefly III, who owes whom) and **weekly brief** (week_changes: short enough to be read out; the
+Orb can be given it under Sharing as "This week"). The Agent page's **What I can do** lists every skill (with Run) and every tool, marked
+"reads" or "asks first", and the MCP address for other assistants. The agent also picks a skill itself when a question fits.
 
 **What Firefly III gives the agent.** Everything Coinpile reads: accounts, balances, transactions with their category, **tags**, **budget**,
 **payee** and notes, bills and which payment paid which bill, recurring transactions, budgets and limits, piggy banks and their history, and

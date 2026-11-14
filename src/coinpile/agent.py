@@ -168,6 +168,24 @@ def paycheck_plan(store, today_: date, income: str | None = None) -> dict:
             "note": "piggy amounts are Firefly III's monthly target split per paycheck; everyday spending is not in bills"}
 
 
+def week_changes(store, today_: date) -> dict:
+    """The last 7 days against the 7 before them, from Firefly III's transactions. Also what the Orb reads out as the weekly brief."""
+    def window(a, b):
+        rows = store.all("SELECT t.name, t.payee, t.amount, t.date, t.category, coalesce(c.kind,'expense') kind FROM transactions t LEFT JOIN categories c ON c.name=t.category "
+                         "WHERE t.date BETWEEN ? AND ? AND t.pending=0", (a.isoformat(), b.isoformat()))
+        real = [r for r in rows if r["kind"] != "transfer"]
+        return real, round(sum(r["amount"] for r in real if r["amount"] > 0), 2), round(-sum(r["amount"] for r in real if r["amount"] < 0), 2)
+    this, tin, tout = window(today_ - timedelta(days=6), today_)
+    _, pin, pout = window(today_ - timedelta(days=13), today_ - timedelta(days=7))
+    hist = [p for p in ledger.net_worth_history(store) if p["date"] >= (today_ - timedelta(days=8)).isoformat()]
+    new_alerts = [a["title"] for a in ledger.alerts(store, today_) if a["kind"] in ("missed_payment", "negative_balance", "low_balance", "bank_login", "projected_low", "maturing", "matured_idle")]
+    return {"from": (today_ - timedelta(days=6)).isoformat(), "to": today_.isoformat(), "money_in": tin, "money_out": tout, "previous_week": {"money_in": pin, "money_out": pout},
+            "out_change": round(tout - pout, 2), "biggest": [{k: r[k] for k in ("date", "name", "amount", "category")} for r in sorted((r for r in this if r["amount"] < 0), key=lambda r: r["amount"])[:5]],
+            "new_repeating": [s["name"] for s in ledger.suggestions(store, today_) if s.get("source") == "detected"][:5],
+            "alerts": new_alerts[:8], "net_worth_change": round(hist[-1]["net_worth"] - hist[0]["net_worth"], 2) if len(hist) >= 2 else None,
+            "bills_next_7_days": round(ledger.upcoming(store, 7, today_)["total"], 2)}
+
+
 def build_tools(ctx, chat_id: int | None = None):
     store, today = ctx.store, ctx.today
 
@@ -355,6 +373,31 @@ def build_tools(ctx, chat_id: int | None = None):
     def t_paycheck(a):
         """The next paycheck: what is due before the one after it, what the piggy banks need from it, and what is left."""
         return paycheck_plan(store, today(), a.get("income"))
+
+    def t_week(a):
+        """The last 7 days against the 7 before: in, out, the biggest payments, new repeating payments and alerts, net worth change."""
+        return week_changes(store, today())
+
+    def t_shared(a):
+        """Shared spending between two people for a period: what was paid from joint accounts or tagged as shared, and who owes whom."""
+        start = str(a.get("start") or (today() - timedelta(days=30)).isoformat())[:10]
+        end = str(a.get("end") or today().isoformat())[:10]
+        tag = str(a.get("tag") or "shared").strip().lower()
+        mine_pct = float(a.get("my_share_pct") if a.get("my_share_pct") not in (None, "") else 50)
+        joint = {r["id"]: r for r in store.all("SELECT id, name, joint_with, my_share FROM accounts WHERE coalesce(joint_with,'') != ''")}
+        rows = store.all("SELECT t.date, t.name, t.payee, t.amount, t.account_id, t.tags, coalesce(c.kind,'expense') kind FROM transactions t LEFT JOIN categories c ON c.name=t.category "
+                         "WHERE t.date BETWEEN ? AND ? AND t.amount < 0 AND t.pending=0", (start, end))
+        on_joint = [r for r in rows if r["account_id"] in joint and r["kind"] != "transfer"]
+        tagged = [r for r in rows if r["account_id"] not in joint and tag in [x.strip().lower() for x in (r["tags"] or "").split(",")]]
+        joint_total = round(-sum(r["amount"] for r in on_joint), 2)
+        paid_by_me = round(-sum(r["amount"] for r in tagged), 2)
+        they_owe = round(paid_by_me * (100 - mine_pct) / 100, 2)
+        return {"from": start, "to": end, "my_share_pct": mine_pct,
+                "joint_accounts": [{"account": j["name"], "with": j["joint_with"], "my_share_pct": j["my_share"]} for j in joint.values()],
+                "spent_from_joint_accounts": joint_total, "joint_note": "money spent from a joint account is already shared: nobody owes anybody for it",
+                "paid_by_me_for_both": paid_by_me, "tagged": tag, "items": [{k: r[k] for k in ("date", "name", "payee", "amount")} for r in tagged][:40],
+                "they_owe_me": they_owe, "note": f"from your own accounts, payments tagged '{tag}' in Firefly III are split {mine_pct:g}/{100 - mine_pct:g}. "
+                                                 "What they paid for you is in their Firefly III, not here: ask them for their total and subtract."}
 
     def t_refresh(a):
         f = getattr(ctx, "refresh_now", None)
@@ -560,6 +603,9 @@ def build_tools(ctx, chat_id: int | None = None):
          S({"year": INT}), t_tax_year),
         ("paycheck_plan", "Split the next paycheck: the bills due before the following one, what each piggy bank needs from it, and what is left for spending. income: part of an income's name, to pick one.",
          S({"income": STR}), t_paycheck),
+        ("week_changes", "What changed this week: money in and out over the last 7 days against the 7 before, the biggest payments, new repeating payments, new alerts and the net worth change.", S({}), t_week),
+        ("shared_expenses", "Settle up shared costs for a period (default last 30 days): spending from joint accounts, payments from your own accounts tagged 'shared' (or another tag) in Firefly III, and what the other person owes at my_share_pct (default 50).",
+         S({"start": DATE, "end": DATE, "tag": STR, "my_share_pct": NUM}), t_shared),
         ("refresh_from_firefly", "Read Firefly III again now (the recent months), when the user says they just changed something there or the data looks out of date. At most once a minute.", S({}), t_refresh),
         ("web_search", "Search the web through the user's own SearXNG for current, outside money facts: interest and CD rates, tax brackets and limits, fees, rules, a company's prices. "
          "NEVER put personal details (names, balances, account numbers, employers) in the query. time_range: day, week, month or year for recent facts. Cite the sources you use.",
@@ -1028,7 +1074,8 @@ def register(app, ctx):
     @app.get("/api/agent/tools")
     def tool_list(request: Request):
         auth(request)
-        return [{"name": n, "description": d, "parameters": s} for n, d, s, _ in build_tools(ctx)]
+        return [{"name": n, "description": d.removeprefix("ASKS THE USER FIRST, nothing happens until they say yes. "), "parameters": s, "asks_first": n in agent_actions.ACTIONS,
+                 "over_mcp": n != "use_skill"} for n, d, s, _ in build_tools(ctx)]
 
     def pick_provider(pid):
         pid = pid or (int(cfg.get(store, "agent_provider")) if cfg.get(store, "agent_provider") else None)

@@ -82,6 +82,35 @@ Answer: a short table: bills (with dates), each piggy bank, spending money, and 
 Answer: the bills that went up, by how much a year, the going rate found (with source and date), and a short call script per bill
 (what you pay, what new customers pay, ask for the retention rate, ready to cancel). Offer to save it as a note.
 """),
+    "year_in_review": ("The year in money: what came in and went out, what was saved, how net worth moved, and the biggest changes.", """
+1. tax_year (the year, default last year): income and spending by category.
+2. net_worth_history (days 366 for a past year, or from 1 January): start, end, change, lowest and highest.
+3. cashflow (months 12): the months with the most and least left over; calculate the savings rate for the year (income - spending) / income.
+4. list_goals: what the piggy banks reached; list_subscriptions: the yearly cost of subscriptions (calculate).
+Answer: a short story of the year with the numbers (in, out, saved, net worth change), the 3 biggest categories, the best and worst month,
+and two things to try next year. Offer to save it as a note.
+"""),
+    "insurance_and_renewals": ("Yearly and twice-yearly bills coming up (insurance, registrations, memberships, domains) and whether they went up.", """
+1. list_subscriptions: the ones repeating yearly, every 6 months or every 2 years; upcoming_bills (days 120) for their dates.
+2. search_transactions for insurance, premium, registration, renewal, membership, license, domain over the last 2 years: renewals not tracked
+   yet, and last year's amount against this year's (calculate the change).
+3. savings_plan: the monthly amount to set aside so the next big renewal is covered by its date.
+Answer: a dated list of renewals with amounts and changes, the ones not tracked yet, and the monthly set-aside. Offer a "Renewals" piggy bank
+and to add untracked ones as subscriptions (both asked first). Shopping around near renewal often saves money: say so for the big ones.
+"""),
+    "joint_settle_up": ("Who owes whom for shared costs over a period.", """
+1. shared_expenses for the period (ask which period if unclear; default the last 30 days): spending from joint accounts (already shared), and
+   payments from your own accounts tagged "shared" in Firefly III, split at the agreed share (ask if it is not 50/50).
+2. Ask for the other person's total for what they paid for both (it is in their Firefly III, not here), then calculate the difference.
+Answer: one line ("Sam owes you 42.10"), then the list it came from. Suggest tagging shared payments "shared" in Firefly III so this stays one
+step. Offer to save the settle-up as a note.
+"""),
+    "weekly_brief": ("What changed this week, short enough to be read out (the Pondering Orb can read it every week).", """
+1. week_changes: money in and out against last week, the biggest payments, new repeating payments, alerts, net worth change, bills next week.
+2. get_alerts for anything critical.
+Answer in 4 to 6 short spoken sentences, numbers rounded sensibly (use calculate for any rounding or difference), the most important first,
+ending with the one thing to do this week. No tables or lists: it may be read aloud.
+"""),
     "spending_spike": ("Why spending was higher than usual, and what to do about it.", """
 1. cashflow (months 4): which month and by how much (calculate the difference against the average).
 2. spending_by_category for that month and the month before: the categories that grew most.

@@ -1294,6 +1294,9 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                                   "items": [{k: x[k] for k in ("name", "limit", "spent", "left")} for x in b["items"] if x["limit"]]} if b else None
             except Exception:
                 out["budgets"] = None
+        if "week" in share:                   # the weekly brief: totals and the biggest payments' names (no accounts, no transactions list)
+            w = agent.week_changes(db, t)
+            out["week"] = {k: w[k] for k in ("from", "to", "money_in", "money_out", "out_change", "net_worth_change", "bills_next_7_days")} | {"biggest": [{"name": b["name"], "amount": b["amount"]} for b in w["biggest"][:3]], "alerts": len(w["alerts"])}
         if "paycheck" in share:
             pc = agent.paycheck_plan(db, t)
             out["paycheck"] = None if pc.get("error") else {"date": pc["paycheck"]["date"], "amount": pc["paycheck"]["amount"], "bills": pc["bills_total"], "piggy_banks": pc["piggy_total"],
