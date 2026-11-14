@@ -32,6 +32,12 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Robinhood MCP**: Settings, Robinhood, Connect Robinhood: you sign in on Robinhood's own site (its official MCP server, `https://agent.robinhood.com/mcp/trading`, for the Agentic Trading account) and Coinpile gets permission to read. Coinpile asks only for reading and can only call read tools (portfolio and positions); there is no code path to place, cancel or change an order. Its value is recorded each time it is read, so Investments shows value by month from then on. Robinhood's own documentation of the server was not available to test against; the sign-in follows the MCP standard (OAuth 2.1 with PKCE and app registration), and a token can be pasted instead if needed.
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
+- **Joint accounts** (Settings, Sharing): a bank account you share with a linked person is in both your Firefly III (the Plaid connector's
+  "Joint with" sends it to both). One of you offers "my account X is joint with you, I count 50%"; the other picks their copy of it (Coinpile
+  suggests it by its last digits). From then on each side counts only its share in net worth and savings, each Coinpile sends the other the
+  balance its own Firefly III shows and what that person moved in from their own accounts (Firefly III transfers, or a bank-feed withdrawal and
+  deposit of the same amount within 3 days), and both see a settle-up line ("bob owes you 137.50") and whether the two Firefly III copies agree.
+  Either can stop it. Coinpile only: nothing is written to Firefly III, and every number comes from each person's own Firefly III.
 - **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
 
 ### Read from Firefly III, or kept in Coinpile

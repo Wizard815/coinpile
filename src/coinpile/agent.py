@@ -14,7 +14,7 @@ import httpx
 from fastapi import HTTPException, Request
 from pydantic import BaseModel
 
-from coinpile import agent_actions, agent_skills, crypto, feed, netguard, ledger, plan, recur, settings as cfg, sync
+from coinpile import agent_actions, agent_skills, crypto, links, feed, netguard, ledger, plan, recur, settings as cfg, sync
 
 PRESETS = [
     {"name": "Ollama (this machine)", "kind": "openai", "base_url": "http://host.docker.internal:11434/v1", "model": "llama3.1", "tools": True},
@@ -397,7 +397,8 @@ def build_tools(ctx, chat_id: int | None = None):
                 "spent_from_joint_accounts": joint_total, "joint_note": "money spent from a joint account is already shared: nobody owes anybody for it",
                 "paid_by_me_for_both": paid_by_me, "tagged": tag, "items": [{k: r[k] for k in ("date", "name", "payee", "amount")} for r in tagged][:40],
                 "they_owe_me": they_owe, "note": f"from your own accounts, payments tagged '{tag}' in Firefly III are split {mine_pct:g}/{100 - mine_pct:g}. "
-                                                 "What they paid for you is in their Firefly III, not here: ask them for their total and subtract."}
+                                                 "What they paid for you is in their Firefly III, not here: ask them for their total and subtract.",
+                "linked_joint_accounts": [{k: j.get(k) for k in ("peer", "account", "their_account", "my_share", "this_month", "balance_check")} for j in links.joint_list(store, today()) if j["state"] == "active"]}
 
     def t_refresh(a):
         f = getattr(ctx, "refresh_now", None)
