@@ -382,10 +382,10 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
         return paycheck_plan(store, today(), a.get("income"))
 
     def joint_for_agent(j: dict) -> dict:
-        out = {k: j.get(k) for k in ("peer", "account", "their_account", "my_share", "their_share")}
+        out = {k: j.get(k) for k in ("peer", "account", "my_share", "their_share")}
         tm = j.get("this_month") or {}
         if peer_data:
-            out.update({"this_month": tm, "balance_check": j.get("balance_check")})
+            out.update({"their_account": j.get("their_account"), "this_month": tm, "balance_check": j.get("balance_check")})
         else:
             out.update({"this_month": {"month": tm.get("month"), "you_put_in": tm.get("you_put_in")}, "their_numbers": WITHHELD})
         return out
