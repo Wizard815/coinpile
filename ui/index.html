@@ -756,7 +756,7 @@ async function viewNotes(root, rerender) {
 const PROMPTS = ["How am I doing on my piggy banks, and what should I put where this month?", "How did my net worth change this year, and what drove it?", "Am I on track with my Firefly III budgets this month?", "How much will I pay in bills over the next 60 days?", "If I spend $1,200 on the 15th, what is my lowest checking balance this month?", "Which payments look recurring but are not in my subscriptions?", "What did I spend on food and gas last month, and how does that compare to my budget?", "Which CD matures next and what will it be worth?", "Does anything on my calendar cost money in the next two weeks?"];
 const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n));
 async function viewAgent(root, rerender) {
-  const [pv, list, pigs, nt] = await Promise.all([api("/api/agent/providers"), api("/api/chats"), api("/api/piggy-banks").catch(() => []), api("/api/notes").catch(() => [])]);
+  const [pv, list, pigs, nt, skills] = await Promise.all([api("/api/agent/providers"), api("/api/chats"), api("/api/piggy-banks").catch(() => []), api("/api/notes").catch(() => []), api("/api/agent/skills").catch(() => [])]);
   if (S.chatId && !list.some((c) => c.id === S.chatId)) S.chatId = null;
   if (!S.chatId && list.length) S.chatId = list[0].id;
   const view = S.chatId ? await api("/api/chats/" + S.chatId) : null, chat = view?.chat;
@@ -799,7 +799,8 @@ async function viewAgent(root, rerender) {
           { class: "bare", "aria-label": "Link a goal or note", onchange: async (e) => { if (!e.target.value) return; const [k, i] = e.target.value.split(":"); try { await api(`/api/chats/${S.chatId}/links`, send("POST", { kind: k, ref_id: +i })); rerender(); } catch (err) { fail(err); } } })) : null,
       cur && !cur.local ? h("p", { class: "banner" }, cur.allow_cloud ? "This model runs in the cloud. Your numbers are sent to it when you ask." : "This model is in the cloud and is blocked until you tick 'allow cloud' in Settings > Models.") : null,
       waiting ? h("p", { class: "banner" }, `${waiting} change${waiting === 1 ? "" : "s"} waiting for your Yes or No below.`) : null,
-      log, h("div", { class: "chips", style: "margin:10px 0" }, PROMPTS.map((p) => h("button", { class: "chip", onclick: () => go(p) }, p))),
+      log, skills.length ? h("div", { class: "chips", style: "margin:10px 0 0" }, h("span", { class: "small muted" }, "Skills:"), skills.map((s) => h("button", { class: "chip", title: s.what, style: "border-color:var(--teal)", onclick: () => go(`Use the ${s.name} skill. ${s.what}`) }, s.name.replace(/_/g, " ")))) : null,
+      h("div", { class: "chips", style: "margin:10px 0" }, PROMPTS.map((p) => h("button", { class: "chip", onclick: () => go(p) }, p))),
       h("div", { class: "url" }, input, h("button", { class: "btn primary", onclick: () => go() }, "Send")))));
   log.scrollTop = log.scrollHeight;
 }
@@ -817,7 +818,10 @@ function bubble(m) {
   const asks = (m.trace || []).map((t) => t.result?.action_id && S.actionsById?.[t.result.action_id]).filter(Boolean);
   return h("div", { class: "bubble " + (m.role === "user" ? "me" : "agent") + (m.error ? " err" : "") + (m.compacted ? " old" : "") }, h("div", { style: "white-space:pre-wrap" }, m.content),
     asks.map((a) => actionCard(a, S.rerenderAgent || render)),
-    m.trace?.length ? h("details", { class: "trace" }, h("summary", {}, `Looked at: ${[...new Set(m.trace.map((t) => t.tool))].join(", ")}`), m.trace.map((t) => h("div", { class: "small mono muted" }, `${t.ok ? "✓" : "✗"} ${t.tool}(${JSON.stringify(t.args)})`))) : null);
+    (() => { const f = (m.trace || []).find((t) => t.tool === "(figures)"); if (!f || !f.args.figures) return null;
+      return f.args.unverified?.length ? h("div", { class: "small", style: "color:var(--brass);margin-top:4px", title: "These were not produced by a tool even after the agent was sent back to compute them. Check them yourself." }, "⚠ not from a tool: " + f.args.unverified.join(", "))
+        : h("div", { class: "small muted", style: "margin-top:4px" }, `✓ every figure (${f.args.figures}) from a tool`); })(),
+    (m.trace || []).filter((t) => t.tool !== "(figures)").length ? h("details", { class: "trace" }, h("summary", {}, `Looked at: ${[...new Set(m.trace.filter((t) => !t.tool.startsWith("(")).map((t) => t.tool))].join(", ")}`), m.trace.filter((t) => t.tool !== "(figures)").map((t) => h("div", { class: "small mono muted" }, `${t.ok ? "✓" : "✗"} ${t.tool}(${JSON.stringify(t.args)})`))) : null);
 }
 
 /* ================================ ROBINHOOD ================================ */

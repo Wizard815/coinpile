@@ -169,6 +169,19 @@ Groceries"), with **Yes, do it** and **No**. Only Yes runs it; your answer goes 
 
 Your Yes is the consent, so an approved change runs even with the matching "send to Firefly III" switch off. It cannot move money between banks.
 
+**The harness: every figure from a tool.** The agent does no arithmetic of its own. Before an answer reaches you, Coinpile checks every amount,
+decimal and percentage in it against the tool results and what you typed. A figure that came from nowhere sends the answer back once with
+"compute these with calculate"; whatever still is not from a tool is marked under the answer ("⚠ not from a tool: ..."), and a clean answer shows
+"✓ every figure from a tool". Tool arguments are checked before a tool runs (a wrong type or a missing value comes back as a plain error the model
+can fix), and calling the same thing twice returns "already done, use the result above" instead of looping.
+
+**The calculator** takes one expression or a list of labelled ones, percentages (5%), and money functions: pmt (loan payment), fv (savings
+growth), nper (months to pay off), compound, pct, round, sqrt and friends. Nothing but arithmetic can run in it.
+
+**Skills** are step-by-step playbooks the agent loads for a job and follows, each naming the tools to call and what to work out: monthly
+review, debt payoff (avalanche vs snowball), emergency fund, subscription audit, goal plan, big purchase, budget setup, idle cash and CDs
+(with current rates from the web), spending spike. They are buttons on the Agent page, and the agent picks one itself when a question fits.
+
 **Money maths and outside facts.** loan_payoff (months, interest, and what an extra payment saves), savings_plan (monthly amount for a date, or
 the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.
 With a **SearXNG** address in Settings, Agent models, Web search (or `SEARXNG_URL`), web_search looks up current rates, limits and rules and
