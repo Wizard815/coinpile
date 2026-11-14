@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS providers(
 CREATE TABLE IF NOT EXISTS proposals(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, every INTEGER, unit TEXT, account_id TEXT, reason TEXT, status TEXT DEFAULT 'pending');
 CREATE TABLE IF NOT EXISTS dismissed(key TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS chats(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, provider_id INTEGER, summary TEXT DEFAULT '', created TEXT, updated TEXT);
+CREATE TABLE IF NOT EXISTS joint_accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT UNIQUE, peer TEXT NOT NULL, peer_account TEXT, peer_name TEXT, peer_mask TEXT, my_share REAL NOT NULL DEFAULT 50, state TEXT NOT NULL, peer_stats TEXT, sent_sig TEXT, created TEXT);
 CREATE TABLE IF NOT EXISTS agent_actions(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, tool TEXT NOT NULL, args TEXT NOT NULL, summary TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'asked', result TEXT, created TEXT, decided TEXT);
 CREATE TABLE IF NOT EXISTS chat_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, trace TEXT DEFAULT '', compacted INTEGER DEFAULT 0, created TEXT);
 CREATE INDEX IF NOT EXISTS cm_chat ON chat_messages(chat_id, id);

@@ -1112,7 +1112,30 @@ async function tabGeneral(root, rerender) {
       h("div", { class: "chips", style: "margin-top:10px" }, h("button", { class: "btn sm", onclick: () => { for (const [id] of TABS) store.set("gb_layout_" + id, "[]"); toast("Every tab is back to the default layout"); } }, "Reset every tab's layout"))));
 }
 async function tabLinks(root, rerender) {
-  const [r, ppl, sh] = await Promise.all([api("/api/links").catch(() => ({ me: "", links: [], waiting: 0 })), api("/api/links/people").catch(() => ({ people: [] })), api("/api/sharing").catch(() => [])]);
+  const [r, ppl, sh, joints, accts] = await Promise.all([api("/api/links").catch(() => ({ me: "", links: [], waiting: 0 })), api("/api/links/people").catch(() => ({ people: [] })), api("/api/sharing").catch(() => []),
+    api("/api/joint").catch(() => []), api("/api/accounts").catch(() => [])]);
+  const active = r.links.filter((l) => l.status === "active").map((l) => l.peer);
+  const used = new Set(joints.map((j) => j.account?.id).filter(Boolean));
+  const jointCard = (j) => h("div", { class: "card" },
+    h("div", { class: "bar" }, h("b", {}, j.account ? `${j.account.name}` : j.their_account || "Joint account", h("span", { class: "pill t", style: "margin-left:6px" }, "joint with " + j.peer)),
+      h("span", { class: "small muted" }, j.state === "active" ? `you ${j.my_share}% · ${j.peer} ${j.their_share}%` : j.state === "offered" ? `waiting for ${j.peer}` : `${j.peer} asks`)),
+    j.state === "pending" ? h("div", { style: "display:grid;gap:8px;margin-top:8px" }, h("div", { class: "small" }, `${j.peer} says their account "${j.their_account}" is joint with you, and you count ${j.my_share}% of it. Which of your accounts is the same one?`),
+      select("jt-acc-" + j.id, "My account", (j.suggestions || []).map((a) => [a.id, `${a.institution} · ${a.name}${a.mask ? " ••" + a.mask : ""}`]), j.suggestions?.[0]?.id || ""),
+      h("div", { class: "chips" }, h("button", { class: "btn sm primary", onclick: async () => { try { await api(`/api/joint/${j.id}/accept`, send("POST", { account_id: val("jt-acc-" + j.id) })); toast("Linked"); rerender(); } catch (e) { fail(e); } } }, "Yes, it is this one"),
+        h("button", { class: "btn sm", onclick: async () => { await api(`/api/joint/${j.id}`, { method: "DELETE" }); rerender(); } }, "No"))) : null,
+    j.state === "active" ? h("div", { class: "small", style: "margin-top:6px;display:grid;gap:3px" },
+      j.problem ? h("div", { class: "neg" }, j.problem) : null,
+      j.this_month ? h("div", {}, `This month you put in ${usd(j.this_month.you_put_in)}`, j.this_month.they_put_in != null ? `, ${j.peer} ${usd(j.this_month.they_put_in)}. ` : ". ", j.this_month.settle ? h("b", {}, j.this_month.settle) : h("span", { class: "muted" }, `Waiting for ${j.peer}'s numbers.`)) : null,
+      j.balance_check ? h("div", { class: j.balance_check.in_step === false ? "neg" : "muted" }, j.balance_check.in_step === true ? `✓ Both Firefly III copies show ${usd(j.balance_check.yours)}` : j.balance_check.in_step === false ? `Balances differ: yours ${usd(j.balance_check.yours)}, ${j.peer}'s ${usd(j.balance_check.theirs)}. ${j.balance_check.note}` : j.balance_check.note) : null,
+      h("div", { class: "muted" }, `Your net worth and savings count your ${j.my_share}%. "Put in" is what each moved in from their own accounts, read from each person's Firefly III.`)) : null,
+    j.state !== "pending" ? h("div", { class: "chips", style: "margin-top:8px" }, h("button", { class: "btn sm danger", onclick: sure(null, "Sure? It stops being joint here and for " + j.peer, async () => { await api(`/api/joint/${j.id}`, { method: "DELETE" }); rerender(); }) }, j.state === "offered" ? "Cancel" : "Stop")) : null);
+  const jointPanel = h("div", { class: "panel" }, h("h3", {}, "Joint accounts"),
+    h("p", { class: "muted small" }, "A bank account you share with a linked person is in both your Firefly III (the Plaid connector's \"Joint with\" sends it to both). Tie your two copies together here: each of you counts only your share, sees what the other put in, and gets a settle-up line. Coinpile only: Firefly III is not changed."),
+    joints.length ? h("div", { class: "cards" }, joints.map(jointCard)) : h("p", { class: "muted small" }, "None yet."),
+    active.length ? h("form", { class: "row", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/joint", send("POST", { account_id: val("jt-mine"), peer: val("jt-peer"), my_share: num("jt-share") || 50 })); toast("Sent: they choose their copy of it"); rerender(); } catch (err) { fail(err); } } },
+      select("jt-mine", "My account", accts.filter((a) => ["cash", "credit", "loan"].includes(a.kind) && !used.has(a.id)).map((a) => [a.id, `${a.institution} · ${an(a)}`]), ""),
+      select("jt-peer", "Is joint with", active.map((x) => [x, x]), active[0]), field("jt-share", "My share %", 50, { type: "number", min: "1", max: "99", step: "1" }),
+      h("button", { class: "btn primary", type: "submit" }, "Link as joint")) : h("p", { class: "muted small" }, "Link with someone above first."));
   const lab = { active: "Linked", invited: "Waiting for them to accept", pending: "Wants to link with you" };
   const taken = new Set(r.links.map((l) => l.peer)), free = ppl.people.filter((x) => !taken.has(x));
   add(root, h("div", { class: "panel" }, h("h3", {}, "Family links"),
@@ -1126,6 +1149,7 @@ async function tabLinks(root, rerender) {
       select("lk-peer", "Link with", free.map((x) => [x, x]), free[0]), h("button", { class: "btn primary", type: "submit" }, "Ask to link"))
       : h("p", { class: "muted small", style: "margin-top:10px" }, ppl.people.length ? "You are linked or waiting with everyone on this server." : "No other people on this server yet. The server's admin adds people on the admin page."),
     h("p", { class: "muted small" }, `Others see you as ${r.me}.`)),
+  jointPanel,
   sh.map((p) => h("div", { class: "panel" }, h("h3", {}, "Sharing with " + p.peer),
     h("p", { class: "muted small" }, `${p.peer} sees only what is ticked here: the account's name and your part of its balance, kept up to date. Nothing else about it.`),
     p.accounts.length ? p.accounts.map((a) => h("label", { class: "check", style: "padding:3px 0" }, h("input", { type: "checkbox", checked: a.shared, onchange: async (e) => { try { await api(`/api/links/${p.peer}/shares`, send("PUT", { kind: "account", ref: a.id, on: e.target.checked })); toast(e.target.checked ? "Shared" : "No longer shared"); } catch (err) { e.target.checked = !e.target.checked; fail(err); } } }), `${a.institution} · ${a.name}`)) : h("p", { class: "muted small" }, "No accounts yet."),

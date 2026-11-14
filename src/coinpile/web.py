@@ -512,6 +512,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             try:
                 links.bump(db, me, gid) if edited and gid else links.push(db, me)
                 links.push_accounts(db)
+                links.push_joint(db)
                 link_flush()
             except Exception:
                 pass

@@ -99,7 +99,9 @@ Answer: a dated list of renewals with amounts and changes, the ones not tracked 
 and to add untracked ones as subscriptions (both asked first). Shopping around near renewal often saves money: say so for the big ones.
 """),
     "joint_settle_up": ("Who owes whom for shared costs over a period.", """
-1. shared_expenses for the period (ask which period if unclear; default the last 30 days): spending from joint accounts (already shared), and
+1. shared_expenses for the period; its linked_joint_accounts are joint accounts both people tied together in Coinpile: each shows what each
+   person moved in this month from their own accounts, the agreed split, and who owes whom for it ("settle"), plus whether both Firefly III copies
+   show the same balance. Then (ask which period if unclear; default the last 30 days): spending from joint accounts (already shared), and
    payments from your own accounts tagged "shared" in Firefly III, split at the agreed share (ask if it is not 50/50).
 2. Ask for the other person's total for what they paid for both (it is in their Firefly III, not here), then calculate the difference.
 Answer: one line ("Sam owes you 42.10"), then the list it came from. Suggest tagging shared payments "shared" in Firefly III so this stays one
