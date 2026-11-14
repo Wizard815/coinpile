@@ -118,6 +118,76 @@ def build_tools(ctx):
         rows = ledger.spending_by_category(store, a.get("start"), a.get("end"))
         return {"by_category": rows, "total_spent": round(sum(r["spent"] for r in rows), 2), "note": "transfers excluded"}
 
+    # ---- every page's data, from the same code the pages use (all of it read from Firefly III, apart from your own notes and CD details)
+    def hook(name):
+        return getattr(ctx, name, None)            # set by the web app: live reads from Firefly III and the Plaid connector
+
+    def t_ff_budgets(a):
+        f = hook("ff_budgets")
+        if not f:
+            return {"error": "Firefly III budgets are not available here"}
+        try:
+            return f(str(a.get("month") or today().isoformat()[:7]))
+        except Exception as e:
+            return {"error": f"could not read Firefly III budgets: {e}"[:200]}
+
+    def t_income(a):
+        return {"income": [{k: i[k] for k in ("name", "amount", "label", "next_due", "monthly", "account_id", "source", "active")} for i in plan.incomes(store, today())],
+                "monthly_total": round(sum(i["monthly"] for i in plan.incomes(store, today())), 2),
+                "steady_deposits_not_added_yet": [{k: s.get(k) for k in ("name", "amount", "label", "occurrences")} for s in plan.income_suggestions(store, today())][:6],
+                "note": "source firefly = a recurring deposit in Firefly III"}
+
+    def t_history(a):
+        days = max(7, min(int(a.get("days", 365) or 365), 3650))
+        pts = [p for p in ledger.net_worth_history(store) if p["date"] >= (today() - timedelta(days=days)).isoformat()]
+        if not pts:
+            return {"error": "no net worth history yet"}
+        step = max(1, len(pts) // 24)
+        sample = pts[::step] + ([pts[-1]] if (len(pts) - 1) % step else [])
+        lo, hi = min(pts, key=lambda p: p["net_worth"]), max(pts, key=lambda p: p["net_worth"])
+        return {"from": pts[0], "to": pts[-1], "change": round(pts[-1]["net_worth"] - pts[0]["net_worth"], 2), "lowest": lo, "highest": hi, "points": sample}
+
+    def t_account(a):
+        aid = str(a.get("account_id") or "")
+        acc = store.one("SELECT * FROM accounts WHERE id=?", (aid,))
+        if not acc:
+            return {"error": "no such account (ids come from list_accounts)"}
+        recent = ledger.query_transactions(store, account_id=aid, start=(today() - timedelta(days=30)).isoformat())
+        hist = store.all("SELECT ts, balance FROM snapshots WHERE account_id=? ORDER BY ts", (aid,))
+        step = max(1, len(hist) // 12)
+        place = next((p for p in plan.places(store, today()) if p.get("account_id") == aid), None)
+        return {"account": {k: acc.get(k) for k in ("id", "name", "nickname", "institution", "kind", "balance", "currency", "min_balance", "joint_with", "my_share")},
+                "as_savings": {k: place.get(k) for k in ("kind", "apy", "opened", "maturity", "term_months", "value_at_maturity", "days_to_maturity")} if place else None,
+                "last_30_days": {"in": recent["sum_in"], "out": recent["sum_out"], "count": recent["total"]},
+                "subscriptions_paid_from_it": [s["name"] for s in ledger.subscriptions(store, today()) if s["account_id"] == aid],
+                "balance_history": [{"date": r["ts"][:10], "balance": r["balance"]} for r in hist[::step]],
+                "alerts": [x["title"] for x in ledger.alerts(store, today()) if x.get("account_id") == aid]}
+
+    def t_investments(a):
+        f = hook("investments")
+        if not f:
+            return {"error": "investments are not available here"}
+        v = f()
+        return {"total": v["total"], "currency": v["currency"], "accounts": [{k: x.get(k) for k in ("id", "name", "institution", "balance", "category")} for x in v["accounts"]], "by_month": v.get("monthly")}
+
+    def t_piggy_history(a):
+        f = hook("piggy_events")
+        if not f:
+            return {"error": "piggy bank history is not available here"}
+        try:
+            return {"piggy_id": str(a.get("piggy_id")), "events": f(str(a.get("piggy_id") or ""))[:30], "note": "positive = put in, negative = taken out (from Firefly III)"}
+        except Exception as e:
+            return {"error": f"could not read it from Firefly III: {e}"[:200]}
+
+    def t_banks(a):
+        f = hook("banks")
+        if not f:
+            return {"error": "no Plaid connector is set up (Settings, Banks)"}
+        try:
+            return f()
+        except Exception as e:
+            return {"error": f"could not reach the Plaid connector: {e}"[:200]}
+
     def t_subs(a):
         return [{k: s[k] for k in ("id", "name", "amount", "label", "next_due", "monthly", "category", "payer", "payer_name", "account_name", "payment_method", "active")} for s in ledger.subscriptions(store, today())]
 
@@ -267,6 +337,13 @@ def build_tools(ctx):
         ("can_i_afford", "Check whether a purchase fits in FREE savings (not earmarked) and how long saving would take at the monthly plan's leftover.", S({"amount": NUM}, ["amount"]), t_afford),
         ("spending_forecast", "Projected spending for this month from past months (per category), what is spent so far, and how both compare to average monthly income.", S({"months": INT}), t_forecast),
         ("monthly_plan", "Monthly income vs bills, budgets and goal contributions, with what is left over. month is YYYY-MM (default this month).", S({"month": STR}), t_plan),
+        ("firefly_budgets", "The user's budgets in Firefly III for a month (YYYY-MM, default this month): limit, spent and left per budget. Firefly III budgets count transactions given that budget.", S({"month": STR}), t_ff_budgets),
+        ("list_income", "Income: Firefly III recurring deposits and income added from steady deposits, with the monthly total, plus steady deposits found but not added yet.", S({}), t_income),
+        ("net_worth_history", "Net worth over the last N days (default 365) from Firefly III balances: start, end, change, lowest, highest and about two dozen points.", S({"days": INT}), t_history),
+        ("account_details", "One account in depth (account_id from list_accounts): balance, CD details if it is one (APY, maturity, value then), last 30 days in/out, subscriptions paid from it, balance history, alerts.", S({"account_id": STR}, ["account_id"]), t_account),
+        ("list_investments", "Investment and retirement accounts tracked in Coinpile, their total, and value by month.", S({}), t_investments),
+        ("piggy_bank_history", "Money put into and taken out of one piggy bank (piggy_id from list_goals), read from Firefly III.", S({"piggy_id": STR}, ["piggy_id"]), t_piggy_history),
+        ("bank_connections", "The user's banks at the Plaid connector (plaid-proxy): which are linked, which need signing in again, and the Firefly III sending status.", S({}), t_banks),
         ("get_alerts", "Active alerts: overdrawn or low accounts, expected payments not seen, CDs maturing, bills due soon.", S({}), t_alerts),
         ("project_balance", "Estimate cash balance over the next N days from today's balances, upcoming bills and detected steady income. Excludes everyday spending.",
          S({"days": INT, "account_id": STR, "include_income": {"type": "boolean"}}), t_project),
@@ -289,9 +366,10 @@ def build_tools(ctx):
 def system_prompt(name: str, today: date) -> str:
     return (f"You are Coinpile, the finance assistant for {name}'s private bank dashboard. Today is {today.isoformat()}.\n"
             "You can only see data through the tools. Use them for every figure; never guess or invent numbers. Use calculate for arithmetic and show the working briefly.\n"
+            "Firefly III is the main record: accounts, transactions, bills, budgets, piggy banks (the user's goals) and income all come from it. Coinpile adds only notes, CD details and a per-category plan.\n"
             "Amounts are signed: positive is money in, negative is money out. Projections are estimates that leave out everyday spending, so say so.\n"
             "You cannot move money. You may save notes (with piggy_id when a note is about one goal). The user's goals are their Firefly III piggy banks (list_goals); you cannot change them. Add a subscription only when the user explicitly asks (add_subscription); otherwise propose it. "
-            "Savings model: savings sit in places (accounts, CDs); goals are what they are for; earmarked money is reserved for a goal and free money is the rest. Before saying someone can afford something, call can_i_afford. Be concise.")
+            "Savings model: savings sit in accounts (some marked as CDs); goals are piggy banks that set part of an account aside; free money is the rest. Before saying someone can afford something, call can_i_afford. Be concise.")
 
 
 def _call_openai(http, prov, key, system, messages, tools):
@@ -379,7 +457,7 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
     call = _call_anthropic if prov["kind"] == "anthropic" else _call_openai
     use_tools = bool(prov["tools"]) if use_tools is None else use_tools
     if not use_tools:        # models without function calling get a snapshot of the key facts instead
-        snap = {n: by_name[n]({}) for n in ("get_overview", "list_accounts", "list_subscriptions", "upcoming_bills", "savings_summary", "find_recurring_payments", "budget_status")}
+        snap = {n: by_name[n]({}) for n in ("get_overview", "list_accounts", "list_subscriptions", "upcoming_bills", "savings_summary", "find_recurring_payments", "budget_status", "list_goals", "list_income", "net_worth_history")}
         system += "\nYou have no tools. Here is a snapshot of the user's data as JSON:\n" + json.dumps(snap, default=str)[:14000]
     msgs, trace = [dict(m) for m in history], []
     with netguard.client(ctx.llm_transport, timeout=CHAT_TIMEOUT) as http:
