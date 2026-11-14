@@ -103,7 +103,9 @@ and to add untracked ones as subscriptions (both asked first). Shopping around n
    person moved in this month from their own accounts, the agreed split, and who owes whom for it ("settle"), plus whether both Firefly III copies
    show the same balance. Then (ask which period if unclear; default the last 30 days): spending from joint accounts (already shared), and
    payments from your own accounts tagged "shared" in Firefly III, split at the agreed share (ask if it is not 50/50).
-2. Ask for the other person's total for what they paid for both (it is in their Firefly III, not here), then calculate the difference.
+2. shared_with_me: what the other person shows you and the joint accounts' numbers on both sides (only with a model on your own machine; with a
+   cloud model their numbers are withheld: then ask the user for the other person's total). For payments outside joint accounts, ask for the other
+   person's total for what they paid for both (it is in their Firefly III, not here), then calculate the difference.
 Answer: one line ("Sam owes you 42.10"), then the list it came from. Suggest tagging shared payments "shared" in Firefly III so this stays one
 step. Offer to save the settle-up as a note.
 """),
