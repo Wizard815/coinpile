@@ -548,3 +548,21 @@ def spending_forecast(db, today: date, months: int = 6) -> dict:
             "categories": out,
             "history": [{"month": m, "spent": round(sum(by.get(c, {}).get(m, (0.0, 0))[0] for c in by), 2), "income": round(income_by_month.get(m, 0.0), 2)} for m in with_data],
             "note": "An estimate from your past months plus bills still due. One-off purchases are not predicted."}
+
+
+def net_worth_history(store) -> list[dict]:
+    """Daily net worth built from balance snapshots read from Firefly III (last known balance carried forward)."""
+    # Only accounts that count today (as net worth does): a removed account, or one left out of net worth in Firefly III, must not be carried forward.
+    accts = {a["id"]: a for a in store.all("SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0")}
+    sign = {"credit": -1, "loan": -1}
+    last, by_day = {}, {}
+    for r in store.all("SELECT * FROM snapshots ORDER BY ts"):
+        a = accts.get(r["account_id"])
+        if not a or r["balance"] is None:
+            continue
+        last[r["account_id"]] = r["balance"] * (100.0 if a["my_share"] is None else a["my_share"]) / 100 * sign.get(a["kind"], 1)
+        by_day[r["ts"][:10]] = round(sum(last.values()), 2)
+    # savings you keep by hand (a CD, a jar) count in net worth too: from the day they were opened, at their current value
+    manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
+    extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
+    return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]

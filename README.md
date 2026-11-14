@@ -141,6 +141,22 @@ Banks that sign you in on their own website (OAuth banks) return you to the addr
 
 Settings, Agent models: add a model. A local one (Ollama, LM Studio, llama.cpp: anything OpenAI-compatible) is the default and keeps your data at home. A cloud model must be allowed explicitly per model.
 
+The agent sees what every page shows, through the same code the pages use, so its numbers always match the screens. Firefly III is the main record:
+
+| Ask about | Tools |
+|---|---|
+| Accounts, one account in depth (CD details, last 30 days, balance history) | list_accounts, account_details |
+| Transactions and spending | search_transactions, spending_by_category, spending_forecast |
+| Bills, subscriptions, missing payments | list_subscriptions, upcoming_bills, find_recurring_payments, get_alerts |
+| Budgets | firefly_budgets (Firefly III's), budget_status and monthly_plan (Coinpile's per-category plan) |
+| Income | list_income (Firefly III recurring deposits and steady deposits) |
+| Goals (piggy banks) and your notes about them | list_goals, piggy_bank_history, read_note, write_note |
+| Savings, CDs, affordability | savings_summary, maturity_outlook, can_i_afford, project_balance |
+| Net worth, investments, banks | net_worth_history, list_investments, bank_connections (the Plaid connector) |
+
+It cannot move money or change Firefly III. It can write notes (on a piggy bank when the note is about one) and add a subscription only when you ask.
+A model without tool calling gets a summary of the same data instead. "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
+
 ## Settings
 
 | Variable | |

@@ -622,9 +622,14 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         @app.get("/api/investments")
         def investments_view():
+            return investments_data()
+
+        def investments_data():
             accts = investments.accounts(db)
             return {"accounts": accts, "total": round(sum(a["balance"] for a in accts), 2), "currency": cfg.get(db, "currency") or "USD",
                     "candidates": investments.candidates(db), "providers": investments.providers(rh), "monthly": investments.monthly(db, [a["id"] for a in accts])}
+
+        ctx.investments = investments_data
 
         class TrackIn(BaseModel):
             investment: bool
@@ -909,22 +914,26 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             except firefly.FireflyError:
                 pass
 
-        @app.get("/api/firefly/budgets")
-        async def ff_budgets(month: str | None = None):
-            """Firefly III's own budgets for a month (limits and spending), read live. Coinpile's per-category plan stays separate."""
-            m = month or today().isoformat()[:7]
+        def budgets_for(m: str) -> dict:
             try:
                 first = date.fromisoformat(m + "-01")
             except ValueError:
                 raise HTTPException(422, "month is YYYY-MM")
             last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
-            try:
-                rows = await run_in_threadpool(firefly.budgets, ff_for(uid), first, last)
-            except firefly.FireflyError as e:
-                raise HTTPException(502, str(e))
+            rows = firefly.budgets(ff_for(uid), first, last)
             with_limit = [r for r in rows if r["limit"]]
             return {"month": m, "items": rows, "limit": round(sum(r["limit"] for r in with_limit), 2), "spent": round(sum(r["spent"] for r in rows), 2),
                     "left": round(sum(r["left"] for r in with_limit), 2), "link": f"{ff_public}/budgets" if ff_public else None}
+
+        ctx.ff_budgets = budgets_for
+
+        @app.get("/api/firefly/budgets")
+        async def ff_budgets(month: str | None = None):
+            """Firefly III's own budgets for a month (limits and spending), read live. Coinpile's per-category plan stays separate."""
+            try:
+                return await run_in_threadpool(budgets_for, month or today().isoformat()[:7])
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
 
         @app.get("/api/piggy-banks/overview")
         def piggy_overview():
@@ -943,15 +952,10 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     "still_needed": round(sum(p["left"] or 0 for p in act), 2),
                     "accounts": [{"id": a["id"], "name": a["name"], "institution": a["institution"]} for a in db.all("SELECT id, name, institution FROM accounts WHERE kind='cash' AND id LIKE 'ff:%' ORDER BY name")]}
 
-        @app.get("/api/piggy-banks/{pid}/events")
-        async def piggy_events(pid: str):
-            """The piggy bank's history (money put in and taken out), straight from Firefly III."""
+        def piggy_events_for(pid: str) -> list[dict]:
             if not pid.isdigit():
                 raise HTTPException(404, "no such piggy bank")
-            try:
-                d = await run_in_threadpool(lambda: ff_for(uid).get(f"/piggy-banks/{pid}/events", limit=50))
-            except firefly.FireflyError as e:
-                raise HTTPException(502, str(e))
+            d = ff_for(uid).get(f"/piggy-banks/{pid}/events", limit=50)
             out = []
             for e in d.get("data") or []:
                 at = e.get("attributes") or {}
@@ -961,6 +965,16 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     amt = 0.0
                 out.append({"date": str(at.get("created_at") or "")[:10], "amount": amt, "account": at.get("account_name") or ""})
             return out
+
+        ctx.piggy_events = piggy_events_for
+
+        @app.get("/api/piggy-banks/{pid}/events")
+        async def piggy_events(pid: str):
+            """The piggy bank's history (money put in and taken out), straight from Firefly III."""
+            try:
+                return await run_in_threadpool(piggy_events_for, pid)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
 
         @app.post("/api/piggy-banks")
         async def piggy_new(b: PiggyIn):
@@ -1131,6 +1145,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     return fn()
             except conn.ConnectorError as e:
                 raise HTTPException(502, str(e))
+
+        ctx.banks = lambda: conn_call(lambda: connector().banks())
 
         @app.get("/api/banks")
         async def banks():

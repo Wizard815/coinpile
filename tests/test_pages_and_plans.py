@@ -234,3 +234,30 @@ def test_piggy_banks_are_the_goals_with_their_notes_for_the_agent(tmp_path):
     assert "add_goal" not in {t["name"] for t in c.get("/api/agent/tools").json()}                         # goals are made in Firefly III now
     chat = c.post("/api/chats", json={"title": "About Vacation", "links": [{"kind": "piggy", "ref_id": 1}]}).json()
     assert chat["links"] == [{"kind": "piggy", "ref_id": 1, "title": "Vacation"}]
+
+
+def test_the_agent_reaches_every_page_from_firefly(tmp_path):
+    from devtools.fake_llm import openai_server
+    ff = world()
+    ff.data["1"]["budgets"] = [{"type": "budgets", "id": "1", "attributes": {"name": "Groceries", "active": True, "spent": [{"sum": "-82.40"}]}}]
+    ff.data["1"]["budget-limits"] = [{"type": "budget_limits", "id": "9", "attributes": {"budget_id": "1", "amount": "400"}}]
+    ff.data["1"]["recurrences"] = [rec(2, "deposit", "ACME paycheck", 2500, "2026-10-01", ["2026-12-01"], unit="monthly", src="90", dst="1")]
+    script = [[("firefly_budgets", {"month": "2026-11"}), ("list_income", {}), ("net_worth_history", {"days": 90}), ("account_details", {"account_id": "ff:3"}),
+               ("list_investments", {}), ("piggy_bank_history", {"piggy_id": "1"}), ("bank_connections", {})]]
+    log = []
+    a = __import__("coinpile.web", fromlist=["x"]).create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=ff.transport(), llm_transport=openai_server(script, log), today=lambda: TODAY)
+    c = signed_in(a)
+    c.put("/api/accounts/ff:3", json={"savings_kind": "cd", "apy": 4, "maturity": "2027-01-01"})
+    c.post("/api/agent/providers", json={"name": "Local", "kind": "openai", "base_url": "http://localhost:11434/v1", "model": "llama3", "tools": True})
+    out = c.post("/api/agent/chat", json={"messages": [{"role": "user", "content": "everything"}]}).json()
+    got = {t["tool"]: json.loads(m["content"]) for t, m in zip(out["trace"], [m for m in log[1]["body"]["messages"] if m["role"] == "tool"])}
+    assert got["firefly_budgets"]["items"][0]["left"] == 317.6
+    assert got["list_income"]["income"][0]["name"] == "ACME paycheck" and got["list_income"]["income"][0]["source"] == "firefly"
+    assert "change" in got["net_worth_history"] or "error" in got["net_worth_history"]
+    acct = got["account_details"]
+    assert acct["account"]["id"] == "ff:3" and acct["as_savings"]["kind"] == "cd" and acct["as_savings"]["apy"] == 4
+    assert "total" in got["list_investments"]
+    assert "events" in got["piggy_bank_history"]
+    assert "Plaid connector" in got["bank_connections"]["error"]                                    # not set up in this test: said plainly
+    system = log[0]["body"]["messages"][0]["content"]
+    assert "Firefly III is the main record" in system
