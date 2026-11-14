@@ -30,7 +30,7 @@ from coinpile.security import Throttle, check_password_strength, hash_password, 
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"searx_url", "share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
 
 
@@ -263,7 +263,7 @@ def same_origin(scope, public_url: str = "") -> bool:
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
                caldav_transport=None, notify_transport=None, today=None, background: bool = False, client_id: str | None = None,
-               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None):
+               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None, search_transport=None):
     ff_url = (firefly_url or os.environ.get("FIREFLY_URL", "")).rstrip("/")
     ff_public = (public_firefly_url or os.environ.get("FIREFLY_PUBLIC_URL", "") or ff_url).rstrip("/")
     client_id = client_id or os.environ.get("FIREFLY_CLIENT_ID", "")
@@ -526,6 +526,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
                                  link_flush=link_flush, link_people=users.handles)
         ctx.llm_transport = llm_transport
+        ctx.search_transport = search_transport
+        ctx.searx_url = lambda: cfg.get(db, "searx_url") or os.environ.get("SEARXNG_URL", "")
         outbound = netguard.Slots()                 # this person's share of the worker threads for calls to servers they typed in
         ctx.outbound = outbound
 
@@ -908,9 +910,9 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 raise HTTPException(409, f"this piggy bank follows your goal \"{goal_piggies()[pid]}\": change the goal on the Savings page instead")
             return p
 
-        async def piggy_reread():
+        def piggy_reread_sync():
             try:
-                await run_in_threadpool(firefly.sync_piggies, db, ff_for(uid))
+                firefly.sync_piggies(db, ff_for(uid))
             except firefly.FireflyError:
                 pass
 
@@ -976,9 +978,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             except firefly.FireflyError as e:
                 raise HTTPException(502, str(e))
 
-        @app.post("/api/piggy-banks")
-        async def piggy_new(b: PiggyIn):
-            piggy_changes_on()
+        def piggy_new_do(b: PiggyIn) -> dict:
             if not (b.name or "").strip():
                 raise HTTPException(422, "a name is required")
             if (b.target is not None and b.target < 0) or b.start_amount < 0:
@@ -993,16 +993,19 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 body["target_date"] = day(b.target_date)
             if b.notes:
                 body["notes"] = b.notes[:2000]
-            try:
-                d = await run_in_threadpool(ff_for(uid).send, "POST", "/piggy-banks", body)
-            except firefly.FireflyError as e:
-                raise HTTPException(502, str(e))
-            await piggy_reread()
+            d = ff_for(uid).send("POST", "/piggy-banks", body)
+            piggy_reread_sync()
             return {"id": str((d.get("data") or {}).get("id") or "")}
 
-        @app.put("/api/piggy-banks/{pid}")
-        async def piggy_edit(pid: str, b: PiggyIn):
+        @app.post("/api/piggy-banks")
+        async def piggy_new(b: PiggyIn):
             piggy_changes_on()
+            try:
+                return await run_in_threadpool(piggy_new_do, b)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        def piggy_edit_do(pid: str, b: PiggyIn) -> dict:
             piggy_or_404(pid)
             body = {}
             if b.name is not None:
@@ -1019,17 +1022,20 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 body["notes"] = b.notes[:2000]
             if not body:
                 raise HTTPException(422, "nothing to change")
-            try:
-                await run_in_threadpool(ff_for(uid).send, "PUT", f"/piggy-banks/{pid}", body)
-            except firefly.FireflyError as e:
-                raise HTTPException(502, str(e))
-            await piggy_reread()
+            ff_for(uid).send("PUT", f"/piggy-banks/{pid}", body)
+            piggy_reread_sync()
             return {"changed": pid}
 
-        @app.post("/api/piggy-banks/{pid}/money")
-        async def piggy_money(pid: str, b: MoneyIn):
-            """Put money in or take it out. Some Firefly III versions (6.7 among them) fail on this through their API; then say so and point to Firefly III."""
+        @app.put("/api/piggy-banks/{pid}")
+        async def piggy_edit(pid: str, b: PiggyIn):
             piggy_changes_on()
+            try:
+                return await run_in_threadpool(piggy_edit_do, pid, b)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        def piggy_money_do(pid: str, b: MoneyIn) -> dict:
+            """Put money in or take it out. Some Firefly III versions (6.7 among them) fail on this through their API; then say so and point to Firefly III."""
             p = piggy_or_404(pid)
             acct = ff_asset(b.account_id)
             if not b.amount:
@@ -1044,13 +1050,23 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             if b.account_id not in now:
                 accts.append({"account_id": acct, "current_amount": f"{new:.2f}"})
             try:
-                await run_in_threadpool(ff_for(uid).send, "PUT", f"/piggy-banks/{pid}", {"accounts": accts})
+                ff_for(uid).send("PUT", f"/piggy-banks/{pid}", {"accounts": accts})
             except firefly.FireflyError as e:
                 if "500" in str(e):
                     raise HTTPException(502, "your Firefly III could not change the amount through its API (a bug in some Firefly III versions). Add or take out the money in Firefly III itself: use the Firefly III link on this piggy bank")
                 raise HTTPException(502, str(e))
-            await piggy_reread()
+            piggy_reread_sync()
             return {"current": round(sum(now.values()) + b.amount, 2)}
+
+        @app.post("/api/piggy-banks/{pid}/money")
+        async def piggy_money(pid: str, b: MoneyIn):
+            piggy_changes_on()
+            return await run_in_threadpool(piggy_money_do, pid, b)
+
+        # after the person says yes to the agent (that yes is the consent, so the switch is not asked)
+        ctx.piggy_new = lambda a: piggy_new_do(PiggyIn(**a))
+        ctx.piggy_edit = lambda pid, a: piggy_edit_do(pid, PiggyIn(**a))
+        ctx.piggy_money = lambda pid, aid, amount: piggy_money_do(pid, MoneyIn(account_id=aid, amount=amount))
 
         @app.get("/api/settings")
         def settings_get():

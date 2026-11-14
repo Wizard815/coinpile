@@ -87,6 +87,19 @@ class FakeFirefly:
             else:
                 row["attributes"].update({**b, "amount_avg": b["amount_min"], "date": b["date"] + "T00:00:00+00:00"})
             return httpx.Response(200, json={"data": row})
+        if p == "/budgets" and method == "POST":
+            row = {"type": "budgets", "id": self._next(), "attributes": {"name": b["name"], "active": True, "spent": []}}
+            d.setdefault("budgets", []).append(row)
+            return httpx.Response(200, json={"data": row})
+        if parts[0] == "budgets" and len(parts) >= 3 and parts[2] == "limits":
+            lims = d.setdefault("budget-limits", [])
+            if method == "POST":
+                row = {"type": "budget_limits", "id": self._next(), "attributes": {"budget_id": parts[1], "amount": b["amount"], "start": b["start"], "end": b["end"]}}
+                lims.append(row)
+                return httpx.Response(200, json={"data": row})
+            row = next(x for x in lims if x["id"] == parts[3])
+            row["attributes"].update({"amount": b["amount"]})
+            return httpx.Response(200, json={"data": row})
         if p == "/accounts" and method == "POST":
             if any(a["attributes"]["name"] == b["name"] for a in d["accounts"]):
                 return httpx.Response(422, json={"message": "x", "errors": {"name": ["This account name is already in use."]}})
@@ -125,6 +138,8 @@ class FakeFirefly:
                 rows = d.setdefault("rule_groups", [])
             elif p == "/piggy-banks":
                 rows = d["piggies"]
+            elif p.startswith("/budgets/") and p.endswith("/limits"):
+                rows = [x for x in d.get("budget-limits", []) if x["attributes"]["budget_id"] == p.split("/")[2] and x["attributes"].get("start", "")[:10] >= q.get("start", "")[:10]]
             elif p in ("/recurrences", "/budgets", "/budget-limits"):
                 rows = d.get(p.strip("/"), [])
             elif p.startswith("/piggy-banks/") and p.endswith("/events"):

@@ -28,7 +28,7 @@ SPEC = {
     "ff_send_goals": ("onoff", False, ""), "ff_send_piggies": ("onoff", False, ""), "ff_send_bills": ("onoff", False, ""), "ff_send_categories": ("onoff", False, ""), "ff_send_accounts": ("onoff", False, ""), "ff_last_refresh": ("str", False, ""), "ff_last_full": ("str", False, ""), "ff_last_error": ("str", False, ""),
     "currency": ("str", False, ""),            # the primary currency of the person's Firefly III (every total is in it), as last read
     # Plaid cost guard. Rates are YOURS to enter: Plaid shows them in its dashboard, not in any public price list.
-    "plaid_rate_item_month": ("num", False, ""), "plaid_use_recurring": ("onoff", False, ""), "plaid_min_minutes": ("int", False, ""), "plaid_budget_month": ("num", False, ""), "plaid_daily_cap": ("int", False, ""), "agent_provider": ("int", False, ""), "alert_missed": ("onoff", False, ""), "sync_minutes": ("int", False, ""), "alert_maturity_days": ("int", False, ""), "notify_url": ("str", True, ""), "notify_min_severity": ("sev", False, ""), "notify_url_cds": ("str", True, ""), "notify_min_severity_cds": ("sev", False, ""), "alert_untracked": ("onoff", False, ""),
+    "plaid_rate_item_month": ("num", False, ""), "plaid_use_recurring": ("onoff", False, ""), "plaid_min_minutes": ("int", False, ""), "plaid_budget_month": ("num", False, ""), "plaid_daily_cap": ("int", False, ""), "agent_provider": ("int", False, ""), "searx_url": ("str", False, ""), "alert_missed": ("onoff", False, ""), "sync_minutes": ("int", False, ""), "alert_maturity_days": ("int", False, ""), "notify_url": ("str", True, ""), "notify_min_severity": ("sev", False, ""), "notify_url_cds": ("str", True, ""), "notify_min_severity_cds": ("sev", False, ""), "alert_untracked": ("onoff", False, ""),
 }
 
 

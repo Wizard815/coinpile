@@ -230,7 +230,9 @@ def test_piggy_banks_are_the_goals_with_their_notes_for_the_agent(tmp_path):
     got = {t["tool"]: json.loads(m["content"]) for t, m in zip(out["trace"], [m for m in log[1]["body"]["messages"] if m["role"] == "tool"])}
     g = got["list_goals"]["goals_are_piggy_banks"][0]
     assert g["name"] == "Vacation" and g["still_needed"] == 1600 and [x["title"] for x in g["my_notes"]] == ["Where to go"]
-    assert got["write_note"]["piggy_id"] == "1" and {x["title"] for x in c.get("/api/piggy-banks/overview").json()["items"][0]["my_notes"]} == {"Where to go", "Vacation plan"}
+    assert "Vacation" in out["actions"][0]["summary"]
+    c.post(f"/api/agent/actions/{got['write_note']['action_id']}/yes")
+    assert {x["title"] for x in c.get("/api/piggy-banks/overview").json()["items"][0]["my_notes"]} == {"Where to go", "Vacation plan"}
     assert "add_goal" not in {t["name"] for t in c.get("/api/agent/tools").json()}                         # goals are made in Firefly III now
     chat = c.post("/api/chats", json={"title": "About Vacation", "links": [{"kind": "piggy", "ref_id": 1}]}).json()
     assert chat["links"] == [{"kind": "piggy", "ref_id": 1, "title": "Vacation"}]

@@ -745,7 +745,9 @@ async function viewNotes(root, rerender) {
     h("div", { class: "panel" }, h("h3", {}, "Ask the agent to write a note"), h("p", { class: "muted small" }, "It reads your accounts, bills, spending, budgets and savings, does the math, and saves the result as a note marked as written by the agent."),
       h("div", { class: "url" }, ask, h("button", { class: "btn primary", onclick: async (ev) => {
         if (!val("nt-ask")) return; ev.target.disabled = true; ev.target.textContent = "Thinking…";
-        try { const r = await api("/api/agent/chat", send("POST", { provider_id: S.provider, messages: [{ role: "user", content: `Look at my real data with your tools (monthly_plan, list_goals, savings_summary), then save a note (use write_note) for this request: ${val("nt-ask")}. Keep the note practical and show the numbers. Use - [ ] for steps to do.` }] })); toast(r.reply.slice(0, 120) || "Done"); rerender(); } catch (err) { fail(err); ev.target.disabled = false; ev.target.textContent = "Write it"; }
+        try { const r = await api("/api/agent/chat", send("POST", { provider_id: S.provider, messages: [{ role: "user", content: `Look at my real data with your tools (monthly_plan, list_goals, savings_summary), then save a note (use write_note) for this request: ${val("nt-ask")}. Keep the note practical and show the numbers. Use - [ ] for steps to do.` }] }));
+          for (const a of r.actions || []) { const yes = window.confirm("The agent asks:\n\n" + a.summary + "\n\nOK = yes, Cancel = no"); await api(`/api/agent/actions/${a.id}/${yes ? "yes" : "no"}`, { method: "POST" }); }
+          toast((r.actions || []).length ? "Done" : (r.reply.slice(0, 120) || "Done")); rerender(); } catch (err) { fail(err); ev.target.disabled = false; ev.target.textContent = "Write it"; }
       } }, "Write it"))),
     h("div", { class: "split" }, list, editor));
 }
@@ -754,17 +756,19 @@ async function viewNotes(root, rerender) {
 const PROMPTS = ["How am I doing on my piggy banks, and what should I put where this month?", "How did my net worth change this year, and what drove it?", "Am I on track with my Firefly III budgets this month?", "How much will I pay in bills over the next 60 days?", "If I spend $1,200 on the 15th, what is my lowest checking balance this month?", "Which payments look recurring but are not in my subscriptions?", "What did I spend on food and gas last month, and how does that compare to my budget?", "Which CD matures next and what will it be worth?", "Does anything on my calendar cost money in the next two weeks?"];
 const kfmt = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + "k" : String(n));
 async function viewAgent(root, rerender) {
-  const [pv, list, gl, nt] = await Promise.all([api("/api/agent/providers"), api("/api/chats"), api("/api/goals").catch(() => ({ items: [] })), api("/api/notes").catch(() => [])]);
+  const [pv, list, pigs, nt] = await Promise.all([api("/api/agent/providers"), api("/api/chats"), api("/api/piggy-banks").catch(() => []), api("/api/notes").catch(() => [])]);
   if (S.chatId && !list.some((c) => c.id === S.chatId)) S.chatId = null;
   if (!S.chatId && list.length) S.chatId = list[0].id;
   const view = S.chatId ? await api("/api/chats/" + S.chatId) : null, chat = view?.chat;
+  S.actionsById = Object.fromEntries((view?.actions || []).map((a) => [a.id, a])); S.rerenderAgent = rerender;
+  const waiting = (view?.actions || []).filter((a) => a.status === "asked").length;
   const cur = pv.items.find((p) => p.id === S.provider) || pv.items.find((p) => p.id === chat?.provider_id) || pv.items.find((p) => String(p.id) === String(pv.default)) || pv.items[0];
   if (cur) S.provider = cur.id;
   const toolsOn = S.tools == null ? !!cur?.tools : S.tools;
   const u = view?.usage;
   const log = h("div", { class: "chat" });
   const msgs = view?.messages || [];
-  if (!msgs.length) add(log, h("p", { class: "muted" }, "Ask about your payments, balances or plans. It looks things up with tools, does the math exactly, and can save notes or add a subscription when you ask. It cannot move money."));
+  if (!msgs.length) add(log, h("p", { class: "muted" }, "Ask about your payments, balances, debts or plans. It reads your Firefly III data, does the maths exactly and can look up current rates on the web. Any change (a transaction, a category, a piggy bank, a budget, a note) is asked first: nothing happens until you press Yes. It cannot move money."));
   let divided = false;
   for (const m of msgs) {
     if (!m.compacted && msgs.some((x) => x.compacted) && !divided) { divided = true; add(log, h("details", { class: "trace", style: "text-align:center" }, h("summary", {}, "Earlier messages were compacted into a summary"), h("div", { class: "small muted", style: "white-space:pre-wrap;text-align:left" }, chat.summary))); }
@@ -791,19 +795,28 @@ async function viewAgent(root, rerender) {
       u ? h("div", { class: "ctx" }, bar(u.pct, u.pct > 0.75 ? "var(--red)" : u.pct > 0.5 ? "var(--brass)" : "var(--teal)"), h("span", { class: "small muted" }, `context ${kfmt(u.used)} / ${kfmt(u.limit)}`),
         h("button", { class: "btn sm", disabled: msgs.filter((m) => !m.compacted).length < 3, onclick: async () => { try { const r = await api(`/api/chats/${S.chatId}/compact`, { method: "POST" }); toast(r.compacted ? "Compacted" : "Nothing to compact yet"); rerender(); } catch (e) { fail(e); } } }, "Compact")) : null,
       view ? h("div", { class: "chips", style: "margin:6px 0" }, h("span", { class: "small muted" }, "Linked:"), (view.links || []).map((l) => h("span", { class: "pill b" }, `${l.kind}: ${l.title}`, h("button", { class: "x", "aria-label": "Unlink " + l.title, onclick: async () => { await api(`/api/chats/${S.chatId}/links/${l.kind}/${l.ref_id}`, { method: "DELETE" }); rerender(); } }, "×"))),
-        select("lk-add", "", [["", "+ Link a goal or note…"], ...gl.items.filter((g) => g.status === "active" && !(view.links || []).some((l) => l.kind === "goal" && l.ref_id === g.id)).map((g) => [`goal:${g.id}`, `Goal: ${g.name}`]), ...nt.filter((n) => !(view.links || []).some((l) => l.kind === "note" && l.ref_id === n.id)).map((n) => [`note:${n.id}`, `Note: ${n.title}`])], "",
+        select("lk-add", "", [["", "+ Link a goal or note…"], ...pigs.filter((g) => g.active && !(view.links || []).some((l) => l.kind === "piggy" && String(l.ref_id) === g.id)).map((g) => [`piggy:${g.id}`, `Goal: ${g.name}`]), ...nt.filter((n) => !(view.links || []).some((l) => l.kind === "note" && l.ref_id === n.id)).map((n) => [`note:${n.id}`, `Note: ${n.title}`])], "",
           { class: "bare", "aria-label": "Link a goal or note", onchange: async (e) => { if (!e.target.value) return; const [k, i] = e.target.value.split(":"); try { await api(`/api/chats/${S.chatId}/links`, send("POST", { kind: k, ref_id: +i })); rerender(); } catch (err) { fail(err); } } })) : null,
       cur && !cur.local ? h("p", { class: "banner" }, cur.allow_cloud ? "This model runs in the cloud. Your numbers are sent to it when you ask." : "This model is in the cloud and is blocked until you tick 'allow cloud' in Settings > Models.") : null,
+      waiting ? h("p", { class: "banner" }, `${waiting} change${waiting === 1 ? "" : "s"} waiting for your Yes or No below.`) : null,
       log, h("div", { class: "chips", style: "margin:10px 0" }, PROMPTS.map((p) => h("button", { class: "chip", onclick: () => go(p) }, p))),
       h("div", { class: "url" }, input, h("button", { class: "btn primary", onclick: () => go() }, "Send")))));
   log.scrollTop = log.scrollHeight;
 }
+/* A change the agent asked for: exactly what will happen, where, and Yes / No. Nothing happens before Yes. */
+function actionCard(a, after) {
+  const where = a.target === "firefly" ? h("span", { class: "pill b", title: "This changes your Firefly III" }, "Firefly III") : h("span", { class: "pill t", title: "Kept in Coinpile only" }, "Coinpile");
+  const state = { asked: null, running: "working…", done: "✓ done", declined: "✗ you said no", failed: "✗ failed" }[a.status];
+  const decide = (yes) => async (e) => { e.target.closest(".action").querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try { const r = await api(`/api/agent/actions/${a.id}/${yes ? "yes" : "no"}`, { method: "POST" }); if (r.status === "failed") toast("It did not work: " + (r.result?.error || "")); after(); } catch (err) { fail(err); after(); } };
+  return h("div", { class: "action added", style: "display:grid;gap:6px;border-left:3px solid " + (a.status === "asked" ? "var(--brass)" : a.status === "done" ? "var(--teal)" : "var(--line)") },
+    h("div", {}, h("b", {}, a.status === "asked" ? "The agent asks: " : ""), a.summary, " ", where),
+    a.status === "asked" ? h("div", { class: "chips" }, h("button", { class: "btn sm primary", onclick: decide(true) }, "Yes, do it"), h("button", { class: "btn sm", onclick: decide(false) }, "No")) : h("span", { class: "small " + (a.status === "done" ? "pos" : "muted") }, state, a.status === "failed" && a.result?.error ? ": " + a.result.error : ""));
+}
 function bubble(m) {
-  const adds = (m.trace || []).filter((t) => t.tool === "add_subscription" && t.result?.added);
+  const asks = (m.trace || []).map((t) => t.result?.action_id && S.actionsById?.[t.result.action_id]).filter(Boolean);
   return h("div", { class: "bubble " + (m.role === "user" ? "me" : "agent") + (m.error ? " err" : "") + (m.compacted ? " old" : "") }, h("div", { style: "white-space:pre-wrap" }, m.content),
-    adds.map((t) => h("div", { class: "added" }, `Added subscription: ${t.result.name} ${usd(t.result.amount)} ${t.result.repeats}`, " ", h("button", { class: "btn sm", onclick: async (e) => { try { await api("/api/subscriptions/" + t.result.id, { method: "DELETE" }); e.target.replaceWith("Undone"); } catch (err) { fail(err); } } }, "Undo"))),
-    (m.trace || []).filter((t) => t.tool === "add_goal" && t.result?.added).map((t) => h("div", { class: "added" }, `Added goal: ${t.result.name}, ${usd(t.result.target)} (${usd(t.result.earmarked_now)} set aside)`, " ", h("button", { class: "btn sm", onclick: async (e) => { try { await api("/api/goals/" + t.result.id, { method: "DELETE" }); e.target.replaceWith("Undone"); } catch (err) { fail(err); } } }, "Undo"))),
-    (m.trace || []).filter((t) => t.tool === "fund_goal" && t.result?.funded).map((t) => h("div", { class: "added" }, `Set aside ${usd(t.result.added)} for ${t.result.name}`, " ", h("button", { class: "btn sm", onclick: async (e) => { try { await api(`/api/goals/${t.result.goal_id}/release`, send("POST", { amount: t.result.added, place: t.result.place })); e.target.replaceWith("Undone"); } catch (err) { fail(err); } } }, "Undo"))),
+    asks.map((a) => actionCard(a, S.rerenderAgent || render)),
     m.trace?.length ? h("details", { class: "trace" }, h("summary", {}, `Looked at: ${[...new Set(m.trace.map((t) => t.tool))].join(", ")}`), m.trace.map((t) => h("div", { class: "small mono muted" }, `${t.ok ? "✓" : "✗"} ${t.tool}(${JSON.stringify(t.args)})`))) : null);
 }
 
@@ -997,7 +1010,12 @@ const SERVERS = [["ollama", "Ollama (on this machine)", "openai", "http://host.d
 const looksCloud = (url) => { try { const u = new URL(url); return !(["localhost", "host.docker.internal"].includes(u.hostname) || /\.(local|lan|internal)$/.test(u.hostname) || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|127\.)/.test(u.hostname) || !u.hostname.includes(".")); } catch { return false; } };
 const blank = () => ({ server: "ollama", kind: "openai", base_url: SERVERS[0][3], model: "", models: null, tools: true, allow_cloud: false, context_tokens: 8192, api_key: "" });
 async function tabModels(root, rerender) {
-  const pv = await api("/api/agent/providers");
+  const [pv, cfg] = await Promise.all([api("/api/agent/providers"), api("/api/settings")]);
+  add(root, h("div", { class: "panel" }, h("h3", {}, "Web search (SearXNG)"),
+    h("p", { class: "muted small" }, "Lets the agent look up current rates, limits and rules. Searches go to your own SearXNG, never with your personal details. In SearXNG's settings.yml, search.formats must include json."),
+    h("div", { class: "url" }, h("input", { id: "sx-url", type: "url", value: cfg.searx_url || "", placeholder: "http://searxng:8080" }),
+      h("button", { class: "btn", onclick: () => saveCfg({ searx_url: val("sx-url").trim() }, rerender) }, "Save"),
+      h("button", { class: "btn", onclick: async () => { try { const r = await api("/api/agent/search-test", send("POST", { q: "current CD rates" })); toast(`Works: ${r.results.length} results, first from ${r.results[0]?.site || "?"}`); } catch (e) { fail(e); } } }, "Test"))));
   const D = S.draftProv || null;                                   // the model being added or edited
   const edit = (p) => { S.draftProv = p; rerender(); };
   add(root, h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Models for the agent"), h("button", { class: "btn sm primary", onclick: () => edit(blank()) }, "+ Add a model")),
