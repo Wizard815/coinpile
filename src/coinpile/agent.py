@@ -186,7 +186,14 @@ def week_changes(store, today_: date) -> dict:
             "bills_next_7_days": round(ledger.upcoming(store, 7, today_)["total"], 2)}
 
 
-def build_tools(ctx, chat_id: int | None = None):
+PEER_FIELDS = ("partners", "team_allocated", "notes", "members")       # on a shared goal: the other people's amounts and notes
+WITHHELD = ("withheld: what other people share with you is given to the agent only when its model runs on your own machine "
+            "(they agreed to share it with you, not with a cloud service or another app)")
+
+
+def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
+    """peer_data: may the agent see what linked people share with this person (their account balances, their side of a joint account,
+    their amounts and notes on a shared goal)? Only for a model on the person's own machine, never for a cloud model or an MCP client."""
     store, today = ctx.store, ctx.today
 
     def trim(rows, n=40):
@@ -374,6 +381,25 @@ def build_tools(ctx, chat_id: int | None = None):
         """The next paycheck: what is due before the one after it, what the piggy banks need from it, and what is left."""
         return paycheck_plan(store, today(), a.get("income"))
 
+    def joint_for_agent(j: dict) -> dict:
+        out = {k: j.get(k) for k in ("peer", "account", "their_account", "my_share", "their_share")}
+        tm = j.get("this_month") or {}
+        if peer_data:
+            out.update({"this_month": tm, "balance_check": j.get("balance_check")})
+        else:
+            out.update({"this_month": {"month": tm.get("month"), "you_put_in": tm.get("you_put_in")}, "their_numbers": WITHHELD})
+        return out
+
+    def t_shared_with_me(a):
+        """What linked people chose to show this person, and the joint accounts tied together with them."""
+        if not peer_data:
+            return {"people": links.active_peers(store), "joint_accounts": [joint_for_agent(j) for j in links.joint_list(store, today()) if j["state"] == "active"], "shared_with_me": WITHHELD}
+        ov = links.sharing_overview(store)
+        return {"people": [{"peer": p["peer"], "they_show_you": [{k: x[k] for k in ("name", "institution", "balance", "updated")} for x in p["from_them"]],
+                            "you_show_them": [x["name"] for x in p["accounts"] if x["shared"]], "goals_shared": [g["name"] for g in p["goals"]]} for p in ov],
+                "joint_accounts": [joint_for_agent(j) for j in links.joint_list(store, today()) if j["state"] == "active"],
+                "note": "balances other people show you are not in your own totals; for a joint account each side counts only its share"}
+
     def t_week(a):
         """The last 7 days against the 7 before: in, out, the biggest payments, new repeating payments and alerts, net worth change."""
         return week_changes(store, today())
@@ -398,7 +424,7 @@ def build_tools(ctx, chat_id: int | None = None):
                 "paid_by_me_for_both": paid_by_me, "tagged": tag, "items": [{k: r[k] for k in ("date", "name", "payee", "amount")} for r in tagged][:40],
                 "they_owe_me": they_owe, "note": f"from your own accounts, payments tagged '{tag}' in Firefly III are split {mine_pct:g}/{100 - mine_pct:g}. "
                                                  "What they paid for you is in their Firefly III, not here: ask them for their total and subtract.",
-                "linked_joint_accounts": [{k: j.get(k) for k in ("peer", "account", "their_account", "my_share", "this_month", "balance_check")} for j in links.joint_list(store, today()) if j["state"] == "active"]}
+                "linked_joint_accounts": [joint_for_agent(j) for j in links.joint_list(store, today()) if j["state"] == "active"]}
 
     def t_refresh(a):
         f = getattr(ctx, "refresh_now", None)
@@ -468,7 +494,7 @@ def build_tools(ctx, chat_id: int | None = None):
         gv = plan.goals_view(store, today())
         return {"free_savings": gv["free"], "total_savings": gv["total"], "set_aside": gv["allocated"], "still_needed_for_goals": gv["needed"],
                 "goals_are_piggy_banks": piggy_banks(store),
-                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations"} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active"]}
+                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations" and (peer_data or k not in PEER_FIELDS)} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active"]}
 
     def t_add_goal(a):
         try:
@@ -604,6 +630,8 @@ def build_tools(ctx, chat_id: int | None = None):
          S({"year": INT}), t_tax_year),
         ("paycheck_plan", "Split the next paycheck: the bills due before the following one, what each piggy bank needs from it, and what is left for spending. income: part of an income's name, to pick one.",
          S({"income": STR}), t_paycheck),
+        ("shared_with_me", "Linked people: what each one shows you (account names and balances), what you show them, goals you share, and joint accounts tied together with them (shares, who put in what this month, who owes whom). Other people's numbers are only there when your model runs on your own machine.",
+         S({}), t_shared_with_me),
         ("week_changes", "What changed this week: money in and out over the last 7 days against the 7 before, the biggest payments, new repeating payments, new alerts and the net worth change.", S({}), t_week),
         ("shared_expenses", "Settle up shared costs for a period (default last 30 days): spending from joint accounts, payments from your own accounts tagged 'shared' (or another tag) in Firefly III, and what the other person owes at my_share_pct (default 50).",
          S({"start": DATE, "end": DATE, "tag": STR, "my_share_pct": NUM}), t_shared),
@@ -813,7 +841,7 @@ def asked(trace) -> list[int]:
 
 
 def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8, summary: str = "", use_tools: bool | None = None, extra: str = "", chat_id: int | None = None) -> dict:
-    tools = build_tools(ctx, chat_id)
+    tools = build_tools(ctx, chat_id, peer_data=is_local(prov.get("base_url") or ""))
     by_name = {n: f for n, _, _, f in tools}
     system = system_prompt(ctx.name, ctx.today())
     if extra:
