@@ -1,4 +1,5 @@
 """The Piggy banks page, subscriptions with a set number of payments, missing-subscription alerts and notes."""
+import json
 from datetime import date
 
 from coinpile import ledger
@@ -191,3 +192,45 @@ def test_a_payment_firefly_linked_to_the_bill_counts_as_paid(tmp_path):
     c.post("/api/refresh?full=true")
     miss = [a for a in c.get("/api/alerts").json() if a["kind"] == "missed_payment"]
     assert len(miss) == 1 and "Rent" in miss[0]["title"] and "2026-11-01" in miss[0]["detail"]
+
+
+# ---------------------------------------------------------------- CDs are accounts; goals are piggy banks; notes go with them
+def test_an_account_can_be_a_cd_and_keeps_that_through_refreshes(tmp_path):
+    c = signed_in(app(tmp_path, world()))
+    assert c.put("/api/accounts/ff:3", json={"savings_kind": "cd", "apy": 4.5, "opened": "2026-05-01", "maturity": "2027-05-01", "term_months": 12}).status_code == 200
+    c.post("/api/refresh?full=true")
+    p = next(x for x in c.get("/api/goals").json()["places"] if x["account_id"] == "ff:3")
+    assert p["kind"] == "cd" and p["apy"] == 4.5 and p["maturity"] == "2027-05-01" and p["term_months"] == 12 and p["value_at_maturity"] > 5000
+    assert [m["name"] for m in c.get("/api/maturities").json()] == [p["name"]]
+    # any cash account can be counted and named, the checking one included
+    assert c.put("/api/accounts/ff:1", json={"savings_kind": "money_market"}).status_code == 200
+    assert any(x["account_id"] == "ff:1" and x["kind"] == "money_market" for x in c.get("/api/goals").json()["places"])
+    assert c.put("/api/accounts/ff:1", json={"savings_mode": "no", "savings_kind": ""}).status_code == 200
+    assert not any(x["account_id"] == "ff:1" for x in c.get("/api/goals").json()["places"])
+    assert c.put("/api/accounts/ff:3", json={"savings_kind": "jar"}).status_code == 422
+    assert c.put("/api/accounts/ff:3", json={"maturity": "soon"}).status_code == 422
+
+
+def test_piggy_banks_are_the_goals_with_their_notes_for_the_agent(tmp_path):
+    from devtools.fake_llm import openai_server
+    ff = world()                                   # Vacation: 400 of 2000 by 2027-06-01
+    ff.data["1"]["piggies"][0]["attributes"]["save_per_month"] = "228.57"
+    log, script = [], [[("list_goals", {}), ("write_note", {"title": "Vacation plan", "body": "- [ ] book flights", "piggy_id": "1"})]]
+    a = __import__("coinpile.web", fromlist=["x"]).create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=ff.transport(), llm_transport=openai_server(script, log), today=lambda: TODAY)
+    c = signed_in(a)
+    n = c.post("/api/notes", json={"title": "Where to go", "body": "Maine or Oregon", "piggy_id": "1"}).json()
+    assert n["piggy_id"] == "1" and c.post("/api/notes", json={"title": "x", "piggy_id": "99"}).status_code == 404
+    over = c.get("/api/piggy-banks/overview").json()["items"][0]
+    assert [x["title"] for x in over["my_notes"]] == ["Where to go"]
+    pl = c.get("/api/plan?month=2026-11").json()
+    assert pl["goals_month"] == 228.57                                                                        # Firefly III's own monthly amount for the piggy bank
+    assert c.get("/api/goals").json()["needed"] == 1600
+    c.post("/api/agent/providers", json={"name": "Local", "kind": "openai", "base_url": "http://localhost:11434/v1", "model": "llama3", "tools": True})
+    out = c.post("/api/agent/chat", json={"messages": [{"role": "user", "content": "how is my vacation fund?"}]}).json()
+    got = {t["tool"]: json.loads(m["content"]) for t, m in zip(out["trace"], [m for m in log[1]["body"]["messages"] if m["role"] == "tool"])}
+    g = got["list_goals"]["goals_are_piggy_banks"][0]
+    assert g["name"] == "Vacation" and g["still_needed"] == 1600 and [x["title"] for x in g["my_notes"]] == ["Where to go"]
+    assert got["write_note"]["piggy_id"] == "1" and {x["title"] for x in c.get("/api/piggy-banks/overview").json()["items"][0]["my_notes"]} == {"Where to go", "Vacation plan"}
+    assert "add_goal" not in {t["name"] for t in c.get("/api/agent/tools").json()}                         # goals are made in Firefly III now
+    chat = c.post("/api/chats", json={"title": "About Vacation", "links": [{"kind": "piggy", "ref_id": 1}]}).json()
+    assert chat["links"] == [{"kind": "piggy", "ref_id": 1, "title": "Vacation"}]

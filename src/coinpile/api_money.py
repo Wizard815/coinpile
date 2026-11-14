@@ -10,6 +10,9 @@ from pydantic import BaseModel
 from coinpile import plaidplan, feed, ledger, recur, sync
 
 
+SAVINGS_KINDS = ("savings", "cd", "money_market", "bond", "hsa", "529", "cash", "other")
+
+
 class Sub(BaseModel):
     name: str
     amount: float
@@ -39,6 +42,11 @@ class AccountIn(BaseModel):
     balance: float | None = None
     min_balance: float | None = None
     savings_mode: str | None = None        # auto | yes | no: does this account count as savings?
+    savings_kind: str | None = None        # what it is as savings: savings, cd, money_market, bond, hsa, 529, cash, other ("" clears); setting it counts the account as savings
+    apy: float | None = None               # Coinpile-only details Firefly III has no place for (-1 / "" clear them)
+    opened: str | None = None
+    maturity: str | None = None
+    term_months: int | None = None
     nickname: str | None = None            # your own label for any account ("" clears it)
     category: str | None = None            # what the account is for ("" clears it): Checking, Bills, Savings, Emergency fund...
     pinned: bool | None = None             # show its balance on the Overview
@@ -75,6 +83,7 @@ class NoteIn(BaseModel):
     body: str = ""
     pinned: bool = False
     tags: str = ""                      # comma separated, e.g. "taxes, house"
+    piggy_id: str | None = None         # the Firefly III piggy bank (goal) this note is about
 
 
 KINDS = {"cash", "credit", "investment", "loan"}
@@ -231,9 +240,27 @@ def register(app, ctx):
             bad("the balance and type of an account from Firefly III are changed in Firefly III; only accounts you added here can be edited", 409)
         if a.savings_mode not in (None, "auto", "yes", "no"):
             bad("savings_mode must be auto, yes or no")
+        if a.savings_kind not in (None, "", *SAVINGS_KINDS):
+            bad(f"savings_kind must be one of {', '.join(SAVINGS_KINDS)}")
+        for f in ("opened", "maturity"):
+            if getattr(a, f):
+                date_ok(getattr(a, f), f)
+        if a.apy is not None and a.apy > 100:
+            bad("apy is a yearly percentage, 0-100")
         with store.tx() as c:
             if a.savings_mode:
                 c.execute("UPDATE accounts SET savings_pool=? WHERE id=?", ({"auto": None, "yes": 1, "no": 0}[a.savings_mode], aid))
+            if a.savings_kind is not None:
+                c.execute("UPDATE accounts SET sv_kind=? WHERE id=?", (a.savings_kind or None, aid))
+                if a.savings_kind and a.savings_mode is None:
+                    c.execute("UPDATE accounts SET savings_pool=1 WHERE id=?", (aid,))         # naming what it is counts it as savings
+            if a.apy is not None:
+                c.execute("UPDATE accounts SET apy=? WHERE id=?", (a.apy if a.apy >= 0 else None, aid))
+            for f in ("opened", "maturity"):
+                if getattr(a, f) is not None:
+                    c.execute(f"UPDATE accounts SET {f}=? WHERE id=?", (getattr(a, f) or None, aid))
+            if a.term_months is not None:
+                c.execute("UPDATE accounts SET term_months=? WHERE id=?", (a.term_months if a.term_months > 0 else None, aid))
             if a.min_balance is not None:
                 c.execute("UPDATE accounts SET min_balance=? WHERE id=?", (a.min_balance if a.min_balance >= 0 else None, aid))
             if a.nickname is not None:
@@ -674,6 +701,13 @@ def register(app, ctx):
         return {"deleted": sid}
 
     # ------------------------------------------------------------ planner: notes + budgets
+    def piggy(pid: str | None) -> str | None:
+        if not pid:
+            return None
+        if not store.one("SELECT 1 FROM ff_piggy WHERE id=?", (str(pid),)):
+            bad("no such piggy bank", 404)
+        return str(pid)
+
     def tags(s: str) -> str:
         """Tidy tags: lowercase, trimmed, no duplicates, at most 12 of 30 characters."""
         out = []
@@ -695,7 +729,7 @@ def register(app, ctx):
             bad("title required")
         ts = sync.now()
         with store.tx() as c:
-            cur = c.execute("INSERT INTO notes(title,body,author,pinned,tags,created,updated) VALUES(?,?,?,?,?,?,?)", (n.title.strip(), n.body, "me", int(n.pinned), tags(n.tags), ts, ts))
+            cur = c.execute("INSERT INTO notes(title,body,author,pinned,tags,piggy_id,created,updated) VALUES(?,?,?,?,?,?,?,?)", (n.title.strip(), n.body, "me", int(n.pinned), tags(n.tags), piggy(n.piggy_id), ts, ts))
         return store.one("SELECT * FROM notes WHERE id=?", (cur.lastrowid,))
 
     @app.put("/api/notes/{nid}")
@@ -704,7 +738,7 @@ def register(app, ctx):
         if not n.title.strip():
             bad("title required")
         with store.tx() as c:
-            cur = c.execute("UPDATE notes SET title=?, body=?, pinned=?, tags=?, updated=? WHERE id=?", (n.title.strip(), n.body, int(n.pinned), tags(n.tags), sync.now(), nid))
+            cur = c.execute("UPDATE notes SET title=?, body=?, pinned=?, tags=?, piggy_id=?, updated=? WHERE id=?", (n.title.strip(), n.body, int(n.pinned), tags(n.tags), piggy(n.piggy_id), sync.now(), nid))
         if not cur.rowcount:
             bad("not found", 404)
         return store.one("SELECT * FROM notes WHERE id=?", (nid,))

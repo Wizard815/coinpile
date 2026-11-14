@@ -545,53 +545,48 @@ async function discuss(link, title) {
   try { const c = await api("/api/chats", send("POST", { title, links: [link] })); S.chatId = c.chat.id; S.tab = "agent"; render(); } catch (e) { fail(e); }
 }
 async function viewSavings(root, rerender) {
-  const [v, accts, mat, lk, shr] = await Promise.all([api("/api/goals"), api("/api/accounts"), api("/api/maturities"), api("/api/links").catch(() => ({ me: "", links: [] })), api("/api/sharing").catch(() => [])]);
+  const [v, accts, mat, lk, shr, pg] = await Promise.all([api("/api/goals"), api("/api/accounts"), api("/api/maturities"), api("/api/links").catch(() => ({ me: "", links: [] })), api("/api/sharing").catch(() => []), api("/api/piggy-banks/overview").catch(() => ({ items: [] }))]);
   const theirs = shr.flatMap((p) => p.from_them.map((x) => ({ ...x, peer: p.peer })));
-  const editing = null, ep = S.edit?.place ? S.edit.place : null;
-  const active = v.items.filter((g) => g.status === "active"), closed = v.items.filter((g) => g.status !== "active");
-  const gform = h("form", { class: "subform", onsubmit: async (ev) => { ev.preventDefault();
-    const body = { name: val("gl-name"), target: num("gl-target"), deadline: editing ? val("gl-due") : val("gl-due") || null, priority: parseInt(val("gl-prio")), monthly: num("gl-monthly") || 0, note: val("gl-note"), ...(editing ? {} : { auto_allocate: $("#gl-use").checked }) };
-    try { const r = await api(editing ? `/api/goals/${editing.id}` : "/api/goals", send(editing ? "PUT" : "POST", body)); S.edit = null;
-      toast(editing ? "Saved" : r.funded ? `Added and fully set aside from free savings` : r.allocated ? `Added. ${usd(r.allocated)} set aside, ${usd(r.shortfall)} to go` : "Added. Not funded yet; free savings stay available to everything"); rerender(); } catch (e) { fail(e); } } },
-    field("gl-name", "What are you saving for?", editing?.name, { required: true }), field("gl-target", "Cost ($)", editing?.target, { type: "number", min: "0.01", step: "0.01", required: true, oninput: (e) => { clearTimeout(S.t); S.t = setTimeout(async () => { const a = parseFloat(e.target.value); const out = $("#gl-check"); if (!(a > 0) || editing) { out.textContent = ""; return; }
-        try { const r = await api("/api/afford?amount=" + a); out.textContent = r.can_buy_now ? `Free savings (${usd(r.free_savings)}) cover it.` : `Only ${usd(r.free_savings)} is free, so ${usd(r.shortfall)} still has to be saved` + (r.months_to_save ? `: about ${r.months_to_save} month${r.months_to_save > 1 ? "s" : ""} at your plan's leftover (${r.ready_date}).` : "."); } catch { out.textContent = ""; } }, 300); } }),
-    field("gl-due", "Needed by (optional)", editing?.deadline ?? "", { type: "date" }), select("gl-prio", "Priority", PRIO, editing?.priority ?? 2), field("gl-monthly", "I will save per month ($)", editing?.monthly ?? "", { type: "number", min: "0", step: "0.01" }), field("gl-note", "Note", editing?.note),
-    editing ? null : h("label", { class: "check", style: "grid-column:1/-1" }, h("input", { type: "checkbox", id: "gl-use" }), "Use free savings now (otherwise the goal starts unfunded and free money stays shared by everything)"),
-    h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, editing ? "Save goal" : "Add goal"), editing ? h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel") : null),
-    h("div", { id: "gl-check", class: "small muted", style: "grid-column:1/-1" }));
+  const older = v.items.filter((g) => g.status === "active"), olderClosed = v.items.filter((g) => g.status !== "active");
+  const pigs = pg.items.filter((p) => p.active);
+  const typeName = (k) => (SK.find(([x]) => x === k) || [0, String(k || "savings").replace(/_/g, " ")])[1];
+  const editRow = (p) => { const k = "ae" + p.id.replace(/\W/g, "");
+    return h("tr", {}, h("td", { colspan: 8 }, h("form", { class: "subform", onsubmit: async (e) => { e.preventDefault();
+      try { await api(`/api/accounts/${encodeURIComponent(p.account_id)}`, send("PUT", { savings_kind: val(k + "t"), apy: num(k + "a") ?? -1, opened: val(k + "o"), maturity: val(k + "m"), term_months: parseInt(val(k + "n")) || 0 })); S.edit = null; toast("Saved"); rerender(); } catch (err) { fail(err); } } },
+      h("b", { style: "grid-column:1/-1" }, `${p.name}: what it is`), select(k + "t", "Type", SK, p.kind in Object.fromEntries(SK) ? p.kind : "savings"), field(k + "a", "APY %", p.apy ?? "", { type: "number", step: "0.001", min: "0", max: "100" }),
+      field(k + "o", "Opened", p.opened ?? "", { type: "date" }), field(k + "m", "Matures (CDs, bonds)", p.maturity ?? "", { type: "date" }), field(k + "n", "Term (months)", p.term_months ?? "", { type: "number", min: "1" }),
+      h("p", { class: "muted small", style: "grid-column:1/-1;margin:0" }, "The balance comes from Firefly III. Type, APY and dates are kept in Coinpile only (Firefly III has no place for them)."),
+      h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Save"), h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel"))))); };
   add(root,
-    v.overallocated ? h("div", { class: "panel" }, h("div", { class: "alerts" }, alertRow({ severity: "warning", title: "You have set aside more than you have saved", detail: `Saved ${usd(v.total)}, set aside ${usd(v.allocated)}. Release some of it.` }))) : null,
-    h("div", { class: "grid" }, kpi("Total saved", usd(v.total), `${v.places.length} account${v.places.length === 1 ? "" : "s"} and CDs`), kpi("Set aside for goals", usd(v.allocated), (v.in_piggy_banks ? `${usd(v.in_piggy_banks)} in Firefly III piggy banks, ` : "") + `${active.length} active goal${active.length === 1 ? "" : "s"}`), kpi("Free to use", usd(v.free), v.free > 0 ? "not promised to anything" : "everything is spoken for", v.free < 0 ? "neg" : v.free > 0 ? "pos" : ""), kpi("Still needed", usd(v.needed), "to fully fund every goal")),
-    h("div", { class: "panel scroll" }, h("h3", {}, "Where your savings are"), h("p", { class: "muted small" }, "Savings and CD accounts from your banks appear here by themselves. Add anything else you keep by hand, or count any account as savings."),
-      v.places.length ? h("table", {}, h("thead", {}, h("tr", {}, ["Account", "Type", "Balance", "APY", "Matures", "Set aside", "Free", ""].map((x, i) => h("th", { class: i > 1 && i < 7 ? "r" : "" }, x)))),
-        h("tbody", {}, v.places.map((p) => h("tr", {}, h("td", {}, p.name, h("div", { class: "muted small" }, p.institution)), h("td", { class: "small" }, (SK.find(([k]) => k === p.kind) || [0, p.kind.replace(/_/g, " ")])[1], p.origin === "account" ? h("span", { class: "pill t" }, "from bank") : null),
+    v.overallocated ? h("div", { class: "panel" }, h("div", { class: "alerts" }, alertRow({ severity: "warning", title: "You have set aside more than you have saved", detail: `Saved ${usd(v.total)}, set aside ${usd(v.allocated)}.` }))) : null,
+    h("div", { class: "grid" }, kpi("Total saved", usd(v.total), `${v.places.length} account${v.places.length === 1 ? "" : "s"}`), kpi("Set aside", usd(v.allocated), `in ${pigs.length} piggy bank${pigs.length === 1 ? "" : "s"}` + (older.length ? " and older goals" : "")),
+      kpi("Free to use", usd(v.free), v.free > 0 ? "not in any piggy bank" : "everything is spoken for", v.free < 0 ? "neg" : v.free > 0 ? "pos" : ""), kpi("Still needed", usd(v.needed), "to fill every piggy bank")),
+    h("div", { class: "panel scroll" }, h("h3", {}, "Where your savings are"), h("p", { class: "muted small" }, "Accounts from Firefly III. Savings accounts count by themselves; count any other account too, and say what it is: a CD with its APY and maturity, a money market, a bond…"),
+      v.places.length ? h("table", {}, h("thead", {}, h("tr", {}, ["Account", "Type", "Balance", "APY", "Matures", "In piggy banks", "Free", ""].map((x, i) => h("th", { class: i > 1 && i < 7 ? "r" : "" }, x)))),
+        h("tbody", {}, v.places.flatMap((p) => [h("tr", {}, h("td", {}, p.name, h("div", { class: "muted small" }, p.institution)), h("td", { class: "small" }, typeName(p.kind), p.origin === "manual" || p.origin === "linked" ? h("span", { class: "pill", title: "Added by hand before accounts could be marked; make the account a CD instead" }, "by hand") : null),
           h("td", { class: "num r" }, usd(p.balance)), h("td", { class: "num r" }, p.apy != null ? p.apy + "%" : "–"), h("td", { class: "small r" }, p.maturity ? `${p.maturity} (${p.days_to_maturity}d)` : "–"),
           h("td", { class: "num r" }, usd(p.earmarked)), h("td", { class: "num r " + (p.free < 0 ? "neg" : "pos") }, usd(p.free)),
-          h("td", { class: "r", style: "white-space:nowrap" }, p.origin === "manual" || p.origin === "linked" ? [h("button", { class: "btn sm", onclick: () => { S.edit = { place: p.id }; rerender(); window.scrollTo(0, 0); } }, "Edit"), " ", h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/savings/${p.id}`, { method: "DELETE" }); rerender(); }) }, "Remove")] :
-            h("button", { class: "btn sm", onclick: async () => { await api(`/api/accounts/${encodeURIComponent(p.account_id)}`, send("PUT", { savings_mode: "no" })); rerender(); } }, "Not savings")))))) : h("p", { class: "muted" }, "No savings yet."),
-      h("div", { class: "filters", style: "margin-top:14px" }, select("cs-acct", "Count another account as savings", [["", "Choose an account…"], ...accts.filter((a) => a.kind === "cash" && !v.places.some((p) => p.account_id === a.id)).map((a) => [a.id, `${a.institution} · ${an(a)}`])], ""),
-        h("button", { class: "btn", onclick: async () => { const id = val("cs-acct"); if (!id) return toast("Choose an account"); await api(`/api/accounts/${encodeURIComponent(id)}`, send("PUT", { savings_mode: "yes" })); rerender(); } }, "Count it"))),
-    h("div", { class: "panel" }, h("h3", {}, ep ? "Edit savings item" : "Add savings or a CD by hand"), h("p", { class: "muted small" }, "For a CD, bond or savings jar your bank does not share. Type its balance, or follow a linked account's balance."),
-      (() => { const e = ep ? v.places.find((p) => p.id === ep && p.origin !== "account") : null; return h("form", { class: "subform", onsubmit: async (ev) => { ev.preventDefault();
-        const body = { name: val("sv-name"), kind: val("sv-kind"), institution: val("sv-inst"), balance: num("sv-bal") ?? 0, apy: num("sv-apy") ?? 0, opened: val("sv-open") || null, maturity: val("sv-mat") || null, term_months: parseInt(val("sv-term")) || null, account_id: val("sv-acct") || null, notes: "", active: true };
-        try { await api(e ? `/api/savings/${e.id}` : "/api/savings", send(e ? "PUT" : "POST", body)); S.edit = null; toast("Saved"); rerender(); } catch (err) { fail(err); } } },
-        field("sv-name", "Name", e?.name, { required: true }), select("sv-kind", "Type", SK, e?.kind ?? "savings"), field("sv-inst", "Institution", e?.institution), field("sv-bal", "Balance", e?.balance, { type: "number", step: "0.01", min: "0" }),
-        field("sv-apy", "APY %", e?.apy ?? "", { type: "number", step: "0.001", min: "0", max: "100" }), field("sv-open", "Opened", "", { type: "date" }), field("sv-mat", "Matures (CDs)", e?.maturity ?? "", { type: "date" }), field("sv-term", "Term (months)", "", { type: "number", min: "1" }),
-        select("sv-acct", "Follow an account's balance", [["", "None, I type the balance"], ...accts.filter((a) => a.kind === "cash").map((a) => [a.id, `${a.institution} · ${an(a)}`])], e?.account_id ?? ""),
-        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, e ? "Save" : "Add"), e ? h("button", { class: "btn", type: "button", onclick: () => { S.edit = null; rerender(); } }, "Cancel") : null)); })()),
-    mat.length ? h("div", { class: "panel" }, h("h3", {}, "When your CDs and bonds mature"), h("p", { class: "muted small" }, "What each one is worth then, what is already pinned to goals, and where the free money would go (your highest-priority goals first)."),
+          h("td", { class: "r", style: "white-space:nowrap" }, p.origin === "account" ? [h("button", { class: "btn sm", onclick: () => { S.edit = { sacct: p.id }; rerender(); } }, "Edit"), " ",
+            h("button", { class: "btn sm", onclick: async () => { await api(`/api/accounts/${encodeURIComponent(p.account_id)}`, send("PUT", { savings_mode: "no", savings_kind: "" })); rerender(); } }, "Not savings")] :
+            h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { await api(`/api/savings/${p.id}`, { method: "DELETE" }); rerender(); }) }, "Remove"))),
+          S.edit?.sacct === p.id ? editRow(p) : null].filter(Boolean)))) : h("p", { class: "muted" }, "No savings yet."),
+      h("div", { class: "filters", style: "margin-top:14px" }, select("cs-acct", "Count another account as savings", [["", "Choose an account…"], ...accts.filter((a) => (a.kind === "cash" || a.kind === "investment") && !v.places.some((p) => p.account_id === a.id)).map((a) => [a.id, `${a.institution} · ${an(a)}`])], ""),
+        select("cs-kind", "It is a", SK, "savings"),
+        h("button", { class: "btn", onclick: async () => { const id = val("cs-acct"); if (!id) return toast("Choose an account"); await api(`/api/accounts/${encodeURIComponent(id)}`, send("PUT", { savings_mode: "yes", savings_kind: val("cs-kind") })); S.edit = { sacct: id }; rerender(); } }, "Count it"))),
+    mat.length ? h("div", { class: "panel" }, h("h3", {}, "When your CDs and bonds mature"), h("p", { class: "muted small" }, "What each one is worth then, and which piggy banks the free money would fill (soonest target date first)."),
       h("div", { class: "cards" }, mat.map((m) => h("div", { class: "card" }, h("div", { class: "bar" }, h("b", {}, m.name), h("span", { class: "small" }, `${m.maturity} · ${m.days}d`)),
         h("div", { class: "small" }, `Worth ${usd(m.value_at_maturity)} then (${usd(m.interest)} interest).`),
-        m.pinned.length ? h("div", { class: "small" }, "Pinned: ", m.pinned.map((x) => `${x.goal} ${usd(x.amount)}`).join(", ")) : h("div", { class: "small muted" }, "Nothing pinned to it."),
+        m.pinned.length ? h("div", { class: "small" }, "Pinned: ", m.pinned.map((x) => `${x.goal} ${usd(x.amount)}`).join(", ")) : null,
         h("div", { class: "small", style: "margin-top:6px" }, h("b", {}, `${usd(m.free_at_maturity)} free`), m.suggestions.length ? " → " + m.suggestions.map((x) => `${x.goal} ${usd(x.amount)}`).join(", then ") : ""),
-        h("div", { class: "small muted" }, m.advice),
-        m.suggestions.length && v.places.find((p) => p.key === m.key)?.free > 0.005 ? h("div", { class: "chips", style: "margin-top:8px" }, m.suggestions.map((x) => h("button", { class: "btn sm", title: "Earmark it from this account now so it is promised when it matures", onclick: async () => { try { await api(`/api/goals/${x.goal_id}/fund`, send("POST", { amount: Math.min(x.amount, v.places.find((p) => p.key === m.key).free), place: m.key })); toast("Pinned to this account"); rerender(); } catch (e) { fail(e); } } }, `Pin to ${x.goal}`))) : null)))) : null,
-    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Goals: what the savings are for"), v.free > 0 && active.some((g) => g.shortfall > 0) ? h("button", { class: "btn sm primary", onclick: async () => { await api("/api/goals/autofill", { method: "POST" }); toast("Free savings assigned by priority"); rerender(); } }, "Fill goals from free savings") : null),
-      h("p", { class: "muted small" }, "A goal sets money aside inside your savings. Free money is what is saved minus what is set aside. Free money is shared by every goal until you assign it. A new goal starts unfunded (tick the box to take what is free) and tells you how long saving would take."),
-      active.length ? h("div", { class: "cards" }, active.map((g) => goalCard(g, v, rerender, lk))) : h("p", { class: "muted" }, "No goals yet. Add one below."),
-      closed.length ? h("details", { style: "margin-top:14px" }, h("summary", { class: "muted" }, `${closed.length} closed goal${closed.length === 1 ? "" : "s"}`), h("div", { class: "cards" }, closed.map((g) => goalCard(g, v, rerender, lk)))) : null),
-    theirs.length ? h("div", { class: "panel", "data-title": "Shared with me" }, h("h3", {}, "Shared with me"), h("p", { class: "muted small" }, "Balances other people chose to show you. They are not counted in your own totals."), theirs.map((x) => h("div", { class: "ev", style: "grid-template-columns:1fr auto" }, h("span", {}, x.name, h("div", { class: "muted small" }, `${x.peer} · ${x.institution}`)), h("span", { class: "num" }, usd(x.balance))))) : null,
-    h("div", { class: "panel" }, h("h3", {}, editing ? "Edit goal" : "Add a goal"), gform));
+        h("div", { class: "small muted" }, m.advice))))) : null,
+    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Goals"), h("button", { class: "btn sm", onclick: () => { S.tab = "piggy"; render(); } }, "Open Piggy banks")),
+      h("p", { class: "muted small" }, "Your goals are your Firefly III piggy banks. Notes you write about one sit with it, and the agent reads them together."),
+      pigs.length ? pigs.map((p) => h("div", { class: "ev", style: "grid-template-columns:1fr 140px auto" }, h("span", {}, p.name, p.target_date ? h("span", { class: "muted small" }, " by " + p.target_date) : null, p.my_notes?.length ? h("span", { class: "pill", style: "margin-left:6px" }, `${p.my_notes.length} note${p.my_notes.length === 1 ? "" : "s"}`) : null),
+        h("div", {}, p.target ? bar(Math.min(1, p.current / p.target), p.current >= p.target ? "var(--teal)" : "var(--brass)") : null), h("span", { class: "num small" }, usd(p.current) + (p.target ? " / " + usd(p.target) : "")))) : h("p", { class: "muted" }, "No piggy banks in Firefly III yet.")),
+    older.length || olderClosed.length ? h("div", { class: "panel" }, h("details", {}, h("summary", {}, h("b", {}, `Older Coinpile goals (${older.length + olderClosed.length})`), h("span", { class: "muted small" }, "  made in Coinpile before goals became piggy banks")),
+      h("p", { class: "muted small" }, "They still count until you close or delete them. To keep one, make it a piggy bank on the Piggy banks page (or switch on \"Goals as piggy banks\" in Settings, Firefly III, which does it for you)."),
+      h("div", { class: "cards" }, [...older, ...olderClosed].map((g) => goalCard(g, v, rerender, lk))))) : null,
+    theirs.length ? h("div", { class: "panel", "data-title": "Shared with me" }, h("h3", {}, "Shared with me"), h("p", { class: "muted small" }, "Balances other people chose to show you. They are not counted in your own totals."), theirs.map((x) => h("div", { class: "ev", style: "grid-template-columns:1fr auto" }, h("span", {}, x.name, h("div", { class: "muted small" }, `${x.peer} · ${x.institution}`)), h("span", { class: "num" }, usd(x.balance))))) : null);
 }
 
 /* ================================ PIGGY BANKS: Firefly III's piggy banks, read every refresh ================================ */
@@ -616,6 +611,7 @@ async function viewPiggy(root, rerender) {
       h("div", { class: "small muted" }, [p.target_date ? "by " + p.target_date : "", p.save_per_month ? `save ${usd(p.save_per_month)} a month to make it` : ""].filter(Boolean).join(" · ")),
       p.accounts.length ? h("div", { class: "small muted" }, "Held in: " + p.accounts.map((x) => `${x.name} ${usd(x.amount)}`).join(", ")) : null,
       p.notes ? h("div", { class: "small muted", style: "margin-top:4px" }, p.notes) : null,
+      p.my_notes?.length ? h("div", { style: "margin-top:6px" }, p.my_notes.map((n) => h("div", { class: "small" }, h("a", { href: "#notes", onclick: (e) => { e.preventDefault(); S.note = n.id; S.notePrev = true; S.tab = "notes"; render(); } }, "📝 " + n.title), n.author === "agent" ? h("span", { class: "muted" }, " · agent") : null))) : null,
       v.can_change && !p.goal && p.active ? h("div", { class: "filters", style: "margin:10px 0 4px" }, field(k + "a", "Amount", "", { type: "number", min: "0.01", step: "0.01" }), select(k + "c", "Account", acctOpts(p), p.accounts[0]?.account_id || "")) : null,
       hist,
       h("div", { class: "chips", style: "margin-top:8px" },
@@ -624,6 +620,8 @@ async function viewPiggy(root, rerender) {
         h("button", { class: "btn sm", onclick: async (e) => { e.target.disabled = true; try { const ev = await api(`/api/piggy-banks/${p.id}/events`);
           hist.replaceChildren(ev.length ? h("div", { style: "margin-top:8px" }, ev.slice(0, 12).map((x) => h("div", { class: "ev", style: "grid-template-columns:auto 1fr auto;padding:4px 0" }, h("span", { class: "when" }, x.date), h("span", { class: "muted" }, x.account), h("span", { class: "num " + (x.amount < 0 ? "neg" : "pos") }, (x.amount > 0 ? "+" : "") + usd(x.amount))))) : h("p", { class: "muted small" }, "No history yet."));
         } catch (err) { fail(err); } e.target.disabled = false; } }, "History"),
+        h("button", { class: "btn sm", onclick: () => { S.note = "new"; S.noteTpl = ""; S.notePiggy = p.id; S.notePrev = false; S.tab = "notes"; render(); } }, "Add note"),
+        h("button", { class: "btn sm", onclick: () => discuss({ kind: "piggy", ref_id: +p.id }, `About my goal: ${p.name}`) }, "Discuss with agent"),
         p.link ? h("a", { class: "btn sm", href: p.link, target: "_blank", rel: "noopener" }, "Open in Firefly III") : null));
   };
   add(root,
@@ -670,14 +668,12 @@ async function viewBudgets(root, rerender) {
       pl.actual.unbudgeted_spent ? h("p", { class: "muted small" }, `${usd(pl.actual.unbudgeted_spent)} was spent in categories with no budget or bill.`) : null,
       h("form", { class: "row", style: "margin-top:10px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/budgets", send("PUT", { category: val("bg-cat"), monthly_amount: num("bg-amt") })); rerender(); } catch (err) { fail(err); } } },
         select("bg-cat", "Budget for", cats.filter((c) => c.kind === "expense").map((c) => [c.name, c.name]), "Food"), field("bg-amt", "Per month ($)", "", { type: "number", step: "0.01", min: "0", required: true }), h("button", { class: "btn primary", type: "submit" }, "Set budget"))),
-    h("div", { class: "panel" }, h("h3", {}, "Income"), h("p", { class: "muted small" }, "What comes in each month. Steady deposits in your transactions are offered here; add anything else, like side income."),
-      pl.incomes.length ? pl.incomes.map(incomeRow) : h("p", { class: "muted" }, "No income entered yet."),
+    h("div", { class: "panel" }, h("h3", {}, "Income"), h("p", { class: "muted small" }, "From Firefly III: your recurring deposits there, and steady deposits found in your Firefly III transactions (add those below). To change one, change it in Firefly III."),
+      pl.incomes.length ? pl.incomes.map(incomeRow) : h("p", { class: "muted" }, "No income yet. Add a recurring deposit in Firefly III, or wait for a few paychecks to show up below."),
       pl.income_suggestions.length ? h("div", { class: "cards" }, pl.income_suggestions.slice(0, 4).map((s, i) => h("div", { class: "card" }, h("div", { class: "bar" }, h("b", {}, s.name), h("span", { class: "num pos" }, usd(s.amount))), h("div", { class: "muted small" }, `${s.label} · seen ${s.occurrences}×`),
         h("div", { class: "filters", style: "margin:8px 0" }, field(`is-n${i}`, "Call it", s.name)), h("div", { class: "chips" }, h("button", { class: "btn sm primary", onclick: async () => { try { await api("/api/incomes/accept", send("POST", { key: s.key, name: val(`is-n${i}`) })); rerender(); } catch (e) { fail(e); } } }, "Add as income"),
           h("button", { class: "btn sm", onclick: async () => { await api("/api/suggestions/dismiss", send("POST", { key: s.key })); rerender(); } }, "Not income"))))) : null,
-      h("form", { class: "subform", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); const preset = val("in-cycle"); try { await api("/api/incomes", send("POST", { name: val("in-name"), amount: num("in-amt"), next_date: val("in-next"), cycle: preset, account_id: val("in-acct") || null })); rerender(); } catch (err) { fail(err); } } },
-        field("in-name", "Source", "", { required: true }), field("in-amt", "Amount", "", { type: "number", step: "0.01", min: "0.01", required: true }), select("in-cycle", "Paid", PRESETS.filter(([k]) => k !== "custom"), "monthly"), field("in-next", "Next payday", today(), { type: "date", required: true }),
-        select("in-acct", "Into account", [["", "Not set"], ...accts.map((a) => [a.id, `${a.institution} · ${an(a)}`])], ""), h("button", { class: "btn primary", type: "submit" }, "Add income"))));
+      null));
 }
 
 /* ================================ NOTES ================================ */
@@ -698,14 +694,15 @@ function mdView(text, onToggle) {
   return out.length ? out : [h("p", { class: "muted" }, "Nothing written yet.")];
 }
 async function viewNotes(root, rerender) {
-  const notes = await api("/api/notes");
+  const [notes, pigs] = await Promise.all([api("/api/notes"), api("/api/piggy-banks").catch(() => [])]);
+  const pigName = (id) => (pigs.find((p) => p.id === id) || {}).name;
   const tagsOf = (n) => (n.tags || "").split(",").filter(Boolean);
   const allTags = [...new Set(notes.flatMap(tagsOf))].sort();
   const q = (S.noteQ || "").toLowerCase(), f = S.noteF || "all";
-  const shown = notes.filter((n) => (f === "all" || (f === "pinned" && n.pinned) || (f === "me" && n.author !== "agent") || (f === "agent" && n.author === "agent") || (f.startsWith("#") && tagsOf(n).includes(f.slice(1))))
+  const shown = notes.filter((n) => (f === "all" || (f === "goals" && n.piggy_id) || (f === "pinned" && n.pinned) || (f === "me" && n.author !== "agent") || (f === "agent" && n.author === "agent") || (f.startsWith("#") && tagsOf(n).includes(f.slice(1))))
     && (!q || (n.title + " " + n.body + " " + (n.tags || "")).toLowerCase().includes(q)));
   const cur = notes.find((n) => n.id === S.note) || null, isNew = S.note === "new";
-  const save = async (extra = {}) => { const body = { title: val("nt-title"), body: $("#nt-body").value, pinned: !!(extra.pinned ?? cur?.pinned), tags: val("nt-tags") };
+  const save = async (extra = {}) => { const body = { title: val("nt-title"), body: $("#nt-body").value, pinned: !!(extra.pinned ?? cur?.pinned), tags: val("nt-tags"), piggy_id: val("nt-piggy") || null };
     if (!body.title.trim()) return toast("Give it a title");
     try { const r = await api(cur ? `/api/notes/${cur.id}` : "/api/notes", send(cur ? "PUT" : "POST", body)); S.note = r.id; S.noteDirty = false; toast("Saved"); rerender(); } catch (err) { fail(err); } };
   const ask = h("input", { id: "nt-ask", placeholder: "e.g. Draft a plan to save $500 a month using my real spending", style: "flex:1;min-width:0" });
@@ -713,10 +710,10 @@ async function viewNotes(root, rerender) {
   const list = h("div", { class: "panel" },
     h("div", { class: "bar" }, h("h3", {}, "Notes"), h("button", { class: "btn sm primary", onclick: () => { S.note = "new"; S.noteTpl = ""; S.notePrev = false; rerender(); } }, "New note")),
     h("input", { type: "search", placeholder: "Search notes", value: S.noteQ || "", style: "width:100%;margin:6px 0", oninput: (e) => { S.noteQ = e.target.value; clearTimeout(S.nt); S.nt = setTimeout(rerender, 250); } }),
-    h("div", { class: "chips", style: "margin-bottom:8px" }, chip("all", `All ${notes.length}`), chip("pinned", "Pinned"), chip("me", "Mine"), chip("agent", "By the agent"), allTags.map((t) => chip("#" + t, "#" + t))),
+    h("div", { class: "chips", style: "margin-bottom:8px" }, chip("all", `All ${notes.length}`), chip("pinned", "Pinned"), chip("me", "Mine"), chip("agent", "By the agent"), pigs.length ? chip("goals", "About a goal") : null, allTags.map((t) => chip("#" + t, "#" + t))),
     shown.length ? shown.map((n) => h("div", { class: "ev note" + (n.id === S.note ? " on" : ""), style: "grid-template-columns:1fr auto;cursor:pointer", tabindex: 0, onclick: () => { S.note = n.id; S.notePrev = true; rerender(); }, onkeydown: (e) => { if (e.key === "Enter") { S.note = n.id; S.notePrev = true; rerender(); } } },
       h("span", {}, h("b", {}, n.pinned ? "★ " : "", n.title), h("div", { class: "muted small", style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px" }, (n.body || "").replace(/^#{1,3} /gm, "").replace(/^\s*[-*] (\[[ xX]\] )?/gm, "").replace(/\*\*/g, "").replace(/\s+/g, " ").trim().slice(0, 90) || "empty"),
-        tagsOf(n).length ? h("div", {}, tagsOf(n).map((t) => h("span", { class: "pill", style: "margin-right:4px" }, "#" + t))) : null),
+        tagsOf(n).length || n.piggy_id ? h("div", {}, n.piggy_id && pigName(n.piggy_id) ? h("span", { class: "pill t", style: "margin-right:4px" }, "🐷 " + pigName(n.piggy_id)) : null, tagsOf(n).map((t) => h("span", { class: "pill", style: "margin-right:4px" }, "#" + t))) : null),
       h("span", { class: "small muted", style: "text-align:right" }, n.author === "agent" ? h("span", { class: "pill b" }, "agent") : null, h("div", {}, n.updated ? ago(n.updated) : "")))) : h("p", { class: "muted" }, notes.length ? "No note matches." : "No notes yet. Start one, or have the agent write one below."));
   let editor;
   if (isNew || cur) {
@@ -725,23 +722,24 @@ async function viewNotes(root, rerender) {
     const words = (s) => { const n = (s.trim().match(/\S+/g) || []).length; return `${n} word${n === 1 ? "" : "s"}`; };
     const count = h("span", { class: "muted small" }, words(body));
     const toggle = async (line) => { const L = (cur.body || "").split("\n"); L[line] = L[line].replace(/\[( |x|X)\]/, (m, c) => c === " " ? "[x]" : "[ ]");
-      try { await api(`/api/notes/${cur.id}`, send("PUT", { title: cur.title, body: L.join("\n"), pinned: !!cur.pinned, tags: cur.tags || "" })); rerender(); } catch (err) { fail(err); } };
+      try { await api(`/api/notes/${cur.id}`, send("PUT", { title: cur.title, body: L.join("\n"), pinned: !!cur.pinned, tags: cur.tags || "", piggy_id: cur.piggy_id || null })); rerender(); } catch (err) { fail(err); } };
     const preview = !isNew && S.notePrev;
     editor = h("div", { class: "panel", onkeydown: (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); save(); } } },
       h("div", { class: "bar" }, h("h3", {}, isNew ? "New note" : cur.title), !isNew ? h("div", { class: "chips" }, h("button", { class: "btn sm" + (preview ? " primary" : ""), onclick: () => { S.notePrev = true; rerender(); } }, "Read"), h("button", { class: "btn sm" + (!preview ? " primary" : ""), onclick: () => { S.notePrev = false; rerender(); } }, "Edit")) : null),
       isNew ? h("div", { class: "chips", style: "margin:6px 0" }, h("span", { class: "muted small" }, "Start from:"), NOTE_TEMPLATES.map(([t, b]) => h("button", { class: "btn sm" + ((S.noteTpl || "") === b ? " primary" : ""), onclick: () => { S.noteTpl = b; rerender(); } }, t))) : null,
-      preview ? h("div", {}, h("div", { class: "small muted", style: "margin-bottom:6px" }, [cur.author === "agent" ? "Written by the agent" : "", cur.updated ? "updated " + ago(cur.updated) : "", tagsOf(cur).map((t) => "#" + t).join(" ")].filter(Boolean).join(" · ")),
+      preview ? h("div", {}, h("div", { class: "small muted", style: "margin-bottom:6px" }, [cur.piggy_id && pigName(cur.piggy_id) ? "about " + pigName(cur.piggy_id) : "", cur.author === "agent" ? "Written by the agent" : "", cur.updated ? "updated " + ago(cur.updated) : "", tagsOf(cur).map((t) => "#" + t).join(" ")].filter(Boolean).join(" · ")),
           h("div", { style: "line-height:1.5" }, mdView(cur.body || "", toggle))) :
         h("div", { style: "display:grid;gap:10px" }, field("nt-title", "Title", cur?.title ?? "", { required: true }), field("nt-tags", "Tags (comma separated)", cur?.tags ?? "", { placeholder: "taxes, house" }),
+          select("nt-piggy", "About a goal (piggy bank)", [["", "None"], ...pigs.filter((p) => p.active).map((p) => [p.id, p.name])], cur?.piggy_id ?? (isNew ? S.notePiggy || "" : "")),
           h("label", {}, "Note ", h("span", { class: "muted small" }, "(# heading, - list, - [ ] checklist, **bold**)"), ta), count),
       h("div", { class: "chips", style: "margin-top:10px" },
         preview ? null : h("button", { class: "btn primary", onclick: () => save() }, "Save"),
         cur ? h("button", { class: "btn", onclick: () => save({ pinned: !cur.pinned }) }, cur.pinned ? "Unpin" : "Pin to top") : null,
         cur ? h("button", { class: "btn", onclick: () => downloadText((cur.title || "note").replace(/[^\w -]+/g, "").trim() + ".md", `# ${cur.title}\n\n${cur.body || ""}`, "text/markdown") }, "Download") : null,
-        cur ? h("button", { class: "btn", onclick: () => discuss({ kind: "note", ref_id: cur.id }, `About my note: ${cur.title}`) }, "Discuss with agent") : null,
+        cur ? h("button", { class: "btn", onclick: () => discuss(cur.piggy_id ? { kind: "piggy", ref_id: +cur.piggy_id } : { kind: "note", ref_id: cur.id }, cur.piggy_id ? `About my goal: ${pigName(cur.piggy_id) || cur.title}` : `About my note: ${cur.title}`) }, "Discuss with agent") : null,
         cur ? h("button", { class: "btn danger", onclick: sure(null, "Sure?", async () => { await api(`/api/notes/${cur.id}`, { method: "DELETE" }); S.note = null; rerender(); }) }, "Delete") : null,
         isNew ? h("button", { class: "btn", onclick: () => { S.note = null; rerender(); } }, "Cancel") : null));
-    if (preview) { const hidden = h("div", { hidden: true }, h("input", { id: "nt-title", value: cur.title }), h("input", { id: "nt-tags", value: cur.tags || "" }), h("textarea", { id: "nt-body" }, cur.body || "")); editor.append(hidden); }
+    if (preview) { const hidden = h("div", { hidden: true }, h("input", { id: "nt-title", value: cur.title }), h("input", { id: "nt-tags", value: cur.tags || "" }), h("input", { id: "nt-piggy", value: cur.piggy_id || "" }), h("textarea", { id: "nt-body" }, cur.body || "")); editor.append(hidden); }
   } else editor = h("div", { class: "panel" }, h("p", { class: "muted" }, "Pick a note, or start a new one."));
   add(root,
     h("div", { class: "panel" }, h("h3", {}, "Ask the agent to write a note"), h("p", { class: "muted small" }, "It reads your accounts, bills, spending, budgets and savings, does the math, and saves the result as a note marked as written by the agent."),
