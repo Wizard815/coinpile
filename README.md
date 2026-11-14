@@ -180,7 +180,21 @@ growth), nper (months to pay off), compound, pct, round, sqrt and friends. Nothi
 
 **Skills** are step-by-step playbooks the agent loads for a job and follows, each naming the tools to call and what to work out: monthly
 review, debt payoff (avalanche vs snowball), emergency fund, subscription audit, goal plan, big purchase, budget setup, idle cash and CDs
-(with current rates from the web), spending spike. They are buttons on the Agent page, and the agent picks one itself when a question fits.
+(with current rates from the web), spending spike, **tax prep** (tax_year: income by payer, spending by category, every Firefly III tag's total,
+lines that look tax related, then the standard deduction from the web; not tax advice), **paycheck splitter** (paycheck_plan: the next
+paycheck, the bills due before the one after it, what each piggy bank needs from it, what is left) and bill negotiation (price rises and a call
+script). They are buttons on the Agent page, and the agent picks one itself when a question fits.
+
+**What Firefly III gives the agent.** Everything Coinpile reads: accounts, balances, transactions with their category, **tags**, **budget**,
+**payee** and notes, bills and which payment paid which bill, recurring transactions, budgets and limits, piggy banks and their history, and
+net worth history. Search by tag (tag "tax-deductible" in Firefly III and the tax year is one search) or by budget. With the Firefly III webhook
+set (Settings, Firefly III) a change there reaches Coinpile at once; the agent can also call refresh_from_firefly when you say you just
+changed something.
+
+**Coinpile as an MCP server** (for Pondering Orb, Claude Desktop or any MCP client): make a token with the **mcp** scope (Settings, Home
+Assistant & API) and point the client at `https://your-coinpile/api/v1/mcp` with `Authorization: Bearer <token>`. It gets every read tool, the
+calculator, and the skills as prompts. Change tools only ask: the request waits under "Waiting for your answer" on Coinpile's Agent page.
+The Orb's summary can also share goals (piggy banks), Firefly III budgets and the next paycheck (Settings, Home Assistant & API, Sharing).
 
 **Money maths and outside facts.** loan_payoff (months, interest, and what an extra payment saves), savings_plan (monthly amount for a date, or
 the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.

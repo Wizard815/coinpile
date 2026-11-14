@@ -145,6 +145,29 @@ NUM, STR, INT = {"type": "number"}, {"type": "string"}, {"type": "integer"}
 DATE = {"type": "string", "description": "YYYY-MM-DD"}
 
 
+def paycheck_plan(store, today_: date, income: str | None = None) -> dict:
+    """The next paycheck: what is due before the one after it, what the piggy banks need from it, and what is left."""
+    inc = [i for i in plan.incomes(store, today_) if i["active"] and i["amount"] > 0]
+    if not inc:
+        return {"error": "no income yet: add a recurring deposit in Firefly III, or add a steady deposit on the Budgets page"}
+    if income:
+        inc = [i for i in inc if str(income).lower() in i["name"].lower()] or inc
+    pay = min(inc, key=lambda i: i["next_due"])
+    first = date.fromisoformat(pay["next_due"])
+    nxt = recur.shift(first, pay["every"], pay["unit"], 1)
+    window = (nxt - first).days
+    due = [b for b in ledger.upcoming(store, (nxt - today_).days, today_)["items"] if first.isoformat() <= b["date"] < nxt.isoformat() and b["payer"] == "me"]
+    per_month = 30.4375 / window if window else 1
+    pigs = [{"piggy_id": g["piggy_id"], "name": g["name"], "monthly": g["monthly"], "from_this_paycheck": round((g["monthly"] or 0) / per_month, 2), "still_needed": g["shortfall"]}
+            for g in plan.piggy_goals(store, today_) if g["shortfall"] > 0.005 and g["monthly"]]
+    bills = round(sum(b["amount"] for b in due), 2)
+    to_pigs = round(sum(p["from_this_paycheck"] for p in pigs), 2)
+    return {"paycheck": {"name": pay["name"], "date": pay["next_due"], "amount": pay["amount"], "into_account": pay.get("account_id")}, "covers_until": nxt.isoformat(),
+            "bills_due_before_next": due, "bills_total": bills, "piggy_banks": pigs, "piggy_total": to_pigs,
+            "left_for_spending": round(pay["amount"] - bills - to_pigs, 2), "days": window,
+            "note": "piggy amounts are Firefly III's monthly target split per paycheck; everyday spending is not in bills"}
+
+
 def build_tools(ctx, chat_id: int | None = None):
     store, today = ctx.store, ctx.today
 
@@ -161,8 +184,8 @@ def build_tools(ctx, chat_id: int | None = None):
 
     def t_search(a):
         r = ledger.query_transactions(store, a.get("q"), a.get("account_id"), a.get("category"), a.get("min_amount"), a.get("max_amount"), a.get("start"), a.get("end"),
-                                      a.get("direction"), min(int(a.get("limit", 25)), 50), 0, a.get("sort", "date_desc"))
-        r["items"] = [{k: t[k] for k in ("id", "date", "name", "amount", "category", "account_name")} for t in r["items"]]
+                                      a.get("direction"), min(int(a.get("limit", 25)), 50), 0, a.get("sort", "date_desc"), tag=a.get("tag"), budget=a.get("budget"))
+        r["items"] = [{k: t.get(k) for k in ("id", "date", "name", "payee", "amount", "category", "budget", "tags", "notes", "account_name")} for t in r["items"]]
         r["note"] = f"showing {len(r['items'])} of {r['total']} matches; the totals cover all matches"
         return r
 
@@ -299,6 +322,45 @@ def build_tools(ctx, chat_id: int | None = None):
             out.append({"month": start.isoformat()[:7], "in": inn, "out": out_, "net": round(inn - out_, 2), "savings_rate": round((inn - out_) / inn, 3) if inn else None})
         avg = lambda k: round(sum(x[k] for x in out) / len(out), 2)          # noqa: E731
         return {"months": out, "average": {"in": avg("in"), "out": avg("out"), "net": avg("net")}, "note": "full months only; transfers between your own accounts are left out"}
+
+    def t_tax_year(a):
+        """One tax year from Firefly III: income by category and payer, spending by category, every tag's total, and lines that look tax related."""
+        y = int(a.get("year") or today().year - 1)
+        s, e = f"{y}-01-01", f"{y}-12-31"
+        rows = store.all("SELECT t.date, t.name, t.payee, t.amount, t.category, t.tags, t.budget, t.notes, coalesce(c.kind,'expense') kind FROM transactions t "
+                         "LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN ? AND ? AND t.pending=0", (s, e))
+        real = [r for r in rows if r["kind"] != "transfer"]
+        def group(items, key):
+            out = {}
+            for r in items:
+                k = r[key] or "(none)"
+                out[k] = round(out.get(k, 0) + r["amount"], 2)
+            return dict(sorted(out.items(), key=lambda kv: -abs(kv[1])))
+        income = [r for r in real if r["amount"] > 0]
+        spend = [r for r in real if r["amount"] < 0]
+        tags = {}
+        for r in rows:
+            for tg in (r["tags"] or "").split(","):
+                if tg:
+                    x = tags.setdefault(tg, {"count": 0, "total": 0.0})
+                    x["count"] += 1
+                    x["total"] = round(x["total"] + r["amount"], 2)
+        words = re.compile(r"\b(tax|irs|donat|charit|church|tithe|medical|doctor|dental|pharmac|hospital|tuition|student loan|daycare|child ?care|hsa|ira|401k|mortgage|property tax|interest)", re.I)
+        flagged = [{k: r[k] for k in ("date", "name", "payee", "amount", "category", "tags")} for r in real if words.search(" ".join(str(r[k] or "") for k in ("name", "payee", "category", "tags", "notes")))]
+        return {"year": y, "income_total": round(sum(r["amount"] for r in income), 2), "income_by_category": group(income, "category"), "income_by_payer": dict(list(group(income, "payee").items())[:12]),
+                "spending_total": round(sum(r["amount"] for r in spend), 2), "spending_by_category": group(spend, "category"), "tags": tags,
+                "looks_tax_related": flagged[:60], "looks_tax_related_count": len(flagged),
+                "note": "from Firefly III; transfers left out. Tag deductible items in Firefly III (e.g. tax-deductible) to make next year easy. Not tax advice."}
+
+    def t_paycheck(a):
+        """The next paycheck: what is due before the one after it, what the piggy banks need from it, and what is left."""
+        return paycheck_plan(store, today(), a.get("income"))
+
+    def t_refresh(a):
+        f = getattr(ctx, "refresh_now", None)
+        if not f:
+            return {"error": "not available here"}
+        return f()
 
     # ---- the web, through the person's own SearXNG
     seen_urls = set()
@@ -461,9 +523,9 @@ def build_tools(ctx, chat_id: int | None = None):
     return [
         ("get_overview", "Net worth, balances by type, monthly subscription cost, the bills due in the next N days, and active alerts.", S({"days": {**INT, "description": "window for upcoming bills, default 30"}}), t_overview),
         ("list_accounts", "Every account with id, institution, type (cash/credit/investment/loan), balance and minimum-balance alert threshold.", S({}), t_accounts),
-        ("search_transactions", "Search and total transactions. Amounts are signed: negative = money out. Totals cover ALL matches even when the list is shorter.",
+        ("search_transactions", "Search and total transactions (description, payee and notes; or by Firefly III tag or budget). Amounts are signed: negative = money out. Totals cover ALL matches even when the list is shorter.",
          S({"q": {**STR, "description": "words in the description"}, "account_id": STR, "category": {**STR, "description": "one or more category names, comma separated"}, "min_amount": {**NUM, "description": "magnitude, >= 0"}, "max_amount": NUM,
-            "start": DATE, "end": DATE, "direction": {"type": "string", "enum": ["in", "out"]}, "limit": INT, "sort": {"type": "string", "enum": ["date_desc", "date_asc", "amount_desc", "amount_asc"]}}), t_search),
+            "start": DATE, "end": DATE, "direction": {"type": "string", "enum": ["in", "out"]}, "limit": INT, "tag": {**STR, "description": "a Firefly III tag, e.g. tax-deductible"}, "budget": {**STR, "description": "a Firefly III budget name"}, "sort": {"type": "string", "enum": ["date_desc", "date_asc", "amount_desc", "amount_asc"]}}), t_search),
         ("spending_by_category", "Money spent per category between two dates (transfers excluded).", S({"start": DATE, "end": DATE}), t_spending),
         ("list_subscriptions", "Every subscription/recurring bill: amount, repeat interval, next due date, monthly cost, who pays, bound account.", S({}), t_subs),
         ("upcoming_bills", "Bills due in the next N days with each occurrence dated, the total you pay, and what others pay.", S({"days": INT}), t_upcoming),
@@ -494,6 +556,11 @@ def build_tools(ctx, chat_id: int | None = None):
         ("savings_plan", "How to reach an amount: give target and have, plus by_date to get the monthly amount needed, or monthly to get the date it is reached. apy % optional (interest counted monthly).",
          S({"target": NUM, "have": NUM, "by_date": DATE, "monthly": NUM, "apy": NUM}, ["target"]), t_savings_plan),
         ("cashflow", "Money in vs money out for each of the last N months (default 6) from Firefly III transactions, transfers excluded, with the savings rate and the average.", S({"months": INT}), t_cashflow),
+        ("tax_year", "One tax year (default last year) from Firefly III: income by category and payer, spending by category, the total of every Firefly III tag, and lines that look tax related (donations, medical, interest...). Not tax advice.",
+         S({"year": INT}), t_tax_year),
+        ("paycheck_plan", "Split the next paycheck: the bills due before the following one, what each piggy bank needs from it, and what is left for spending. income: part of an income's name, to pick one.",
+         S({"income": STR}), t_paycheck),
+        ("refresh_from_firefly", "Read Firefly III again now (the recent months), when the user says they just changed something there or the data looks out of date. At most once a minute.", S({}), t_refresh),
         ("web_search", "Search the web through the user's own SearXNG for current, outside money facts: interest and CD rates, tax brackets and limits, fees, rules, a company's prices. "
          "NEVER put personal details (names, balances, account numbers, employers) in the query. time_range: day, week, month or year for recent facts. Cite the sources you use.",
          S({"query": STR, "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]}}, ["query"]), t_search_web),
@@ -1246,3 +1313,53 @@ def register(app, ctx):
             raise HTTPException(502, f"could not reach the model at {row['base_url']} ({type(e).__name__}). Is it running?")
         out["actions"] = [action_view(r) for r in (store.one("SELECT * FROM agent_actions WHERE id=?", (i,)) for i in out.get("actions", [])) if r]
         return {**out, "provider": {"id": row["id"], "name": row["name"], "model": row["model"], "local": local}}
+
+
+# ------------------------------------------------------------------ MCP: the same tools for other AI assistants (Pondering Orb, Claude Desktop...)
+MCP_PROTOCOL = "2025-06-18"
+
+
+def mcp_handle(ctx, msg: dict) -> dict | None:
+    """One JSON-RPC message from an MCP client. Read tools run; change tools only ask (the request waits for a Yes on Coinpile's Agent page);
+    the skills are offered as prompts. Every call is checked against the tool's schema first, as in Coinpile's own chat."""
+    if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
+        return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "not a JSON-RPC 2.0 message"}}
+    mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
+    if mid is None:                                   # a notification (initialized, cancelled ...): nothing to answer
+        return None
+    ok = lambda r: {"jsonrpc": "2.0", "id": mid, "result": r}                                         # noqa: E731
+    err = lambda code, m: {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": m}}       # noqa: E731
+    tools = [x for x in build_tools(ctx) if x[0] != "use_skill"]
+    if method == "initialize":
+        return ok({"protocolVersion": params.get("protocolVersion") or MCP_PROTOCOL, "capabilities": {"tools": {}, "prompts": {}},
+                   "serverInfo": {"name": "coinpile", "version": "1"},
+                   "instructions": "Coinpile: the user's money, read from their Firefly III. Use the tools for every figure and calculate for all maths. "
+                                   "Tools marked ASKS THE USER FIRST only create a request; it is done when the user presses Yes in Coinpile."})
+    if method == "ping":
+        return ok({})
+    if method == "tools/list":
+        return ok({"tools": [{"name": n, "description": d, "inputSchema": s, "annotations": {"readOnlyHint": n not in WRITE_TOOLS}} for n, d, s, _ in tools]})
+    if method == "tools/call":
+        name, args = params.get("name"), params.get("arguments") or {}
+        found = next((x for x in tools if x[0] == name), None)
+        if not found:
+            return err(-32602, f"unknown tool {name}")
+        problem = check_args(found[2], args)
+        if problem:
+            return ok({"content": [{"type": "text", "text": f"bad arguments: {problem}"}], "isError": True})
+        try:
+            res = found[3](args)
+        except Exception as e:
+            res = {"error": f"{type(e).__name__}: {e}"}
+        if isinstance(res, dict) and res.get("action_id"):
+            res["note"] = "Nothing has changed yet: the user answers Yes or No on Coinpile's Agent page."
+        text = json.dumps(res, default=str)
+        return ok({"content": [{"type": "text", "text": text[:20000]}], "isError": isinstance(res, dict) and "error" in res})
+    if method == "prompts/list":
+        return ok({"prompts": [{"name": k, "description": v[0]} for k, v in agent_skills.SKILLS.items()]})
+    if method == "prompts/get":
+        s = agent_skills.load(params.get("name"))
+        if s.get("error"):
+            return err(-32602, s["error"])
+        return ok({"description": s["what"], "messages": [{"role": "user", "content": {"type": "text", "text": f"{s['what']}\nFollow these steps with the Coinpile tools:\n{s['steps']}\n{s['rules']}"}}]})
+    return err(-32601, f"method {method} is not supported")

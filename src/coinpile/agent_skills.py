@@ -59,6 +59,29 @@ Then, only for the ones the user agrees to, set_budget for this month (each is a
 4. calculate the yearly interest difference (amount * rate difference).
 Answer: how much is idle, what it could earn instead, and options (a ladder, a high-yield account). Offer to mark an account as a CD in Coinpile (asked first).
 """),
+    "tax_prep": ("Get ready for taxes: income, deductible-looking spending, tags, and what to gather.", """
+1. tax_year (the year asked, default last year): income by category and payer, spending by category, tag totals, lines that look tax related.
+2. search_transactions with tag for any tax-like tag (tax-deductible, donation, medical, business) to list them; calculate the totals per kind.
+3. web_search (time_range year) for the year's standard deduction and the limits that matter (official IRS pages; read_webpage to confirm), and compare
+   with calculate (itemised total vs standard deduction).
+Answer: income total and sources, the deductible-looking totals by kind, whether itemising looks worth it, and a short checklist of documents to gather
+(W-2/1099 from each payer listed, receipts for the flagged lines). Say plainly this is not tax advice. Offer to save it as a note, and suggest
+tagging such transactions in Firefly III (for example tax-deductible) so next year is a one-step search.
+"""),
+    "paycheck_splitter": ("Split the next paycheck between bills, piggy banks and spending money.", """
+1. paycheck_plan: the next paycheck, the bills due before the one after it, what each piggy bank needs from it, what is left.
+2. list_accounts: is the money for those bills in the account they come out of? (calculate the gap per account if not).
+3. firefly_budgets and spending_by_category for this month: does "left for spending" cover what is usually spent in the same number of days
+   (calculate daily average * days)?
+Answer: a short table: bills (with dates), each piggy bank, spending money, and anything short. Suggest a fixed split if the user wants one
+(e.g. a percentage to savings) worked out with calculate. Offer to save it as a note.
+"""),
+    "bill_negotiation": ("Find bills and subscriptions whose price went up, and prepare to call them.", """
+1. list_subscriptions, then search_transactions for each one over the last 12 months (sort date_asc): the first and the latest amount; calculate the increase and its yearly cost.
+2. web_search for current promotions or the going rate for that service (no personal details in the query).
+Answer: the bills that went up, by how much a year, the going rate found (with source and date), and a short call script per bill
+(what you pay, what new customers pay, ask for the retention rate, ready to cancel). Offer to save it as a note.
+"""),
     "spending_spike": ("Why spending was higher than usual, and what to do about it.", """
 1. cashflow (months 4): which month and by how much (calculate the difference against the average).
 2. spending_by_category for that month and the month before: the categories that grew most.
