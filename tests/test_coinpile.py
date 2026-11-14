@@ -218,7 +218,10 @@ def test_the_agent_answers_from_the_firefly_iii_copy(tmp_path):
     assert got["search_transactions"]["total"] == 3 and got["search_transactions"]["sum_out"] == -47.97
     assert [s["name"] for s in got["list_subscriptions"]] == ["Rent"] and got["savings_summary"]["total_savings"] == 5000
     assert any("netflix" in s["name"].lower() for s in got["find_recurring_payments"])                                 # the subscription catcher works on Firefly III data
-    assert got["write_note"]["saved"] and c.get("/api/notes").json()[0]["author"] == "agent"
+    assert got["write_note"]["status"].startswith("waiting") and not c.get("/api/notes").json()                    # asked, not done
+    assert out["actions"][0]["summary"].startswith('Save a note "Plan"')
+    assert c.post(f"/api/agent/actions/{got['write_note']['action_id']}/yes").json()["status"] == "done"
+    assert c.get("/api/notes").json()[0]["author"] == "agent"
 
 
 def test_net_worth_has_a_past_from_firefly_iii(tmp_path):

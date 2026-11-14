@@ -514,6 +514,23 @@ def budgets(ff: Firefly, start: date, end: date) -> list[dict]:
     return out
 
 
+def set_budget_limit(ff: Firefly, name: str, amount: float, start: date, end: date) -> dict:
+    """Set a budget's amount for one period, making the budget first if Firefly III has none of that name."""
+    b = next((x for x in ff.pages("/budgets") if ((x.get("attributes") or {}).get("name") or "").strip().lower() == name.strip().lower()), None)
+    made = False
+    if not b:
+        b = ff.send("POST", "/budgets", {"name": name})["data"]
+        made = True
+    bid = str(b["id"])
+    have = next(iter(ff.pages(f"/budgets/{bid}/limits", start=start.isoformat(), end=end.isoformat())), None)
+    body = {"start": start.isoformat(), "end": end.isoformat(), "amount": f"{amount:.2f}"}
+    if have:
+        ff.send("PUT", f"/budgets/{bid}/limits/{have['id']}", body)
+    else:
+        ff.send("POST", f"/budgets/{bid}/limits", body)
+    return {"budget_id": bid, "made_budget": made, "amount": round(amount, 2), "month": start.isoformat()[:7]}
+
+
 def refresh(db, ff: Firefly, today: date, full: bool = False, now: float | None = None) -> dict:
     """Bring the local copy up to date. A full pass (every transaction) on the first run and once a day; otherwise the last 120 days, which is where edits happen."""
     import time

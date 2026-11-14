@@ -154,7 +154,26 @@ The agent sees what every page shows, through the same code the pages use, so it
 | Savings, CDs, affordability | savings_summary, maturity_outlook, can_i_afford, project_balance |
 | Net worth, investments, banks | net_worth_history, list_investments, bank_connections (the Plaid connector) |
 
-It cannot move money or change Firefly III. It can write notes (on a piggy bank when the note is about one) and add a subscription only when you ask.
+**Reading is always allowed. Every change is asked first.** When the agent wants to change something, it does not: it puts a card in the chat
+saying exactly what will happen and where ("Record in Firefly III: paid 9.99 "Coffee beans" on 2026-11-13, account Everyday Checking, category
+Groceries"), with **Yes, do it** and **No**. Only Yes runs it; your answer goes back into the chat so the agent knows. What it can ask for:
+
+| Change | Where |
+|---|---|
+| record a transaction (cash, a payment the bank has not sent) | Firefly III |
+| set a transaction's category, optionally with a rule for future ones | Firefly III |
+| make a piggy bank, change its name, target, date or notes, put money in or take it out | Firefly III |
+| set a budget's amount for a month (made if missing) | Firefly III |
+| add a subscription, optionally also as a Firefly III bill | Coinpile / Firefly III |
+| save a note (on a piggy bank when it is about one), mark an account as a CD with its APY and maturity | Coinpile |
+
+Your Yes is the consent, so an approved change runs even with the matching "send to Firefly III" switch off. It cannot move money between banks.
+
+**Money maths and outside facts.** loan_payoff (months, interest, and what an extra payment saves), savings_plan (monthly amount for a date, or
+the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.
+With a **SearXNG** address in Settings, Agent models, Web search (or `SEARXNG_URL`), web_search looks up current rates, limits and rules and
+read_webpage reads a page it found to check a figure; it names the source and date. SearXNG must allow JSON (`search.formats: [html, json]` in
+its settings.yml). The agent is told never to put personal details in a search, and it can only open pages its search just returned.
 A model without tool calling gets a summary of the same data instead. "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
 
 ## Settings
