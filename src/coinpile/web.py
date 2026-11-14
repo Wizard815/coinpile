@@ -929,8 +929,12 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.get("/api/piggy-banks/overview")
         def piggy_overview():
             items, goals = firefly.piggies(db), goal_piggies()
+            notes = {}
+            for n in db.all("SELECT id, title, author, updated, piggy_id FROM notes WHERE piggy_id IS NOT NULL ORDER BY pinned DESC, updated DESC"):
+                notes.setdefault(n["piggy_id"], []).append({"id": n["id"], "title": n["title"], "author": n["author"], "updated": n["updated"]})
             for p in items:
                 p["goal"] = goals.get(p["id"])
+                p["my_notes"] = notes.get(p["id"], [])
                 p["link"] = f"{ff_public}/piggy-banks/show/{p['id']}" if ff_public else None
                 p["left"] = round(max(0.0, (p["target"] or 0) - (p["current"] or 0)), 2) if p["target"] else None
             act = [p for p in items if p["active"]]

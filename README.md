@@ -13,14 +13,18 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
   down; after the last one it moves to **Finished**, kept so you can look back (Extend or Delete it there). The end date also goes to the Firefly III bill.
   **Missing subscriptions**: when a subscription's usual payment does not show up (3 days of grace), it is called out on this page, on the Overview and in
   notifications. With "Paid from" set, that account is checked; without it, every account is, by the payee's name, once that payee has been seen before.
-- **Savings**: Coinpile's own goal planner (set money aside for goals, free vs. promised money, CDs and when they mature).
+- **Savings**: your savings accounts from Firefly III, free vs. set-aside money, and CDs and bonds. A CD is an account: count any account as savings
+  and say what it is (CD, money market, bond, HSA, 529...) with its APY, opened date, maturity and term (kept in Coinpile; the balance stays Firefly III's).
+  Goals are your Firefly III piggy banks; goals made in Coinpile before that are listed as "older" until you close them or make them piggy banks.
 - **Piggy banks**: your Firefly III piggy banks with progress, what is still needed, by when, which account holds the money, and their history. With the
   Piggy banks switch on: make new ones, change name, target, date and notes, and put money in or take it out. Firefly III 6.7.9 has a bug that stops any
   app changing a piggy bank's amount through its API; Coinpile then says so and links straight to that piggy bank in Firefly III. Piggy banks that follow a
   Coinpile goal are left to the goal.
-- **Budgets**: the monthly plan (budgets per category, bills, what is spent, what is left) and income.
+- **Budgets**: Firefly III's budgets, then the monthly plan (budgets per category, bills, what is spent, what is left) and income. Income comes from
+  Firefly III: its recurring deposits, and steady deposits found in its transactions.
 - **Notes**: search, filter (pinned, mine, by the agent, by tag), tags, templates (monthly review, checklist, big purchase), a read view with headings,
-  lists and tick-off checklists, download as Markdown, and the agent writing a note for you from your real numbers.
+  lists and tick-off checklists, download as Markdown, and the agent writing a note for you from your real numbers. A note can be about a piggy bank:
+  it then shows on that piggy bank, and the agent reads the piggy bank and its notes together ("Discuss with agent").
 - **Agent**: chat with a model (a local one such as Ollama by default) that can look up your accounts, transactions, subscriptions, savings and bills, and write notes.
 - **Settings, Banks**: your banks at the Plaid connector: link a bank, fix a bank sign-in, pull now.
 
@@ -42,8 +46,8 @@ Coinpile reads everything Firefly III has, so you set it up once, in Firefly III
 | Budgets and budget limits | Budgets page, "Budgets in Firefly III" (limit, spent, left, auto-budgets), for any month |
 | Piggy banks | Piggy banks page, with their history |
 
-What Firefly III has no place for stays in Coinpile, and is never sent anywhere: notes; goals and free vs. set-aside money; CDs, APY and maturities;
-the per-category plan; income you add yourself; who pays a subscription, which account pays it, its reminder, its category and the size of its plan
+What Firefly III has no place for stays in Coinpile, and is never sent anywhere: notes (also the ones about a piggy bank); which account is a CD
+and its APY and maturity; the per-category plan; who pays a subscription, which account pays it, its reminder, its category and the size of its plan
 (these can be set on Firefly III bills and recurring transactions too: their name, amount, schedule and end stay Firefly III's); nicknames; alerts.
 
 Firefly III has no websocket or inbound hook: other apps change it only through its API, which is what the switches below use. Not offered, on purpose:

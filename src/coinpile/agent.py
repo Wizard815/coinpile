@@ -26,6 +26,17 @@ PRESETS = [
 ]
 
 
+
+def piggy_banks(store) -> list[dict]:
+    """The person's goals: their Firefly III piggy banks, each with the notes they wrote about it."""
+    notes = {}
+    for n in store.all("SELECT id, title, body, author, piggy_id FROM notes WHERE piggy_id IS NOT NULL ORDER BY updated DESC"):
+        notes.setdefault(n["piggy_id"], []).append({"note_id": n["id"], "title": n["title"], "by": n["author"], "text": (n["body"] or "")[:800]})
+    return [{"piggy_id": p["id"], "name": p["name"], "saved": p["current"], "target": p["target"], "still_needed": round(max(0, (p["target"] or 0) - (p["current"] or 0)), 2) if p["target"] else None,
+             "target_date": p["target_date"], "save_per_month": p["save_per_month"], "held_in": [x["name"] for x in p["accounts"]], "firefly_notes": p.get("notes") or "",
+             "my_notes": notes.get(p["id"], [])} for p in plan._piggies(store)]
+
+
 def is_local(base_url: str) -> bool:
     """True when the endpoint is on this machine or your own network, so your data never leaves it."""
     host = (urlparse(base_url).hostname or "").lower()
@@ -123,12 +134,14 @@ def build_tools(ctx):
         gv, sv = plan.goals_view(store, today()), ledger.savings_summary(store, today())
         return {"places": gv["places"], "total_savings": gv["total"], "earmarked_for_goals": gv["allocated"], "free_savings": gv["free"], "overallocated": gv["overallocated"],
                 "weighted_apy": sv["weighted_apy"], "yearly_interest": sv["yearly_interest"], "maturing_soon": sv["maturing_soon"],
-                "goals": [{k: g[k] for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "priority", "monthly", "status") if k in g} for g in gv["items"]]}
+                "goals": [{k: g[k] for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "priority", "monthly", "status") if k in g} for g in gv["items"]],
+                "piggy_banks": [{k: p[k] for k in ("piggy_id", "name", "saved", "target", "still_needed", "target_date")} for p in piggy_banks(store)]}
 
     def t_goals(a):
         gv = plan.goals_view(store, today())
-        return {"free_savings": gv["free"], "total_savings": gv["total"], "earmarked": gv["allocated"], "still_needed_for_goals": gv["needed"],
-                "goals": [{k: v for k, v in g.items() if k != "allocations"} | {"earmarks": g["allocations"]} for g in gv["items"]]}
+        return {"free_savings": gv["free"], "total_savings": gv["total"], "set_aside": gv["allocated"], "still_needed_for_goals": gv["needed"],
+                "goals_are_piggy_banks": piggy_banks(store),
+                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations"} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active"]}
 
     def t_add_goal(a):
         try:
@@ -203,10 +216,13 @@ def build_tools(ctx):
         title, body = str(a.get("title", "")).strip(), str(a.get("body", ""))
         if not title:
             return {"error": "title required"}
+        pid = str(a.get("piggy_id") or "") or None
+        if pid and not store.one("SELECT 1 FROM ff_piggy WHERE id=?", (pid,)):
+            return {"error": "no such piggy bank (use piggy_id from list_goals)"}
         ts = sync.now()
         with store.tx() as c:
-            cur = c.execute("INSERT INTO notes(title,body,author,pinned,created,updated) VALUES(?,?,?,?,?,?)", (title[:120], body[:20000], "agent", 0, ts, ts))
-        return {"saved": True, "id": cur.lastrowid, "author": "agent"}
+            cur = c.execute("INSERT INTO notes(title,body,author,pinned,piggy_id,created,updated) VALUES(?,?,?,?,?,?,?)", (title[:120], body[:20000], "agent", 0, pid, ts, ts))
+        return {"saved": True, "id": cur.lastrowid, "author": "agent", "piggy_id": pid}
 
     def t_propose(a):
         try:
@@ -246,15 +262,11 @@ def build_tools(ctx):
         ("upcoming_bills", "Bills due in the next N days with each occurrence dated, the total you pay, and what others pay.", S({"days": INT}), t_upcoming),
         ("find_recurring_payments", "Payments that repeat at a steady interval and amount in the transaction history but are not tracked yet, plus pending proposals.", S({}), t_recurring),
         ("savings_summary", "Where the savings are (accounts, CDs...), total, how much is earmarked for goals and how much is free, APY and maturities.", S({}), t_savings),
-        ("list_goals", "Savings goals (things to save for): target, earmarked amount, shortfall, deadline, monthly needed. Also the free savings.", S({}), t_goals),
+        ("list_goals", "The user's goals, which are their Firefly III piggy banks: saved, target, still needed, target date, monthly amount, where the money is held, and the user's own notes about each. Also the free savings.", S({}), t_goals),
         ("maturity_outlook", "For each CD/bond with a maturity date: value then, what is pinned to goals, what is free, and which goals the free money would reach in priority order.", S({"days": INT}), t_maturities),
         ("can_i_afford", "Check whether a purchase fits in FREE savings (not earmarked) and how long saving would take at the monthly plan's leftover.", S({"amount": NUM}, ["amount"]), t_afford),
         ("spending_forecast", "Projected spending for this month from past months (per category), what is spent so far, and how both compare to average monthly income.", S({"months": INT}), t_forecast),
         ("monthly_plan", "Monthly income vs bills, budgets and goal contributions, with what is left over. month is YYYY-MM (default this month).", S({"month": STR}), t_plan),
-        ("add_goal", "Create a savings goal. ONLY when the user asks. It starts unfunded; set use_free_savings true ONLY if the user says to take the free money now. Optional deadline (YYYY-MM-DD), priority 1 high..3 low, monthly contribution.",
-         S({"name": STR, "target": NUM, "deadline": DATE, "priority": INT, "monthly": NUM, "note": STR, "use_free_savings": {"type": "boolean"}}, ["name", "target"]), t_add_goal),
-        ("fund_goal", "Earmark FREE savings for a goal (goal_id from list_goals). ONLY when the user asks. Optional place = a savings place key like s:3 or a:abc to take it from one account.",
-         S({"goal_id": INT, "amount": NUM, "place": STR}, ["goal_id", "amount"]), t_fund_goal),
         ("get_alerts", "Active alerts: overdrawn or low accounts, expected payments not seen, CDs maturing, bills due soon.", S({}), t_alerts),
         ("project_balance", "Estimate cash balance over the next N days from today's balances, upcoming bills and detected steady income. Excludes everyday spending.",
          S({"days": INT, "account_id": STR, "include_income": {"type": "boolean"}}), t_project),
@@ -262,7 +274,8 @@ def build_tools(ctx):
         ("calendar_events", "Read events from the user's CalDAV calendar, with a dollar amount when the title has one.", S({"days_ahead": INT, "days_back": INT}), t_calendar),
         ("list_notes", "Titles of planner notes.", S({}), t_notes),
         ("read_note", "Read one planner note by id.", S({"id": INT}, ["id"]), t_read_note),
-        ("write_note", "Save a note in the user's Planner (marked as written by the agent). Use it for plans, budgets and summaries the user asks for.", S({"title": STR, "body": STR}, ["title", "body"]), t_write_note),
+        ("write_note", "Save a note (marked as written by the agent). Use it for plans, budgets and summaries the user asks for. Give piggy_id (from list_goals) when the note is about one goal/piggy bank: it then sits with that piggy bank.",
+         S({"title": STR, "body": STR, "piggy_id": STR}, ["title", "body"]), t_write_note),
         ("propose_subscription", "Suggest tracking a repeating payment. It only creates a proposal the user must approve.", S({"name": STR, "amount": NUM, "every": INT, "unit": {"type": "string", "enum": list(recur.UNITS)}, "account_id": STR, "reason": STR}, ["name", "amount", "every", "unit"]), t_propose),
         ("add_subscription", "Add a subscription/recurring bill to the user's Subscriptions. ONLY call this when the user has clearly asked you to add it; otherwise use propose_subscription. "
          "Needs name, amount and an interval (cycle like monthly/weekly/quarterly/yearly, or every + unit). Optional: next_date, account_id (from list_accounts), payer 'me' or 'other' (then payer_name), category, payment_method.",
@@ -277,7 +290,7 @@ def system_prompt(name: str, today: date) -> str:
     return (f"You are Coinpile, the finance assistant for {name}'s private bank dashboard. Today is {today.isoformat()}.\n"
             "You can only see data through the tools. Use them for every figure; never guess or invent numbers. Use calculate for arithmetic and show the working briefly.\n"
             "Amounts are signed: positive is money in, negative is money out. Projections are estimates that leave out everyday spending, so say so.\n"
-            "You cannot move money. You may save planner notes. Add a subscription, add a goal or earmark savings only when the user explicitly asks (add_subscription, add_goal, fund_goal); otherwise propose it. "
+            "You cannot move money. You may save notes (with piggy_id when a note is about one goal). The user's goals are their Firefly III piggy banks (list_goals); you cannot change them. Add a subscription only when the user explicitly asks (add_subscription); otherwise propose it. "
             "Savings model: savings sit in places (accounts, CDs); goals are what they are for; earmarked money is reserved for a goal and free money is the rest. Before saying someone can afford something, call can_i_afford. Be concise.")
 
 
@@ -331,7 +344,7 @@ def _call_anthropic(http, prov, key, system, messages, tools):
             "tool_calls": [{"id": b["id"], "name": b["name"], "args": b.get("input") or {}} for b in blocks if b["type"] == "tool_use"]}
 
 
-WRITE_TOOLS = {"add_subscription", "write_note", "propose_subscription", "add_goal", "fund_goal"}
+WRITE_TOOLS = {"add_subscription", "write_note", "propose_subscription"}
 
 
 def est_tokens(text: str) -> int:
@@ -631,6 +644,13 @@ def register(app, ctx):
                     links.append({"kind": "goal", "ref_id": g["id"], "title": g["name"]})
                     text.append(f"GOAL #{g['id']} {g['name']}: target ${g['target']:,.2f}, earmarked ${g['allocated']:,.2f}, still needs ${g['shortfall']:,.2f}"
                                 + (f", deadline {g['deadline']}" if g.get("deadline") else "") + (f", planned ${g['monthly']:,.2f}/month" if g.get("monthly") else "") + f". Free savings overall: ${gv['free']:,.2f}.")
+            elif l["kind"] == "piggy":
+                p = next((x for x in piggy_banks(store) if x["piggy_id"] == str(l["ref_id"])), None)
+                if p:
+                    links.append({"kind": "piggy", "ref_id": l["ref_id"], "title": p["name"]})
+                    text.append(f"PIGGY BANK (a goal, in Firefly III) {p['name']}: saved {p['saved']:,.2f}" + (f" of {p['target']:,.2f}, still needs {p['still_needed']:,.2f}" if p["target"] else "")
+                                + (f", by {p['target_date']}" if p["target_date"] else "") + (f", Firefly III says save {p['save_per_month']:,.2f}/month" if p["save_per_month"] else "")
+                                + "".join(f"\nNOTE '{n['title']}' (by {n['by']}): {n['text']}" for n in p["my_notes"]))
             elif l["kind"] == "note":
                 n = store.one("SELECT * FROM notes WHERE id=?", (l["ref_id"],))
                 if n:
@@ -684,7 +704,7 @@ def register(app, ctx):
         with store.tx() as c:
             cur = c.execute("INSERT INTO chats(title,created,updated) VALUES(?,?,?)", ((b.title or "New chat")[:80] if b else "New chat", ts, ts))
             for l in (b.links if b else []):
-                if l.get("kind") in ("goal", "note") and isinstance(l.get("ref_id"), int):
+                if l.get("kind") in ("goal", "note", "piggy") and isinstance(l.get("ref_id"), int):
                     c.execute("INSERT OR IGNORE INTO chat_links VALUES(?,?,?)", (cur.lastrowid, l["kind"], l["ref_id"]))
         return chat_view(cur.lastrowid)
 
@@ -695,10 +715,10 @@ def register(app, ctx):
     @app.post("/api/chats/{cid}/links")
     def chat_link(request: Request, cid: int, b: LinkIn):
         auth(request)
-        if b.kind not in ("goal", "note"):
-            raise HTTPException(422, "kind must be goal or note")
-        table = "goals" if b.kind == "goal" else "notes"
-        if not store.one("SELECT 1 FROM chats WHERE id=?", (cid,)) or not store.one(f"SELECT 1 FROM {table} WHERE id=?", (b.ref_id,)):
+        if b.kind not in ("goal", "note", "piggy"):
+            raise HTTPException(422, "kind must be goal, note or piggy")
+        table, ref = {"goal": "goals", "note": "notes", "piggy": "ff_piggy"}[b.kind], (str(b.ref_id) if b.kind == "piggy" else b.ref_id)
+        if not store.one("SELECT 1 FROM chats WHERE id=?", (cid,)) or not store.one(f"SELECT 1 FROM {table} WHERE id=?", (ref,)):
             raise HTTPException(404, "chat or item not found")
         with store.tx() as c:
             c.execute("INSERT OR IGNORE INTO chat_links VALUES(?,?,?)", (cid, b.kind, b.ref_id))
