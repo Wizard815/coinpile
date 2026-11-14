@@ -82,7 +82,7 @@ class Connector:
     # ---- joint accounts at the connector: a person asks to share one of their bank accounts with another person, who accepts or declines
     def _seg(self, s: str, what: str) -> str:
         from urllib.parse import quote
-        if not re.fullmatch(r"[A-Za-z0-9_:.-]{1,120}", s or ""):
+        if not re.fullmatch(r"[A-Za-z0-9_:.-]{1,120}", s or "") or s.strip(".") == "":
             raise ConnectorError(f"not a {what}")
         return quote(s, safe="")
 

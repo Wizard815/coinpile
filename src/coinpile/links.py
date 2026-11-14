@@ -87,6 +87,8 @@ def unlink(db, peer: str, notify: bool = True) -> None:
         c.execute("DELETE FROM outbox WHERE peer=?", (peer,))
         c.execute("DELETE FROM link_shares WHERE peer=?", (peer,))
         c.execute("DELETE FROM shared_in WHERE peer=?", (peer,))
+        c.execute("DELETE FROM joint_accounts WHERE peer=?", (peer,))
+        c.execute("UPDATE accounts SET joint_with=NULL, my_share=NULL WHERE joint_with=?", (peer,))
         for g in c.execute("SELECT id, members FROM goals WHERE shared_id IS NOT NULL").fetchall():
             members = [m for m in json.loads(g["members"] or "[]") if m != peer]
             c.execute("DELETE FROM goal_partners WHERE goal_id=? AND peer=?", (g["id"], peer))
@@ -444,6 +446,9 @@ def joint_offer(db, me: str, peer: str, account_id: str, my_share: float = 50) -
         raise LinkError("your share is a percentage between 0 and 100")
     if db.one("SELECT 1 FROM joint_accounts WHERE account_id=? AND state='active'", (account_id,)):
         raise LinkError("that account is already linked as joint")
+    old = db.one("SELECT * FROM joint_accounts WHERE account_id=?", (account_id,))
+    if old:                                                   # an earlier offer that was never answered: withdraw it first
+        queue(db, old["peer"], "joint_end", {"ref": account_id, "to": old["peer_account"] or ""}, "joint-end:" + account_id)
     with db.tx() as c:
         c.execute("DELETE FROM joint_accounts WHERE account_id=?", (account_id,))
         jid = c.execute("INSERT INTO joint_accounts(account_id,peer,my_share,state,created) VALUES(?,?,?,'offered',?)", (account_id, peer, my_share, now())).lastrowid
@@ -459,12 +464,14 @@ def joint_accept(db, me: str, jid: int, account_id: str) -> dict:
     a = db.one("SELECT * FROM accounts WHERE id=?", (account_id,))
     if not a:
         raise KeyError(account_id)
+    if a["kind"] not in JOINT_KINDS:
+        raise LinkError("only a bank account, card or loan can be joint")
     if db.one("SELECT 1 FROM joint_accounts WHERE account_id=? AND id!=?", (account_id, jid)):
         raise LinkError("that account is already linked as joint")
     with db.tx() as c:
         c.execute("UPDATE joint_accounts SET account_id=?, state='active' WHERE id=?", (account_id, jid))
         _set_share(c, account_id, r["peer"], r["my_share"])
-    queue(db, r["peer"], "joint_accept", {**_acct_msg(a), "to": r["peer_account"]}, "joint:" + account_id)
+    queue(db, r["peer"], "joint_accept", {**_acct_msg(a), "to": r["peer_account"], "share": r["my_share"]}, "joint:" + account_id)
     push_joint(db)
     return joint_view_one(db, jid)
 
@@ -486,10 +493,13 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
             return {"ignored": "malformed"}
         if not ref or not 0 < share < 100:
             return {"ignored": "malformed"}
-        if db.one("SELECT COUNT(*) n FROM joint_accounts WHERE state='pending'")["n"] >= 20:
+        if db.one("SELECT COUNT(*) n FROM joint_accounts WHERE state='pending' AND peer=? AND peer_account!=?", (sender, ref))["n"] >= 20:
             return {"ignored": "too many offers"}
         with db.tx() as c:
-            c.execute("DELETE FROM joint_accounts WHERE peer=? AND peer_account=? AND state='pending'", (sender, ref))
+            for old in c.execute("SELECT * FROM joint_accounts WHERE peer=? AND peer_account=?", (sender, ref)).fetchall():
+                if old["state"] == "active":              # they ended it on their side and are asking again
+                    _set_share(c, old["account_id"], None, None)
+                c.execute("DELETE FROM joint_accounts WHERE id=?", (old["id"],))
             c.execute("INSERT INTO joint_accounts(account_id,peer,peer_account,peer_name,peer_mask,my_share,state,created) VALUES(NULL,?,?,?,?,?,'pending',?)",
                       (sender, ref, str(p.get("name") or "")[:80] + (f" ({str(p.get('institution'))[:60]})" if p.get("institution") else ""), str(p.get("mask") or "")[:8], share, now()))
         return {"ok": True}
@@ -497,6 +507,15 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
         r = db.one("SELECT * FROM joint_accounts WHERE peer=? AND account_id=? AND state='offered'", (sender, to))
         if not r:
             return {"ignored": "no such offer"}
+        try:
+            theirs = float(p["share"]) if p.get("share") is not None else 100 - r["my_share"]
+        except (TypeError, ValueError):
+            theirs = -1
+        if abs(theirs + r["my_share"] - 100) > 0.01:          # they accepted a different split: end it on both sides, offer again
+            with db.tx() as c:
+                c.execute("DELETE FROM joint_accounts WHERE id=?", (r["id"],))
+            queue(db, sender, "joint_end", {"ref": r["account_id"], "to": ref}, "joint-end:" + r["account_id"])
+            return {"ignored": "the shares do not add up to 100"}
         with db.tx() as c:
             c.execute("UPDATE joint_accounts SET state='active', peer_account=?, peer_name=?, peer_mask=? WHERE id=?",
                       (ref, str(p.get("name") or "")[:80], str(p.get("mask") or "")[:8], r["id"]))
@@ -526,27 +545,59 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
     return {"ignored": "unknown message"}
 
 
-def contributions(db, account_id: str, months: int = 12) -> dict:
+def contributions(db, account_id: str, months: int = 12, today=None) -> dict:
     """What I moved into this account from my own accounts, per month, from my Firefly III: Firefly III transfers whose other side is one of my
-    accounts, and (as bank feeds bring them) a deposit here matched by a withdrawal of the same amount from another of my accounts within 3 days.
-    Money the other person moves in is in my Firefly III only as a deposit with no such withdrawal, so it is never counted as mine."""
-    out = {}
-    rows = db.all("""SELECT substr(t.date,1,7) m, t.amount FROM transactions t WHERE t.account_id=? AND t.amount>0 AND t.date >= date('now', ?) AND (
-                       t.id LIKE '%:in' OR EXISTS (SELECT 1 FROM transactions o WHERE o.account_id != t.account_id AND o.amount = -t.amount
-                                                   AND o.date BETWEEN date(t.date, '-3 days') AND date(t.date, '+3 days')))""", (account_id, f"-{months} months"))
-    for r in rows:
-        out[r["m"]] = round(out.get(r["m"], 0) + r["amount"], 2)
+    own (not joint) bank accounts, and (as bank feeds bring them) a deposit here matched one to one by a withdrawal of the same amount from one of
+    my own bank accounts within 3 days. Money the other person moves in is in my Firefly III only as a deposit with no such withdrawal, so it is
+    never counted as mine; pending lines are left out until they settle."""
+    from datetime import date as _d, timedelta
+    today = today or _d.today()
+    y, m = today.year, today.month - (months - 1)
+    while m < 1:
+        y, m = y - 1, m + 12
+    since = f"{y:04d}-{m:02d}-01"
+    joint = {r["account_id"] for r in db.all("SELECT account_id FROM joint_accounts WHERE account_id IS NOT NULL")}
+    own = {r["id"] for r in db.all("SELECT id FROM accounts WHERE kind='cash'")} - joint - {account_id}
+    deps = db.all("""SELECT id, date, amount FROM transactions WHERE account_id=? AND amount>0 AND COALESCE(pending,0)=0 AND date>=? AND date<=?
+                     ORDER BY date, id""", (account_id, since, today.isoformat()))
+    if not own or not deps:
+        return {}
+    marks = ",".join("?" * len(own))
+    pool = db.all(f"""SELECT id, date, amount FROM transactions WHERE account_id IN ({marks}) AND amount<0 AND COALESCE(pending,0)=0
+                      AND id NOT LIKE '%:out' AND id NOT LIKE '%:in' AND date>=? ORDER BY date, id""",
+                  (*own, (_d.fromisoformat(since) - timedelta(days=3)).isoformat()))
+    used, out = set(), {}
+    for d in deps:
+        mine = False
+        if d["id"].endswith(":in"):
+            leg = db.one("SELECT account_id FROM transactions WHERE id=?", (d["id"][:-3] + ":out",))
+            mine = bool(leg and leg["account_id"] in own)
+        else:
+            dd = _d.fromisoformat(d["date"][:10])
+            best = None
+            for w in pool:
+                if w["id"] in used or abs(w["amount"] + d["amount"]) > 0.005:
+                    continue
+                gap = abs((_d.fromisoformat(w["date"][:10]) - dd).days)
+                if gap <= 3 and (best is None or gap < best[0]):
+                    best = (gap, w["id"])
+            if best:
+                used.add(best[1])
+                mine = True
+        if mine:
+            k = d["date"][:7]
+            out[k] = round(out.get(k, 0) + d["amount"], 2)
     return out
 
 
-def push_joint(db) -> int:
+def push_joint(db, today=None) -> int:
     """Send the other person my numbers for each joint account whenever they change: the balance my Firefly III shows and what I put in."""
     n = 0
     for r in db.all("SELECT * FROM joint_accounts WHERE state='active'"):
         a = db.one("SELECT balance, updated FROM accounts WHERE id=?", (r["account_id"],))
         if not a or status(db, r["peer"]) != "active":
             continue
-        msg = {"ref": r["account_id"], "to": r["peer_account"], "balance": round(a["balance"] or 0, 2), "as_of": a["updated"] or "", "in_by_month": contributions(db, r["account_id"])}
+        msg = {"ref": r["account_id"], "to": r["peer_account"], "balance": round(a["balance"] or 0, 2), "as_of": a["updated"] or "", "in_by_month": contributions(db, r["account_id"], today=today)}
         sig = hashlib.sha256(json.dumps(msg, sort_keys=True).encode()).hexdigest()
         if sig == r["sent_sig"]:
             continue
@@ -584,7 +635,7 @@ def joint_view_one(db, jid: int, today=None) -> dict:
     if r["state"] == "active":
         if not a:
             out["problem"] = "this account is no longer in your Firefly III"
-        mine = contributions(db, r["account_id"]) if a else {}
+        mine = contributions(db, r["account_id"], today=today) if a else {}
         theirs = (stats or {}).get("in_by_month") or {}
         m_in, t_in = mine.get(month, 0.0), theirs.get(month, 0.0)
         due_me = round((m_in + t_in) * r["my_share"] / 100, 2)
