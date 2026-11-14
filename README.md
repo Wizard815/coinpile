@@ -33,14 +33,24 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
 - **Joint accounts at the Plaid connector** (Settings, Banks): ask to share one of your bank accounts with another person on the connector;
-  they accept (as a new account in their Firefly III, or one they already have) or decline, and either can stop later. Only accepted accounts reach
-  their Firefly III.
+  no admin is needed. They accept (as a new account in their Firefly III, linked to one of their own accounts that is not already used, or
+  skipped) or decline, and either can stop later (you with Stop, they with Leave). Only accepted accounts reach their Firefly III. The
+  connector's README has the details and what happens at the edges.
 - **Joint accounts** (Settings, Sharing): a bank account you share with a linked person is in both your Firefly III (accepted at the Plaid connector,
   or set by its admin). One of you offers "my account X is joint with you, I count 50%"; the other picks their copy of it (Coinpile
   suggests it by its last digits). From then on each side counts only its share in net worth and savings, each Coinpile sends the other the
-  balance its own Firefly III shows and what that person moved in from their own accounts (Firefly III transfers, or a bank-feed withdrawal and
-  deposit of the same amount within 3 days), and both see a settle-up line ("bob owes you 137.50") and whether the two Firefly III copies agree.
-  Either can stop it. Coinpile only: nothing is written to Firefly III, and every number comes from each person's own Firefly III.
+  balance its own Firefly III shows and what that person moved in, and both see a settle-up line ("bob owes you 137.50") and whether the two
+  Firefly III copies agree. Either can stop it. Coinpile only: nothing is written to Firefly III, and every number comes from each person's own Firefly III.
+  * **What you put in** counts Firefly III transfers from your own bank accounts, and bank-feed pairs: a deposit into the joint account matched
+    by a withdrawal of the same amount from one of your own bank accounts within 3 days. Each withdrawal matches one deposit only. Card
+    purchases, other joint accounts and pending lines are not counted, so the other person's money is never counted as yours.
+  * Only bank accounts, cards and loans can be joint. The two shares must add up to 100%; an acceptance that does not is ended on both sides.
+  * Offering the account to someone else withdraws the earlier offer. Unlinking a person, or Forget me, ends every joint account with them and
+    both sides count the whole account again. One person can have at most 20 offers waiting for you.
+  * **The agent and joint accounts:** your own side (your account, your share, what you put in) is always available to it. The other
+    person's side (what they put in, their balance, what they call their copy, the settle-up line) and anything else they show you reach the
+    agent only when the model runs on your own machine. A cloud model, or another app over MCP, gets "withheld" instead, and the joint
+    settle-up skill asks you for their total.
 - **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
 
 ### Read from Firefly III, or kept in Coinpile
