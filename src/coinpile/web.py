@@ -1200,6 +1200,39 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             await run_in_threadpool(conn_call, lambda: connector().unlink(item_id))
             return {"unlinked": item_id, "note": "What is already in Firefly III stays there."}
 
+        class JointAskIn(BaseModel):
+            account_id: str
+            peer: str
+
+        class JointAnswerIn(BaseModel):
+            mode: str | None = None          # accept: create (a new account in my Firefly III) or link
+            account_id: str | None = None    # link: which of my Firefly III accounts ("ff:12")
+
+        @app.get("/api/banks/joint")
+        async def banks_joint():
+            """Joint accounts at the Plaid connector: mine I share or asked to share, and others' asking me."""
+            return await run_in_threadpool(conn_call, lambda: connector().joint())
+
+        @app.post("/api/banks/joint")
+        async def banks_joint_ask(b: JointAskIn):
+            return await run_in_threadpool(conn_call, lambda: connector().joint_ask(b.account_id, b.peer.strip().lower()))
+
+        @app.delete("/api/banks/joint/{account_id}")
+        async def banks_joint_stop(account_id: str):
+            return await run_in_threadpool(conn_call, lambda: connector().joint_stop(account_id))
+
+        @app.post("/api/banks/joint/{sender}/{account_id}/{answer}")
+        async def banks_joint_answer(sender: str, account_id: str, answer: str, b: JointAnswerIn | None = None):
+            ff_id = None
+            if b and b.mode == "link":
+                if not (b.account_id or "").startswith("ff:") or not db.one("SELECT 1 FROM accounts WHERE id=?", (b.account_id,)):
+                    raise HTTPException(422, "choose one of your Firefly III accounts to link it to")
+                ff_id = int(b.account_id.split(":", 1)[1])
+            r = await run_in_threadpool(conn_call, lambda: connector().joint_answer(sender, account_id, answer, b.mode if b else None, ff_id))
+            if answer == "accept":
+                refresh_soon(uid)                     # it arrives in Firefly III shortly; read it back
+            return r
+
         @app.get("/api/banks/usage")
         async def bank_usage():
             return await run_in_threadpool(conn_call, lambda: connector().usage())

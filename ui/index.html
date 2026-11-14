@@ -959,6 +959,31 @@ async function tabBanks(root, rerender) {
   if (!(cfg.connector_url && cfg.connector_name && cfg.connector_token?.set)) return;
   let b; try { b = await api("/api/banks"); } catch (e) { add(root, h("div", { class: "panel" }, h("p", { class: "neg" }, e.message))); return; }
   const ff = b.firefly || {};
+  (async () => {                                  // joint accounts at the connector: asked by one person, accepted by the other
+    const box = h("div", { class: "panel" }, h("h3", {}, "Joint accounts"), h("p", { class: "muted small" }, "Loading…")); add(root, box);
+    let j, accts = [];
+    try { [j, accts] = await Promise.all([api("/api/banks/joint"), api("/api/accounts").catch(() => [])]); } catch (e) { box.replaceChildren(h("h3", {}, "Joint accounts"), h("p", { class: "muted small" }, e.message)); return; }
+    const mine = Object.fromEntries((j.my_accounts || []).map((a) => [a.id, a.label]));
+    const ffOpts = accts.filter((a) => String(a.id).startsWith("ff:") && ["cash", "credit", "loan"].includes(a.kind)).map((a) => [a.id, `${a.institution} · ${an(a)}`]);
+    const lab = { requested: "asked, waiting for them", active: "shared" };
+    box.replaceChildren(h("h3", {}, "Joint accounts"),
+      h("p", { class: "muted small" }, "Share one of your banks' accounts with another person at the connector: they are asked, and only if they accept does it go into their Firefly III too (a new account, or one they already have). Asking sends only its name; either of you can stop any time."),
+      (j.incoming || []).length ? h("div", {}, h("h4", { style: "margin:8px 0 4px" }, "Asked of you"), j.incoming.map((r) => { const k = `ji-${r.sender}-${r.account_id}`.replace(/\W/g, "");
+        return h("div", { class: "card", style: "margin-bottom:8px" }, h("div", { class: "bar" }, h("b", {}, `${r.institution} · ${r.name}${r.mask ? " ••" + r.mask : ""}`), h("span", { class: "pill t" }, "from " + r.sender)),
+          r.state === "asked" ? h("div", { style: "display:grid;gap:8px;margin-top:8px" },
+            select(k + "m", "Into my Firefly III as", [["create", "A new account"], ...(ffOpts.length ? [["link", "An account I already have"]] : [])], "create", { onchange: (e) => { $("#" + k + "w").hidden = e.target.value !== "link"; } }),
+            h("div", { id: k + "w", hidden: true }, select(k + "a", "Which one", ffOpts, ffOpts[0]?.[0] || "")),
+            h("div", { class: "chips" }, h("button", { class: "btn sm primary", onclick: async () => { try { await api(`/api/banks/joint/${encodeURIComponent(r.sender)}/${encodeURIComponent(r.account_id)}/accept`, send("POST", { mode: val(k + "m"), account_id: val(k + "m") === "link" ? val(k + "a") : null })); toast("Accepted: it arrives in your Firefly III shortly"); rerender(); } catch (e) { fail(e); } } }, "Accept"),
+              h("button", { class: "btn sm", onclick: async () => { await api(`/api/banks/joint/${encodeURIComponent(r.sender)}/${encodeURIComponent(r.account_id)}/decline`, { method: "POST" }); rerender(); } }, "Decline")))
+          : h("div", { class: "chips", style: "margin-top:6px" }, h("span", { class: "small muted" }, "Accepted: it comes into your Firefly III. Tie your two copies together under Sharing, Joint accounts."),
+              h("button", { class: "btn sm danger", onclick: sure(null, "Sure? It stops coming into your Firefly III", async () => { await api(`/api/banks/joint/${encodeURIComponent(r.sender)}/${encodeURIComponent(r.account_id)}/leave`, { method: "POST" }); rerender(); }) }, "Leave"))); })) : null,
+      h("h4", { style: "margin:10px 0 4px" }, "Yours"),
+      (j.mine || []).length ? (j.mine || []).map((m) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto" }, h("span", {}, m.label || mine[m.account_id] || m.account_id), h("span", { class: "small muted" }, `${lab[m.state] || m.state} · ${m.peer}`),
+        h("button", { class: "btn sm danger", onclick: sure(null, m.state === "requested" ? "Cancel the question?" : "Sure? It stops going to " + m.peer, async () => { await api(`/api/banks/joint/${encodeURIComponent(m.account_id)}`, { method: "DELETE" }); rerender(); }) }, m.state === "requested" ? "Cancel" : "Stop"))) : h("p", { class: "muted small" }, "None shared."),
+      (j.people || []).length && (j.my_accounts || []).length ? h("form", { class: "row", style: "margin-top:10px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/banks/joint", send("POST", { account_id: val("jn-acc"), peer: val("jn-peer") })); toast("Asked: they accept or decline"); rerender(); } catch (err) { fail(err); } } },
+        select("jn-acc", "Share", (j.my_accounts || []).filter((a) => !(j.mine || []).some((m) => m.account_id === a.id)).map((a) => [a.id, a.label]), ""), select("jn-peer", "With", j.people.map((x) => [x, x]), j.people[0]),
+        h("button", { class: "btn primary", type: "submit" }, "Ask")) : h("p", { class: "muted small" }, (j.people || []).length ? "No bank accounts at the connector yet." : "Nobody else is on this connector."));
+  })();
   add(root, h("div", { class: "panel" }, h("h3", {}, "Your banks"),
     h("p", { class: "muted small" }, `Plaid ${b.plaid_configured ? "is set up (" + b.plaid_env + ")" : "is not set up on the connector"}. Sent to Firefly III: ${ff.sent ?? 0}, waiting ${ff.waiting ?? 0}, failed ${ff.failed ?? 0}.` + (ff.awaiting_approval ? ` ${ff.awaiting_approval} account(s) wait for your admin's approval before they are sent.` : "")),
     h("div", { class: "chips" }, h("button", { class: "btn primary", onclick: async () => { try { await openLink(null, rerender); } catch (e) { fail(e); } } }, "Link a bank"),

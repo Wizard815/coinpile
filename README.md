@@ -32,8 +32,11 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Robinhood MCP**: Settings, Robinhood, Connect Robinhood: you sign in on Robinhood's own site (its official MCP server, `https://agent.robinhood.com/mcp/trading`, for the Agentic Trading account) and Coinpile gets permission to read. Coinpile asks only for reading and can only call read tools (portfolio and positions); there is no code path to place, cancel or change an order. Its value is recorded each time it is read, so Investments shows value by month from then on. Robinhood's own documentation of the server was not available to test against; the sign-in follows the MCP standard (OAuth 2.1 with PKCE and app registration), and a token can be pasted instead if needed.
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
-- **Joint accounts** (Settings, Sharing): a bank account you share with a linked person is in both your Firefly III (the Plaid connector's
-  "Joint with" sends it to both). One of you offers "my account X is joint with you, I count 50%"; the other picks their copy of it (Coinpile
+- **Joint accounts at the Plaid connector** (Settings, Banks): ask to share one of your bank accounts with another person on the connector;
+  they accept (as a new account in their Firefly III, or one they already have) or decline, and either can stop later. Only accepted accounts reach
+  their Firefly III.
+- **Joint accounts** (Settings, Sharing): a bank account you share with a linked person is in both your Firefly III (accepted at the Plaid connector,
+  or set by its admin). One of you offers "my account X is joint with you, I count 50%"; the other picks their copy of it (Coinpile
   suggests it by its last digits). From then on each side counts only its share in net worth and savings, each Coinpile sends the other the
   balance its own Firefly III shows and what that person moved in from their own accounts (Firefly III transfers, or a bank-feed withdrawal and
   deposit of the same amount within 3 days), and both see a settle-up line ("bob owes you 137.50") and whether the two Firefly III copies agree.

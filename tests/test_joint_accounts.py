@@ -99,3 +99,35 @@ def test_the_agent_sees_linked_joint_accounts_in_settle_up(tmp_path):
     tools = {n: f for n, _, _, f in agent.build_tools(types.SimpleNamespace(store=db, today=lambda: TODAY))}
     s = tools["shared_expenses"]({})
     assert s["linked_joint_accounts"][0]["peer"] == "bob" and s["linked_joint_accounts"][0]["my_share"] == 50
+
+
+def test_joint_accounts_at_the_plaid_connector_are_asked_and_answered_from_coinpile(tmp_path):
+    import json
+    import httpx
+    from coinpile import web
+    from tests.test_coinpile import TODAY
+    seen = []
+
+    def h(req: httpx.Request):
+        if req.url.path == "/login":
+            return httpx.Response(200, json={"token": "sess_1"})
+        p = req.url.path.removeprefix("/g/alice/")
+        seen.append((req.method, p, json.loads(req.content) if req.content else None))
+        if p == "api/joint" and req.method == "GET":
+            return httpx.Response(200, json={"mine": [], "incoming": [{"sender": "bob", "account_id": "plaid-joint", "name": "Joint Checking", "institution": "Ally", "mask": "5555", "state": "asked"}],
+                                             "people": ["bob"], "my_accounts": [{"id": "plaid-chk", "label": "Huntington - Checking ••4821"}]})
+        return httpx.Response(200, json={"ok": True})
+    a = web.create_app(firefly_url="https://firefly.example.com", data_dir=str(tmp_path), firefly_transport=world().transport(), connector_transport=httpx.MockTransport(h), today=lambda: TODAY)
+    c = signed_in(a, ALICE)
+    c.put("/api/settings", json={"connector_url": "http://connector.local", "connector_name": "alice", "connector_token": "a long enough password"})
+    j = c.get("/api/banks/joint").json()
+    assert j["incoming"][0]["sender"] == "bob" and j["people"] == ["bob"]
+    assert c.post("/api/banks/joint", json={"account_id": "plaid-chk", "peer": "Bob"}).status_code == 200
+    assert ("POST", "api/joint/plaid-chk/ask", {"peer": "bob"}) in seen
+    # accepting into an account alice already has in her Firefly III: Coinpile turns ff:3 into Firefly III's own id
+    assert c.post("/api/banks/joint/bob/plaid-joint/accept", json={"mode": "link", "account_id": "ff:3"}).status_code == 200
+    assert ("POST", "api/joint/from/bob/plaid-joint/accept", {"mode": "link", "ff_id": 3}) in seen
+    assert c.post("/api/banks/joint/bob/plaid-joint/accept", json={"mode": "link", "account_id": "ff:404"}).status_code == 422
+    assert c.post("/api/banks/joint/bob/plaid-joint/decline").status_code == 200 and c.delete("/api/banks/joint/plaid-chk").status_code == 200
+    assert c.post("/api/banks/joint/bob/plaid-joint/maybe").status_code == 502                     # only accept, decline or leave reach the connector
+    assert c.post("/api/banks/joint/bob/plaid joint/accept", json={"mode": "create"}).status_code in (404, 502)
