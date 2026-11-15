@@ -39,10 +39,13 @@ def places(db, today: date) -> list[dict]:
         cat = a.get("category") or (db.one("SELECT category FROM plaid_items WHERE item_id=?", (a.get("item_id"),)) or {}).get("category")
         grp = plaidplan.category_group(cat)
         auto = (grp == "savings") if grp else (a["kind"] == "cash" and (a.get("subtype") or "").lower() in SAVINGS_SUBTYPES)       # what you called it beats what the bank calls it
-        if pool == 0 or not (pool == 1 or auto):                  # investment accounts count only when you switch them on
+        if not a.get("sv_kind") and (pool == 0 or not (pool == 1 or auto)):          # investment accounts count only when you switch them on
             continue
-        out.append({"key": f"a:{a['id']}", "id": a["id"], "name": a["name"], "institution": a["institution"], "kind": (a.get("subtype") or "savings").replace(" ", "_"),
-                    "balance": round(ledger.mine(a), 2), "apy": None, "maturity": None, "days_to_maturity": None, "value_at_maturity": None, "origin": "account", "account_id": a["id"]})
+        bal, apy = round(ledger.mine(a), 2), a.get("apy")
+        days = (d(a["maturity"]) - today).days if a.get("maturity") else None
+        out.append({"key": f"a:{a['id']}", "id": a["id"], "name": a["name"], "institution": a["institution"], "kind": a.get("sv_kind") or (a.get("subtype") or "savings").replace(" ", "_"),
+                    "balance": bal, "apy": apy, "maturity": a.get("maturity"), "opened": a.get("opened"), "term_months": a.get("term_months"), "days_to_maturity": days,
+                    "value_at_maturity": round(bal * (1 + (apy or 0) / 100 / 365) ** days, 2) if days is not None and days >= 0 else None, "origin": "account", "account_id": a["id"]})
     return out
 
 
@@ -60,6 +63,18 @@ def _piggies(db) -> list[dict]:
     except Exception:
         return []
     return [p for p in (json.loads(r["data"]) for r in rows) if p.get("active", True) and p["id"] not in ours]     # a goal's own piggy bank is that goal, not extra money set aside
+
+
+def piggy_goals(db, today: date) -> list[dict]:
+    """Firefly III piggy banks seen as goals: what is still needed and by when. Shaped like a Coinpile goal so the plan and the CD advice use both."""
+    out = []
+    for p in _piggies(db):
+        if not p.get("target"):
+            continue
+        short = round(max(0.0, p["target"] - (p.get("current") or 0)), 2)
+        out.append({"id": f"p:{p['id']}", "piggy_id": p["id"], "name": p["name"], "target": p["target"], "shortfall": short, "deadline": p.get("target_date"),
+                    "priority": 2, "monthly": p.get("save_per_month") or 0, "status": "active"})
+    return out
 
 
 def goals_view(db, today: date) -> dict:
@@ -103,7 +118,7 @@ def goals_view(db, today: date) -> dict:
                 v["ready_date"] = (today + timedelta(days=round(months * 30.4375))).isoformat()
         items.append(v)
     links.decorate(db, items)
-    active = [i for i in items if i["status"] == "active" and i.get("shared_state") != "offered"]
+    active = [i for i in items if i["status"] == "active" and i.get("shared_state") != "offered"] + piggy_goals(db, today)
     return {"items": items, "places": pl, "total": total, "allocated": allocated, "free": free, "overallocated": free < -0.005, "in_piggy_banks": in_piggies,
             "piggy_banks": [{"name": pg["name"], "target": pg["target"], "current": pg["current"], "counted": pg.get("counted", 0), "target_date": pg["target_date"]} for pg in piggies],
             "needed": round(sum(i["shortfall"] for i in active), 2), "pinned": {k: round(v, 2) for k, v in pinned.items()}}
@@ -312,7 +327,8 @@ def monthly_plan(db, month: str, today: date) -> dict:
         rows.append({"category": cat, "budget": b, "bills": bl, "planned": round(planned, 2), "spent": s, "left": round(planned - s, 2), "pct": round(s / planned, 3) if planned else None})
     outflow = round(sum(r["planned"] for r in rows), 2)
     active = [g for g in db.all("SELECT * FROM goals WHERE status='active'")]
-    goals_month = round(sum(g["monthly"] or 0 for g in active), 2)
+    pigs = [g for g in piggy_goals(db, today) if g["shortfall"] > 0.005]           # Firefly III piggy banks: what Firefly III says to save each month for them
+    goals_month = round(sum(g["monthly"] or 0 for g in active) + sum(g["monthly"] or 0 for g in pigs), 2)
     left = round(income_month - outflow - goals_month, 2)
     left_smooth = round(income_smooth - outflow - goals_month, 2)
     extra = round(max(0.0, income_month - income_smooth), 2) if any(i["extra_paycheck"] for i in inc) else 0.0
@@ -320,8 +336,9 @@ def monthly_plan(db, month: str, today: date) -> dict:
     if extra > 0:                                       # an extra paycheck is a bonus: point it at the highest-priority goal that still needs money
         gs = sorted((g for g in active if g["status"] == "active"), key=lambda g: (g["priority"], g["deadline"] or "9999-12-31", g["id"]))
         got = {a["goal_id"]: a["amount"] for a in _allocs(db)}
+        gs += sorted(pigs, key=lambda g: g["deadline"] or "9999-12-31")
         for g in gs:
-            need = round(g["target"] - got.get(g["id"], 0.0), 2)
+            need = round(g["shortfall"] if "piggy_id" in g else g["target"] - got.get(g["id"], 0.0), 2)
             if need > 0.005:
                 extra_goal = {"goal_id": g["id"], "goal": g["name"], "amount": round(min(extra, need), 2)}
                 break
@@ -359,6 +376,8 @@ def maturity_outlook(db, today: date, horizon_days: int = 365) -> list[dict]:
     v = goals_view(db, today)
     goals = [g for g in v["items"] if g["status"] == "active" and g.get("shared_state") != "offered"]
     order = sorted(goals, key=lambda g: (g["priority"], g["deadline"] or "9999-12-31", g["id"]))
+    pigs = sorted((g for g in piggy_goals(db, today) if g["shortfall"] > 0.005), key=lambda g: g["deadline"] or "9999-12-31")
+    goals, order = goals + pigs, order + pigs                      # Firefly III piggy banks are goals too
     short = {g["id"]: g["shortfall"] for g in goals}
     names = {g["id"]: g["name"] for g in goals}
     pin = {}
@@ -377,7 +396,7 @@ def maturity_outlook(db, today: date, horizon_days: int = 365) -> list[dict]:
                 break
             if short.get(g["id"], 0) > 0.005:
                 put = round(min(rest, short[g["id"]]), 2)
-                sugg.append({"goal_id": g["id"], "goal": g["name"], "amount": put})
+                sugg.append({"goal_id": g["id"], "goal": g["name"], "amount": put, "piggy_id": g.get("piggy_id")})
                 short[g["id"]] -= put
                 rest -= put
         rest = round(rest, 2)
@@ -398,6 +417,8 @@ def matured_idle(db, today: date, within_days: int = 60) -> list[dict]:
     v = goals_view(db, today)
     goals = [g for g in v["items"] if g["status"] == "active" and g.get("shared_state") != "offered"]
     order = sorted(goals, key=lambda g: (g["priority"], g["deadline"] or "9999-12-31", g["id"]))
+    pigs = sorted((g for g in piggy_goals(db, today) if g["shortfall"] > 0.005), key=lambda g: g["deadline"] or "9999-12-31")
+    goals, order = goals + pigs, order + pigs                      # Firefly III piggy banks are goals too
     short = {g["id"]: g["shortfall"] for g in goals}
     names = {g["id"]: g["name"] for g in goals}
     pin = {}

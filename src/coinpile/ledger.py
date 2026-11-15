@@ -92,12 +92,16 @@ def recategorize(db) -> int:
 
 # ------------------------------------------------------------------ transactions
 def query_transactions(db, q=None, account_id=None, category=None, min_amount=None, max_amount=None, start=None, end=None,
-                       direction=None, limit=100, offset=0, sort="date_desc") -> dict:
+                       direction=None, limit=100, offset=0, sort="date_desc", tag=None, budget=None) -> dict:
     where, args = ["1=1"], []
     if q:
-        for tok in q.split():
-            where.append("lower(t.name) LIKE ?")
-            args.append(f"%{tok.lower()}%")
+        for tok in q.split():                       # the description, the payee or the notes
+            where.append("(lower(t.name) LIKE ? OR lower(coalesce(t.payee,'')) LIKE ? OR lower(coalesce(t.notes,'')) LIKE ?)")
+            args += [f"%{tok.lower()}%"] * 3
+    if tag:                                          # a Firefly III tag (exact, case does not matter)
+        where.append("(',' || lower(coalesce(t.tags,'')) || ',') LIKE ?"); args.append(f"%,{tag.strip().lower()},%")
+    if budget:
+        where.append("lower(coalesce(t.budget,'')) = ?"); args.append(budget.strip().lower())
     if account_id:
         where.append("t.account_id=?"); args.append(account_id)
     if category:
@@ -143,7 +147,16 @@ def sub_view(row: dict, today: date) -> dict:
     stop = d(row["end_date"]) if row.get("end_date") else None
     nd = recur.next_due(d(row["next_date"]), every, unit, today, stop)
     ended = stop is not None and nd is None                  # past its end date: nothing more to pay
+    left = last = None
+    if stop is not None:                                     # a set number of payments: how many are still to come, and the last one
+        occ = recur.occurrences(d(row["next_date"]), every, unit, today, stop, stop)
+        left, last = len(occ), (occ[-1].isoformat() if occ else None)
+        if last is None:
+            past = recur.occurrences(d(row["next_date"]), every, unit, d(row["next_date"]), stop, stop)
+            last = past[-1].isoformat() if past else None
+    total = row.get("plan_total")
     return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended,
+            "payments_left": left, "last_payment": last, "payment_no": (total - left + 1) if total and left is not None and 0 < left <= total else None,
             "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended else 0.0}
 
 
@@ -180,13 +193,23 @@ def upcoming(db, days: int, today: date) -> dict:
 
 
 def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[dict]:
-    """For subscriptions bound to an account: was each expected payment actually seen? Counts consecutive misses."""
+    """Was each expected payment of a subscription actually seen? Counts consecutive misses, newest first.
+    With an account set, that account is searched. Without one, every account is, but only for the payee's own name (an amount alone
+    could be anything), and only once that payee has been seen paying this subscription before (so a name your bank spells differently
+    is not called missing for ever)."""
     out = []
-    for s in db.all("SELECT * FROM subscriptions WHERE active=1 AND account_id IS NOT NULL AND account_id != '' AND coalesce(payer,'me')='me'"):
-        acct = db.one("SELECT * FROM accounts WHERE id=?", (s["account_id"],))
-        first = db.one("SELECT MIN(date) m, MAX(date) x FROM transactions WHERE account_id=?", (s["account_id"],))
+    for s in db.all("SELECT * FROM subscriptions WHERE active=1 AND coalesce(payer,'me')='me' AND source != 'ff-recurring'"):   # Firefly III makes those itself
+        bill = s["plaid_stream_id"][len("ff-bill:"):] if s["source"] == "firefly" and (s["plaid_stream_id"] or "").startswith("ff-bill:") else None
+        bound = bool(s["account_id"])
+        acct = db.one("SELECT * FROM accounts WHERE id=?", (s["account_id"],)) if bound else {"name": "any account"}
+        first = db.one("SELECT MIN(date) m, MAX(date) x FROM transactions" + (" WHERE account_id=?" if bound else ""), (s["account_id"],) if bound else ())
         if not acct or not first["m"]:
             continue
+        if not bound:
+            seen = db.all("SELECT name, amount FROM transactions WHERE amount<0 AND date < ?", ((today - timedelta(days=grace)).isoformat(),))
+            linked = bill and db.one("SELECT 1 FROM transactions WHERE ff_bill=?", (bill,))
+            if not linked and not any(recur.same_payee(t["name"], s["name"]) and abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] for t in seen):
+                continue
         every, unit = s["every"] or 1, s["unit"] or "month"
         anchor = d(s["next_date"])
         k = recur.first_k_on_or_after(anchor, every, unit, today - timedelta(days=grace))
@@ -201,10 +224,13 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
                 break                                     # we do not have data covering that date, so we cannot call it missed
             # A hit is an outflow near the expected date that is EITHER (almost) exactly the bill's amount OR looks like the same payee at a
             # similar amount (variable bills). Amount alone is not enough: an unrelated $60 purchase must not hide a missing $61 bill.
-            cands = db.all("SELECT name, amount FROM transactions WHERE account_id=? AND amount<0 AND date BETWEEN ? AND ?",
-                           (s["account_id"], (exp - timedelta(days=3)).isoformat(), (exp + timedelta(days=grace)).isoformat()))
-            hit = any(abs(abs(t["amount"]) - s["amount"]) <= max(0.5, 0.01 * s["amount"])
+            span = ((exp - timedelta(days=3)).isoformat(), (exp + timedelta(days=grace)).isoformat())
+            cands = db.all("SELECT name, amount FROM transactions WHERE " + ("account_id=? AND " if bound else "") + "amount<0 AND date BETWEEN ? AND ?",
+                           ((s["account_id"],) if bound else ()) + span)
+            hit = any((bound and abs(abs(t["amount"]) - s["amount"]) <= max(0.5, 0.01 * s["amount"]))
                       or (abs(abs(t["amount"]) - s["amount"]) <= 0.2 * s["amount"] and recur.same_payee(t["name"], s["name"])) for t in cands)
+            if not hit and bill:                          # Firefly III linked a payment to this bill: that is the bill paid, whatever its name says
+                hit = bool(db.one("SELECT 1 FROM transactions WHERE ff_bill=? AND date BETWEEN ? AND ?", (bill,) + span))
             if hit:
                 break                                     # misses must be consecutive, newest first
             misses += 1
@@ -378,8 +404,8 @@ def _alerts(db, today: date) -> list[dict]:
                         "detail": ", ".join(x["name"] for x in found[:4]) + (" and more" if len(found) > 4 else ""), "count": len(found)})
     for m in (late_payments(db, today) if cfg.get(db, "alert_missed") != "off" else []):
         out.append({"kind": "missed_payment", "severity": "critical" if m["misses"] >= 2 else "warning", "sub_id": m["sub_id"],
-                    "title": f"{m['name']} not seen in {m['account']}" + (f" ({m['misses']} times in a row)" if m["misses"] > 1 else ""),
-                    "detail": "Expected " + ", ".join(m["missed_dates"])})
+                    "title": f"Missing subscription: {m['name']} ({m['amount']:,.2f}) not seen in {m['account']}" + (f", {m['misses']} times in a row" if m["misses"] > 1 else ""),
+                    "detail": "Expected " + ", ".join(m["missed_dates"]) + ". Paid another way, or cancelled? Update or pause it in Subscriptions."})
     from coinpile import plan                       # imported here: plan builds on this module
     gv = plan.goals_view(db, today)
     if gv["overallocated"]:
@@ -526,3 +552,35 @@ def spending_forecast(db, today: date, months: int = 6) -> dict:
             "categories": out,
             "history": [{"month": m, "spent": round(sum(by.get(c, {}).get(m, (0.0, 0))[0] for c in by), 2), "income": round(income_by_month.get(m, 0.0), 2)} for m in with_data],
             "note": "An estimate from your past months plus bills still due. One-off purchases are not predicted."}
+
+
+def net_worth_history(store) -> list[dict]:
+    """Daily net worth built from balance snapshots read from Firefly III (last known balance carried forward)."""
+    # Only accounts that count today (as net worth does): a removed account, or one left out of net worth in Firefly III, must not be carried forward.
+    accts = {a["id"]: a for a in store.all("SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0")}
+    sign = {"credit": -1, "loan": -1}
+    last, by_day = {}, {}
+    for r in store.all("SELECT * FROM snapshots ORDER BY ts"):
+        a = accts.get(r["account_id"])
+        if not a or r["balance"] is None:
+            continue
+        last[r["account_id"]] = r["balance"] * (100.0 if a["my_share"] is None else a["my_share"]) / 100 * sign.get(a["kind"], 1)
+        by_day[r["ts"][:10]] = round(sum(last.values()), 2)
+    # savings you keep by hand (a CD, a jar) count in net worth too: from the day they were opened, at their current value
+    manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
+    extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
+    return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]
+
+
+def daily_totals(db, today: date, days: int = 31) -> list[dict]:
+    """Spent and income per day, newest first, for the last `days` days (today included). Totals only.
+    Spent is money out (a positive number), income is money in; transfers between your own accounts count as neither,
+    and pending transactions wait until they post (the same rules as the weekly brief)."""
+    days = max(1, min(int(days), 92))
+    start = today - timedelta(days=days - 1)
+    rows = db.all("SELECT t.date d, ROUND(-SUM(CASE WHEN t.amount<0 THEN t.amount ELSE 0 END),2) spent, ROUND(SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),2) income "
+                  "FROM transactions t LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN ? AND ? AND t.pending=0 AND coalesce(c.kind,'expense')!='transfer' GROUP BY t.date",
+                  (start.isoformat(), today.isoformat()))
+    by = {r["d"][:10]: r for r in rows}
+    return [{"date": d, "spent": (by[d]["spent"] or 0.0) if d in by else 0.0, "income": (by[d]["income"] or 0.0) if d in by else 0.0}
+            for d in ((today - timedelta(days=k)).isoformat() for k in range(days))]

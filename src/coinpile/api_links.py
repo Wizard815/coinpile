@@ -101,6 +101,41 @@ def register(app, ctx):
         ctx.link_flush()
         return {"ok": True}
 
+    # ---- joint accounts: the same bank account in both people's Firefly III, tied together here
+    class JointIn(BaseModel):
+        account_id: str
+        peer: str
+        my_share: float = 50
+
+    class JointAcceptIn(BaseModel):
+        account_id: str
+
+    @app.get("/api/joint")
+    def joint_list(request: Request):
+        auth(request)
+        return links.joint_list(store, ctx.today())
+
+    @app.post("/api/joint")
+    def joint_offer(request: Request, b: JointIn):
+        auth(request)
+        r = run(links.joint_offer, store, name, b.peer.strip().lower(), b.account_id, b.my_share)
+        ctx.link_flush()
+        return done(r)
+
+    @app.post("/api/joint/{jid}/accept")
+    def joint_accept(request: Request, jid: int, b: JointAcceptIn):
+        auth(request)
+        r = run(links.joint_accept, store, name, jid, b.account_id)
+        ctx.link_flush()
+        return done(r)
+
+    @app.delete("/api/joint/{jid}")
+    def joint_end(request: Request, jid: int):
+        auth(request)
+        run(links.joint_decline, store, jid)
+        ctx.link_flush()
+        return done({"ended": jid})
+
     @app.post("/api/goals/{gid}/share")
     def goal_share(request: Request, gid: int, b: ShareIn):
         auth(request)

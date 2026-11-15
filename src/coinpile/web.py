@@ -30,7 +30,7 @@ from coinpile.security import Throttle, check_password_strength, hash_password, 
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"searx_url", "share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
 
 
@@ -263,7 +263,7 @@ def same_origin(scope, public_url: str = "") -> bool:
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
                caldav_transport=None, notify_transport=None, today=None, background: bool = False, client_id: str | None = None,
-               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None):
+               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None, search_transport=None):
     ff_url = (firefly_url or os.environ.get("FIREFLY_URL", "")).rstrip("/")
     ff_public = (public_firefly_url or os.environ.get("FIREFLY_PUBLIC_URL", "") or ff_url).rstrip("/")
     client_id = client_id or os.environ.get("FIREFLY_CLIENT_ID", "")
@@ -273,6 +273,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     today = today or date.today
     users = Users(os.path.join(data_dir, "users.db"))
     apps: dict[str, FastAPI] = {}
+    contexts: dict = {}                              # each person's agent context, for the MCP endpoint
     dbs: dict[str, DB] = {}
     locks: dict[str, threading.Lock] = {}
     pending_oauth: dict[str, tuple[str, float]] = {}
@@ -511,6 +512,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             try:
                 links.bump(db, me, gid) if edited and gid else links.push(db, me)
                 links.push_accounts(db)
+                links.push_joint(db, today())
                 link_flush()
             except Exception:
                 pass
@@ -525,7 +527,23 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         flushers[uid] = shared_changed
         ctx = api_money.make_ctx(db, lambda request: None, today, name=me, caldav_transport=caldav_transport, shared_changed=shared_changed,
                                  link_flush=link_flush, link_people=users.handles)
+        contexts[uid] = ctx
+        last_agent_refresh = {"t": 0.0}
+
+        def refresh_now() -> dict:
+            if time.time() - last_agent_refresh["t"] < 60:
+                return {"refreshed": False, "note": "read less than a minute ago; the data is current", "read_from_firefly_at": cfg.get(db, "ff_last_refresh") or None}
+            last_agent_refresh["t"] = time.time()
+            try:
+                r = refresh(uid)
+            except firefly.FireflyError as e:
+                return {"error": f"could not read Firefly III: {e}"[:200]}
+            return {"refreshed": True, "read_from_firefly_at": cfg.get(db, "ff_last_refresh") or None, **{k: r[k] for k in ("accounts", "subscriptions", "piggy_banks") if k in (r or {})}}
+
+        ctx.refresh_now = refresh_now
         ctx.llm_transport = llm_transport
+        ctx.search_transport = search_transport
+        ctx.searx_url = lambda: cfg.get(db, "searx_url") or os.environ.get("SEARXNG_URL", "")
         outbound = netguard.Slots()                 # this person's share of the worker threads for calls to servers they typed in
         ctx.outbound = outbound
 
@@ -622,9 +640,14 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         @app.get("/api/investments")
         def investments_view():
+            return investments_data()
+
+        def investments_data():
             accts = investments.accounts(db)
             return {"accounts": accts, "total": round(sum(a["balance"] for a in accts), 2), "currency": cfg.get(db, "currency") or "USD",
                     "candidates": investments.candidates(db), "providers": investments.providers(rh), "monthly": investments.monthly(db, [a["id"] for a in accts])}
+
+        ctx.investments = investments_data
 
         class TrackIn(BaseModel):
             investment: bool
@@ -863,6 +886,204 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         def piggy_banks():
             return firefly.piggies(db)
 
+        # ---- the Piggy banks page: Firefly III's piggy banks, read every refresh. Making and changing them is a separate opt-in switch.
+        class PiggyIn(BaseModel):
+            name: str | None = None
+            target: float | None = None          # 0 clears the target
+            target_date: str | None = None       # "" clears it
+            notes: str | None = None
+            account_id: str | None = None        # new piggy banks: the Firefly III account that holds the money ("ff:12")
+            start_amount: float = 0
+
+        class MoneyIn(BaseModel):
+            account_id: str
+            amount: float                        # positive puts money in, negative takes it out
+
+        def ff_asset(aid: str | None) -> str:
+            row = db.one("SELECT id FROM accounts WHERE id=? AND kind='cash'", (aid or "",)) if (aid or "").startswith("ff:") else None
+            if not row:
+                raise HTTPException(422, "choose one of your Firefly III asset accounts")
+            return aid.split(":", 1)[1]
+
+        def day(s: str) -> str:
+            try:
+                return date.fromisoformat(s).isoformat()
+            except ValueError:
+                raise HTTPException(422, "a date is YYYY-MM-DD")
+
+        def goal_piggies() -> dict:
+            return {r["piggy_id"]: r["name"] for r in db.all("SELECT p.piggy_id, g.name FROM ff_goal_piggy p JOIN goals g ON g.id=p.goal_id")}
+
+        def piggy_changes_on():
+            if not ctx.writer.on("piggy_banks"):
+                raise HTTPException(409, "making and changing piggy banks from Coinpile is off. Switch it on in Settings, Firefly III, or do it in Firefly III")
+
+        def piggy_or_404(pid: str) -> dict:
+            p = next((x for x in firefly.piggies(db) if x["id"] == pid), None)
+            if not p:
+                raise HTTPException(404, "no such piggy bank")
+            if pid in goal_piggies():
+                raise HTTPException(409, f"this piggy bank follows your goal \"{goal_piggies()[pid]}\": change the goal on the Savings page instead")
+            return p
+
+        def piggy_reread_sync():
+            try:
+                firefly.sync_piggies(db, ff_for(uid))
+            except firefly.FireflyError:
+                pass
+
+        def budgets_for(m: str) -> dict:
+            try:
+                first = date.fromisoformat(m + "-01")
+            except ValueError:
+                raise HTTPException(422, "month is YYYY-MM")
+            last = (first.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+            rows = firefly.budgets(ff_for(uid), first, last)
+            with_limit = [r for r in rows if r["limit"]]
+            return {"month": m, "items": rows, "limit": round(sum(r["limit"] for r in with_limit), 2), "spent": round(sum(r["spent"] for r in rows), 2),
+                    "left": round(sum(r["left"] for r in with_limit), 2), "link": f"{ff_public}/budgets" if ff_public else None}
+
+        ctx.ff_budgets = budgets_for
+
+        @app.get("/api/firefly/budgets")
+        async def ff_budgets(month: str | None = None):
+            """Firefly III's own budgets for a month (limits and spending), read live. Coinpile's per-category plan stays separate."""
+            try:
+                return await run_in_threadpool(budgets_for, month or today().isoformat()[:7])
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        @app.get("/api/piggy-banks/overview")
+        def piggy_overview():
+            items, goals = firefly.piggies(db), goal_piggies()
+            notes = {}
+            for n in db.all("SELECT id, title, author, updated, piggy_id FROM notes WHERE piggy_id IS NOT NULL ORDER BY pinned DESC, updated DESC"):
+                notes.setdefault(n["piggy_id"], []).append({"id": n["id"], "title": n["title"], "author": n["author"], "updated": n["updated"]})
+            for p in items:
+                p["goal"] = goals.get(p["id"])
+                p["my_notes"] = notes.get(p["id"], [])
+                p["link"] = f"{ff_public}/piggy-banks/show/{p['id']}" if ff_public else None
+                p["left"] = round(max(0.0, (p["target"] or 0) - (p["current"] or 0)), 2) if p["target"] else None
+            act = [p for p in items if p["active"]]
+            return {"items": items, "can_change": ctx.writer.on("piggy_banks"), "firefly": ff_public or None,
+                    "total": round(sum(p["current"] or 0 for p in act), 2), "targets": round(sum(p["target"] or 0 for p in act), 2),
+                    "still_needed": round(sum(p["left"] or 0 for p in act), 2),
+                    "accounts": [{"id": a["id"], "name": a["name"], "institution": a["institution"]} for a in db.all("SELECT id, name, institution FROM accounts WHERE kind='cash' AND id LIKE 'ff:%' ORDER BY name")]}
+
+        def piggy_events_for(pid: str) -> list[dict]:
+            if not pid.isdigit():
+                raise HTTPException(404, "no such piggy bank")
+            d = ff_for(uid).get(f"/piggy-banks/{pid}/events", limit=50)
+            out = []
+            for e in d.get("data") or []:
+                at = e.get("attributes") or {}
+                try:
+                    amt = float(at.get("amount") or 0)
+                except ValueError:
+                    amt = 0.0
+                out.append({"date": str(at.get("created_at") or "")[:10], "amount": amt, "account": at.get("account_name") or ""})
+            return out
+
+        ctx.piggy_events = piggy_events_for
+
+        @app.get("/api/piggy-banks/{pid}/events")
+        async def piggy_events(pid: str):
+            """The piggy bank's history (money put in and taken out), straight from Firefly III."""
+            try:
+                return await run_in_threadpool(piggy_events_for, pid)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        def piggy_new_do(b: PiggyIn) -> dict:
+            if not (b.name or "").strip():
+                raise HTTPException(422, "a name is required")
+            if (b.target is not None and b.target < 0) or b.start_amount < 0:
+                raise HTTPException(422, "amounts cannot be negative")
+            acct = ff_asset(b.account_id)
+            own = (db.one("SELECT coalesce(native_currency, currency) c FROM accounts WHERE id=?", (b.account_id,)) or {}).get("c")      # Firefly III wants the account's own currency
+            body = {"name": b.name.strip()[:255], "start_date": today().isoformat(), "transaction_currency_code": own or cfg.get(db, "currency") or "USD",
+                    "accounts": [{"account_id": acct, "current_amount": f"{b.start_amount:.2f}"}]}
+            if b.target:
+                body["target_amount"] = f"{b.target:.2f}"
+            if b.target_date:
+                body["target_date"] = day(b.target_date)
+            if b.notes:
+                body["notes"] = b.notes[:2000]
+            d = ff_for(uid).send("POST", "/piggy-banks", body)
+            piggy_reread_sync()
+            return {"id": str((d.get("data") or {}).get("id") or "")}
+
+        @app.post("/api/piggy-banks")
+        async def piggy_new(b: PiggyIn):
+            piggy_changes_on()
+            try:
+                return await run_in_threadpool(piggy_new_do, b)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        def piggy_edit_do(pid: str, b: PiggyIn) -> dict:
+            piggy_or_404(pid)
+            body = {}
+            if b.name is not None:
+                if not b.name.strip():
+                    raise HTTPException(422, "a name is required")
+                body["name"] = b.name.strip()[:255]
+            if b.target is not None:
+                if b.target < 0:
+                    raise HTTPException(422, "the target cannot be negative")
+                body["target_amount"] = f"{b.target:.2f}" if b.target else None
+            if b.target_date is not None:
+                body["target_date"] = day(b.target_date) if b.target_date else None
+            if b.notes is not None:
+                body["notes"] = b.notes[:2000]
+            if not body:
+                raise HTTPException(422, "nothing to change")
+            ff_for(uid).send("PUT", f"/piggy-banks/{pid}", body)
+            piggy_reread_sync()
+            return {"changed": pid}
+
+        @app.put("/api/piggy-banks/{pid}")
+        async def piggy_edit(pid: str, b: PiggyIn):
+            piggy_changes_on()
+            try:
+                return await run_in_threadpool(piggy_edit_do, pid, b)
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        def piggy_money_do(pid: str, b: MoneyIn) -> dict:
+            """Put money in or take it out. Some Firefly III versions (6.7 among them) fail on this through their API; then say so and point to Firefly III."""
+            p = piggy_or_404(pid)
+            acct = ff_asset(b.account_id)
+            if not b.amount:
+                raise HTTPException(422, "enter an amount")
+            now = {x["account_id"]: x["amount"] or 0 for x in p["accounts"]}
+            new = round(now.get(b.account_id, 0) + b.amount, 2)
+            if new < 0:
+                raise HTTPException(422, f"only {now.get(b.account_id, 0):,.2f} is in it on that account")
+            if p["target"] and sum(now.values()) + b.amount > p["target"] + 0.005:
+                raise HTTPException(422, f"that is more than the piggy bank still needs ({p['target'] - sum(now.values()):,.2f})")
+            accts = [{"account_id": k.split(":", 1)[1], "current_amount": f"{(new if k == b.account_id else v):.2f}"} for k, v in now.items()]
+            if b.account_id not in now:
+                accts.append({"account_id": acct, "current_amount": f"{new:.2f}"})
+            try:
+                ff_for(uid).send("PUT", f"/piggy-banks/{pid}", {"accounts": accts})
+            except firefly.FireflyError as e:
+                if "500" in str(e):
+                    raise HTTPException(502, "your Firefly III could not change the amount through its API (a bug in some Firefly III versions). Add or take out the money in Firefly III itself: use the Firefly III link on this piggy bank")
+                raise HTTPException(502, str(e))
+            piggy_reread_sync()
+            return {"current": round(sum(now.values()) + b.amount, 2)}
+
+        @app.post("/api/piggy-banks/{pid}/money")
+        async def piggy_money(pid: str, b: MoneyIn):
+            piggy_changes_on()
+            return await run_in_threadpool(piggy_money_do, pid, b)
+
+        # after the person says yes to the agent (that yes is the consent, so the switch is not asked)
+        ctx.piggy_new = lambda a: piggy_new_do(PiggyIn(**a))
+        ctx.piggy_edit = lambda pid, a: piggy_edit_do(pid, PiggyIn(**a))
+        ctx.piggy_money = lambda pid, aid, amount: piggy_money_do(pid, MoneyIn(account_id=aid, amount=amount))
+
         @app.get("/api/settings")
         def settings_get():
             v = cfg.view(db)
@@ -957,6 +1178,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             except conn.ConnectorError as e:
                 raise HTTPException(502, str(e))
 
+        ctx.banks = lambda: conn_call(lambda: connector().banks())
+
         @app.get("/api/banks")
         async def banks():
             return await run_in_threadpool(conn_call, lambda: connector().banks())
@@ -976,6 +1199,39 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         async def bank_unlink(item_id: str):
             await run_in_threadpool(conn_call, lambda: connector().unlink(item_id))
             return {"unlinked": item_id, "note": "What is already in Firefly III stays there."}
+
+        class JointAskIn(BaseModel):
+            account_id: str
+            peer: str
+
+        class JointAnswerIn(BaseModel):
+            mode: str | None = None          # accept: create (a new account in my Firefly III) or link
+            account_id: str | None = None    # link: which of my Firefly III accounts ("ff:12")
+
+        @app.get("/api/banks/joint")
+        async def banks_joint():
+            """Joint accounts at the Plaid connector: mine I share or asked to share, and others' asking me."""
+            return await run_in_threadpool(conn_call, lambda: connector().joint())
+
+        @app.post("/api/banks/joint")
+        async def banks_joint_ask(b: JointAskIn):
+            return await run_in_threadpool(conn_call, lambda: connector().joint_ask(b.account_id, b.peer.strip().lower()))
+
+        @app.delete("/api/banks/joint/{account_id}")
+        async def banks_joint_stop(account_id: str):
+            return await run_in_threadpool(conn_call, lambda: connector().joint_stop(account_id))
+
+        @app.post("/api/banks/joint/{sender}/{account_id}/{answer}")
+        async def banks_joint_answer(sender: str, account_id: str, answer: str, b: JointAnswerIn | None = None):
+            ff_id = None
+            if b and b.mode == "link":
+                if not (b.account_id or "").startswith("ff:") or not db.one("SELECT 1 FROM accounts WHERE id=?", (b.account_id,)):
+                    raise HTTPException(422, "choose one of your Firefly III accounts to link it to")
+                ff_id = int(b.account_id.split(":", 1)[1])
+            r = await run_in_threadpool(conn_call, lambda: connector().joint_answer(sender, account_id, answer, b.mode if b else None, ff_id))
+            if answer == "accept":
+                refresh_soon(uid)                     # it arrives in Firefly III shortly; read it back
+            return r
 
         @app.get("/api/banks/usage")
         async def bank_usage():
@@ -1061,8 +1317,24 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             out["alert_list"] = [{"severity": a["severity"], "kind": a["kind"], "title": a["title"], "detail": a.get("detail", ""), **({"date": a["date"]} if a.get("date") else {})} for a in ledger.alerts(db, t)][:30]
         if "savings" in share:
             out["savings"] = {"total": ext["savings_total"], "free": ext["savings_free"], "earmarked": ext["savings_earmarked"]}
-        if "goals" in share:
-            out["goals"] = [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"]
+        if "goals" in share:                  # goals are Firefly III piggy banks (older Coinpile goals still count until closed)
+            out["goals"] = ([{"name": p["name"], "target": p["target"], "allocated": p["current"], "pct": round(min(1.0, p["current"] / p["target"]), 3) if p["target"] else None,
+                              **({"by": p["target_date"]} if p.get("target_date") else {})} for p in plan._piggies(db)]
+                            + [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"])
+        if "budgets" in share:
+            try:
+                b = contexts[uid].ff_budgets(t.isoformat()[:7]) if uid in contexts and getattr(contexts[uid], "ff_budgets", None) else None
+                out["budgets"] = {"month": b["month"], "limit": b["limit"], "spent": b["spent"], "left": b["left"],
+                                  "items": [{k: x[k] for k in ("name", "limit", "spent", "left")} for x in b["items"] if x["limit"]]} if b else None
+            except Exception:
+                out["budgets"] = None
+        if "week" in share:                   # the weekly brief: totals and the biggest payments' names (no accounts, no transactions list)
+            w = agent.week_changes(db, t)
+            out["week"] = {k: w[k] for k in ("from", "to", "money_in", "money_out", "out_change", "net_worth_change", "bills_next_7_days")} | {"biggest": [{"name": b["name"], "amount": b["amount"]} for b in w["biggest"][:3]], "alerts": len(w["alerts"])}
+        if "paycheck" in share:
+            pc = agent.paycheck_plan(db, t)
+            out["paycheck"] = None if pc.get("error") else {"date": pc["paycheck"]["date"], "amount": pc["paycheck"]["amount"], "bills": pc["bills_total"], "piggy_banks": pc["piggy_total"],
+                                                            "left": pc["left_for_spending"], "until": pc["covers_until"]}
         for key, acct in (("robinhood_main", "rh:main"), ("robinhood_agent", "rh:agent")):
             if key in share:
                 a = db.one("SELECT balance, updated FROM accounts WHERE id=?", (acct,))
@@ -1070,6 +1342,11 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         if "spending" in share:
             fc = ledger.spending_forecast(db, t)
             out["spending"] = {"so_far": fc["spent_so_far"], "projected": fc["projected"], "income_avg": fc["income_avg"], "left_after": fc["left_after_projected"]}
+        if "holdings" in share:               # the last known positions (Robinhood: activity CSV, MCP or connector), one row per symbol per account
+            out["holdings"] = [{"symbol": h["symbol"], "quantity": h["quantity"], "net_cost": h["net_cost"], "equity": h["value"], "account": h["account_id"], "as_of": h["updated"]}
+                               for h in db.all("SELECT * FROM holdings WHERE quantity IS NOT NULL AND quantity != 0 ORDER BY account_id, symbol LIMIT 300")]
+        if "daily" in share:                  # per-day totals for the last 31 days, never the transactions behind them
+            out["daily"] = ledger.daily_totals(db, t, 31)
         return out
 
     def token_holder(request: Request, resource: str):
@@ -1093,6 +1370,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         uid, _, _ = token_holder(request, "orb")
         s = orb_summary(uid)
         return {"goblins": {s["name"] or "me": s}}
+
+    # ---------------- MCP: the agent's tools for other AI assistants (Pondering Orb, Claude Desktop...), with a token that has the "mcp" scope
+    @front.post("/api/v1/mcp")
+    async def mcp_endpoint(request: Request):
+        uid, _, _ = token_holder(request, "mcp")
+        person_app(uid)                                       # builds this person's context if nobody has opened Coinpile since a restart
+        try:
+            msg = await request.json()
+        except ValueError:
+            return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "not JSON"}}, 400)
+        res = await run_in_threadpool(agent.mcp_handle, contexts[uid], msg)
+        return Response(status_code=202) if res is None else JSONResponse(res)
 
     @front.get("/api/v1/me")
     @front.get("/api/v1/me/{resource:path}")

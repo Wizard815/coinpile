@@ -79,6 +79,27 @@ class Connector:
         u = self.call("GET", "api/plaid/usage")
         return {k: u.get(k) for k in ("month", "calls_month", "calls_today", "daily_cap", "items", "est_monthly_cost", "budget", "over_budget", "room_for_items", "per_item", "webhook_banks", "webhook_set")}
 
+    # ---- joint accounts at the connector: a person asks to share one of their bank accounts with another person, who accepts or declines
+    def _seg(self, s: str, what: str) -> str:
+        from urllib.parse import quote
+        if not re.fullmatch(r"[A-Za-z0-9_:.-]{1,120}", s or "") or s.strip(".") == "":
+            raise ConnectorError(f"not a {what}")
+        return quote(s, safe="")
+
+    def joint(self) -> dict:
+        return self.call("GET", "api/joint")
+
+    def joint_ask(self, account_id: str, peer: str) -> dict:
+        return self.call("POST", f"api/joint/{self._seg(account_id, 'bank account id')}/ask", {"peer": peer})
+
+    def joint_stop(self, account_id: str) -> dict:
+        return self.call("DELETE", f"api/joint/{self._seg(account_id, 'bank account id')}")
+
+    def joint_answer(self, sender: str, account_id: str, answer: str, mode: str | None = None, ff_id: int | None = None) -> dict:
+        if answer not in ("accept", "decline", "leave"):
+            raise ConnectorError("unknown answer")
+        return self.call("POST", f"api/joint/from/{self._seg(sender, 'name')}/{self._seg(account_id, 'bank account id')}/{answer}", {"mode": mode, "ff_id": ff_id})
+
     def pull(self) -> dict:
         return self.call("POST", "sync", {})
 

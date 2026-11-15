@@ -218,7 +218,10 @@ def test_the_agent_answers_from_the_firefly_iii_copy(tmp_path):
     assert got["search_transactions"]["total"] == 3 and got["search_transactions"]["sum_out"] == -47.97
     assert [s["name"] for s in got["list_subscriptions"]] == ["Rent"] and got["savings_summary"]["total_savings"] == 5000
     assert any("netflix" in s["name"].lower() for s in got["find_recurring_payments"])                                 # the subscription catcher works on Firefly III data
-    assert got["write_note"]["saved"] and c.get("/api/notes").json()[0]["author"] == "agent"
+    assert got["write_note"]["status"].startswith("waiting") and not c.get("/api/notes").json()                    # asked, not done
+    assert out["actions"][0]["summary"].startswith('Save a note "Plan"')
+    assert c.post(f"/api/agent/actions/{got['write_note']['action_id']}/yes").json()["status"] == "done"
+    assert c.get("/api/notes").json()[0]["author"] == "agent"
 
 
 def test_net_worth_has_a_past_from_firefly_iii(tmp_path):
@@ -352,7 +355,7 @@ def test_a_robinhood_connector_with_a_value_adds_an_investment_account(tmp_path,
 def test_nothing_is_sent_to_firefly_iii_until_each_part_is_switched_on(tmp_path):
     ff = world()
     c = signed_in(app(tmp_path, ff))
-    assert c.get("/api/status").json()["sends"] == {"piggies": False, "bills": False, "categories": False, "accounts": False}
+    assert c.get("/api/status").json()["sends"] == {"piggies": False, "piggy_banks": False, "bills": False, "categories": False, "accounts": False}
     g = c.post("/api/goals", json={"name": "Roof", "target": 3000}).json()
     c.post(f"/api/goals/{g['id']}/allocate", json={"place": "a:ff:3", "amount": 1000})
     c.post("/api/subscriptions", json={"name": "Hulu", "amount": 9.99, "next_date": "2026-11-25", "cycle": "monthly"})
