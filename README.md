@@ -8,8 +8,23 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Money movement**: search and filter every transaction.
 - **Accounts**: every Firefly III asset account, credit card and liability, with balance history (net worth has a past from day one: it is read from Firefly III).
 - **Subscriptions**: your Firefly III bills, plus the subscription catcher (repeating payments found in your transactions that are not a bill yet).
-- **Savings**: Firefly III piggy banks, and Coinpile's own goal planner (set money aside for goals, free vs. promised money, CDs and when they mature).
-- **Budgets & notes**: monthly plan, incomes, notes.
+  Repeats: daily, weekly, every 2 or 4 weeks, monthly, every 2, 3 or 6 months, yearly, every 2 years, or any custom "every N days/weeks/months/years".
+  **Ends**: never (the default), on a date, or **after a number of payments**: "3 more, of 4 in all" for PayPal Pay in 4 shows "payment 2 of 4" and counts
+  down; after the last one it moves to **Finished**, kept so you can look back (Extend or Delete it there). The end date also goes to the Firefly III bill.
+  **Missing subscriptions**: when a subscription's usual payment does not show up (3 days of grace), it is called out on this page, on the Overview and in
+  notifications. With "Paid from" set, that account is checked; without it, every account is, by the payee's name, once that payee has been seen before.
+- **Savings**: your savings accounts from Firefly III, free vs. set-aside money, and CDs and bonds. A CD is an account: count any account as savings
+  and say what it is (CD, money market, bond, HSA, 529...) with its APY, opened date, maturity and term (kept in Coinpile; the balance stays Firefly III's).
+  Goals are your Firefly III piggy banks; goals made in Coinpile before that are listed as "older" until you close them or make them piggy banks.
+- **Piggy banks**: your Firefly III piggy banks with progress, what is still needed, by when, which account holds the money, and their history. With the
+  Piggy banks switch on: make new ones, change name, target, date and notes, and put money in or take it out. Firefly III 6.7.9 has a bug that stops any
+  app changing a piggy bank's amount through its API; Coinpile then says so and links straight to that piggy bank in Firefly III. Piggy banks that follow a
+  Coinpile goal are left to the goal.
+- **Budgets**: Firefly III's budgets, then the monthly plan (budgets per category, bills, what is spent, what is left) and income. Income comes from
+  Firefly III: its recurring deposits, and steady deposits found in its transactions.
+- **Notes**: search, filter (pinned, mine, by the agent, by tag), tags, templates (monthly review, checklist, big purchase), a read view with headings,
+  lists and tick-off checklists, download as Markdown, and the agent writing a note for you from your real numbers. A note can be about a piggy bank:
+  it then shows on that piggy bank, and the agent reads the piggy bank and its notes together ("Discuss with agent").
 - **Agent**: chat with a model (a local one such as Ollama by default) that can look up your accounts, transactions, subscriptions, savings and bills, and write notes.
 - **Settings, Banks**: your banks at the Plaid connector: link a bank, fix a bank sign-in, pull now.
 
@@ -17,7 +32,46 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Robinhood MCP**: Settings, Robinhood, Connect Robinhood: you sign in on Robinhood's own site (its official MCP server, `https://agent.robinhood.com/mcp/trading`, for the Agentic Trading account) and Coinpile gets permission to read. Coinpile asks only for reading and can only call read tools (portfolio and positions); there is no code path to place, cancel or change an order. Its value is recorded each time it is read, so Investments shows value by month from then on. Robinhood's own documentation of the server was not available to test against; the sign-in follows the MCP standard (OAuth 2.1 with PKCE and app registration), and a token can be pasted instead if needed.
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
+- **Joint accounts at the Plaid connector** (Settings, Banks): ask to share one of your bank accounts with another person on the connector;
+  no admin is needed. They accept (as a new account in their Firefly III, linked to one of their own accounts that is not already used, or
+  skipped) or decline, and either can stop later (you with Stop, they with Leave). Only accepted accounts reach their Firefly III. The
+  connector's README has the details and what happens at the edges.
+- **Joint accounts** (Settings, Sharing): a bank account you share with a linked person is in both your Firefly III (accepted at the Plaid connector,
+  or set by its admin). One of you offers "my account X is joint with you, I count 50%"; the other picks their copy of it (Coinpile
+  suggests it by its last digits). From then on each side counts only its share in net worth and savings, each Coinpile sends the other the
+  balance its own Firefly III shows and what that person moved in, and both see a settle-up line ("bob owes you 137.50") and whether the two
+  Firefly III copies agree. Either can stop it. Coinpile only: nothing is written to Firefly III, and every number comes from each person's own Firefly III.
+  * **What you put in** counts Firefly III transfers from your own bank accounts, and bank-feed pairs: a deposit into the joint account matched
+    by a withdrawal of the same amount from one of your own bank accounts within 3 days. Each withdrawal matches one deposit only. Card
+    purchases, other joint accounts and pending lines are not counted, so the other person's money is never counted as yours.
+  * Only bank accounts, cards and loans can be joint. The two shares must add up to 100%; an acceptance that does not is ended on both sides.
+  * Offering the account to someone else withdraws the earlier offer. Unlinking a person, or Forget me, ends every joint account with them and
+    both sides count the whole account again. One person can have at most 20 offers waiting for you.
+  * **The agent and joint accounts:** your own side (your account, your share, what you put in) is always available to it. The other
+    person's side (what they put in, their balance, what they call their copy, the settle-up line) and anything else they show you reach the
+    agent only when the model runs on your own machine. A cloud model, or another app over MCP, gets "withheld" instead, and the joint
+    settle-up skill asks you for their total.
 - **Home Assistant & API**: read-only, scoped, revocable tokens for Home Assistant, scripts and the Pondering Orb.
+
+### Read from Firefly III, or kept in Coinpile
+
+Coinpile reads everything Firefly III has, so you set it up once, in Firefly III:
+
+| From Firefly III (read only, refreshed every few minutes) | Shown as |
+|---|---|
+| Accounts, balances, transactions, net worth history | Overview, Accounts, Money movement |
+| Bills | Subscriptions ("Firefly III bill"); a payment Firefly III linked to the bill counts as paid, whatever the bank called it |
+| Recurring transactions | payments: Subscriptions ("Firefly III recurring"), with Firefly III's "repeat N times" or "until" as the countdown (pay in 4: payment 2 of 4); deposits: Income on Budgets |
+| Budgets and budget limits | Budgets page, "Budgets in Firefly III" (limit, spent, left, auto-budgets), for any month |
+| Piggy banks | Piggy banks page, with their history |
+
+What Firefly III has no place for stays in Coinpile, and is never sent anywhere: notes (also the ones about a piggy bank); which account is a CD
+and its APY and maturity; the per-category plan; who pays a subscription, which account pays it, its reminder, its category and the size of its plan
+(these can be set on Firefly III bills and recurring transactions too: their name, amount, schedule and end stay Firefly III's); nicknames; alerts.
+
+Firefly III has no websocket or inbound hook: other apps change it only through its API, which is what the switches below use. Not offered, on purpose:
+Coinpile income as Firefly III recurring deposits (Firefly III would make deposits on its own and duplicate the real ones your bank sends), and
+category budgets as Firefly III budgets (Firefly III budgets count only transactions given that budget, not a category).
 
 ### What Coinpile changes in Firefly III
 
@@ -26,6 +80,7 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 | Switch | What goes into Firefly III |
 |---|---|
 | Goals as piggy banks | each goal becomes a piggy bank holding what you set aside for it on Firefly III accounts; closing or deleting the goal removes it |
+| Piggy banks | from the Piggy banks page: new piggy banks, their name, target, date and notes, and money put in or taken out |
 | Subscriptions as bills | a subscription you add or accept becomes a bill; editing or deleting it changes the bill (daily ones stay in Coinpile) |
 | Categories | a category you set on a transaction; "always" also makes a Firefly III rule in a rule group called Coinpile |
 | Accounts and transactions | new accounts; transactions you add to a Firefly III account; bank or PayPal/Venmo/Cash App CSVs you import into one (rows already there are skipped) |
@@ -104,6 +159,76 @@ Banks that sign you in on their own website (OAuth banks) return you to the addr
 ## The agent
 
 Settings, Agent models: add a model. A local one (Ollama, LM Studio, llama.cpp: anything OpenAI-compatible) is the default and keeps your data at home. A cloud model must be allowed explicitly per model.
+
+The agent sees what every page shows, through the same code the pages use, so its numbers always match the screens. Firefly III is the main record:
+
+| Ask about | Tools |
+|---|---|
+| Accounts, one account in depth (CD details, last 30 days, balance history) | list_accounts, account_details |
+| Transactions and spending | search_transactions, spending_by_category, spending_forecast |
+| Bills, subscriptions, missing payments | list_subscriptions, upcoming_bills, find_recurring_payments, get_alerts |
+| Budgets | firefly_budgets (Firefly III's), budget_status and monthly_plan (Coinpile's per-category plan) |
+| Income | list_income (Firefly III recurring deposits and steady deposits) |
+| Goals (piggy banks) and your notes about them | list_goals, piggy_bank_history, read_note, write_note |
+| Savings, CDs, affordability | savings_summary, maturity_outlook, can_i_afford, project_balance |
+| Net worth, investments, banks | net_worth_history, list_investments, bank_connections (the Plaid connector) |
+
+**Reading is always allowed. Every change is asked first.** When the agent wants to change something, it does not: it puts a card in the chat
+saying exactly what will happen and where ("Record in Firefly III: paid 9.99 "Coffee beans" on 2026-11-13, account Everyday Checking, category
+Groceries"), with **Yes, do it** and **No**. Only Yes runs it; your answer goes back into the chat so the agent knows. What it can ask for:
+
+| Change | Where |
+|---|---|
+| record a transaction (cash, a payment the bank has not sent) | Firefly III |
+| set a transaction's category, optionally with a rule for future ones | Firefly III |
+| make a piggy bank, change its name, target, date or notes, put money in or take it out | Firefly III |
+| set a budget's amount for a month (made if missing) | Firefly III |
+| add a subscription, optionally also as a Firefly III bill | Coinpile / Firefly III |
+| save a note (on a piggy bank when it is about one), mark an account as a CD with its APY and maturity | Coinpile |
+
+Your Yes is the consent, so an approved change runs even with the matching "send to Firefly III" switch off. It cannot move money between banks.
+
+**The harness: every figure from a tool.** The agent does no arithmetic of its own. Before an answer reaches you, Coinpile checks every amount,
+decimal and percentage in it against the tool results and what you typed. A figure that came from nowhere sends the answer back once with
+"compute these with calculate"; whatever still is not from a tool is marked under the answer ("⚠ not from a tool: ..."), and a clean answer shows
+"✓ every figure from a tool". Tool arguments are checked before a tool runs (a wrong type or a missing value comes back as a plain error the model
+can fix), and calling the same thing twice returns "already done, use the result above" instead of looping.
+
+**The calculator** takes one expression or a list of labelled ones, percentages (5%), and money functions: pmt (loan payment), fv (savings
+growth), nper (months to pay off), compound, pct, round, sqrt and friends. Nothing but arithmetic can run in it.
+
+**Skills** are step-by-step playbooks the agent loads for a job and follows, each naming the tools to call and what to work out: monthly
+review, debt payoff (avalanche vs snowball), emergency fund, subscription audit, goal plan, big purchase, budget setup, idle cash and CDs
+(with current rates from the web), spending spike, **tax prep** (tax_year: income by payer, spending by category, every Firefly III tag's total,
+lines that look tax related, then the standard deduction from the web; not tax advice), **paycheck splitter** (paycheck_plan: the next
+paycheck, the bills due before the one after it, what each piggy bank needs from it, what is left) and bill negotiation (price rises and a call
+script), **year in review**, **insurance and renewals** (yearly bills coming up and whether they rose), **joint settle-up** (shared_expenses:
+joint accounts and payments tagged "shared" in Firefly III, who owes whom) and **weekly brief** (week_changes: short enough to be read out; the
+Orb can be given it under Sharing as "This week"). The Agent page's **What I can do** lists every skill (with Run) and every tool, marked
+"reads" or "asks first", and the MCP address for other assistants. The agent also picks a skill itself when a question fits.
+
+**What Firefly III gives the agent.** Everything Coinpile reads: accounts, balances, transactions with their category, **tags**, **budget**,
+**payee** and notes, bills and which payment paid which bill, recurring transactions, budgets and limits, piggy banks and their history, and
+net worth history. Search by tag (tag "tax-deductible" in Firefly III and the tax year is one search) or by budget. With the Firefly III webhook
+set (Settings, Firefly III) a change there reaches Coinpile at once; the agent can also call refresh_from_firefly when you say you just
+changed something.
+
+**Coinpile as an MCP server** (for Pondering Orb, Claude Desktop or any MCP client): make a token with the **mcp** scope (Settings, Home
+Assistant & API) and point the client at `https://your-coinpile/api/v1/mcp` with `Authorization: Bearer <token>`. It gets every read tool, the
+calculator, and the skills as prompts. Change tools only ask: the request waits under "Waiting for your answer" on Coinpile's Agent page.
+The Orb's summary can also share goals (piggy banks), Firefly III budgets and the next paycheck (Settings, Home Assistant & API, Sharing). Two more
+options feed the Orb's stock and journal pages: **Holdings** (the stocks you
+hold, from Robinhood's activity CSV, MCP or connector: symbol, shares, net
+cost, value, one row per account, as last read) and **Daily totals** (spent and
+income per day for the last 31 days; transfers between your own accounts and
+pending payments don't count; never the transactions themselves).
+
+**Money maths and outside facts.** loan_payoff (months, interest, and what an extra payment saves), savings_plan (monthly amount for a date, or
+the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.
+With a **SearXNG** address in Settings, Agent models, Web search (or `SEARXNG_URL`), web_search looks up current rates, limits and rules and
+read_webpage reads a page it found to check a figure; it names the source and date. SearXNG must allow JSON (`search.formats: [html, json]` in
+its settings.yml). The agent is told never to put personal details in a search, and it can only open pages its search just returned.
+A model without tool calling gets a summary of the same data instead. "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
 
 ## Settings
 

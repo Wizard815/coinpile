@@ -10,6 +10,9 @@ from pydantic import BaseModel
 from coinpile import plaidplan, feed, ledger, recur, sync
 
 
+SAVINGS_KINDS = ("savings", "cd", "money_market", "bond", "hsa", "529", "cash", "other")
+
+
 class Sub(BaseModel):
     name: str
     amount: float
@@ -28,6 +31,8 @@ class Sub(BaseModel):
     payer_name: str = ""
     notify_days: int = 3
     end_date: str | None = None
+    times_left: int | None = None       # "this many more payments, then it is done" (pay in 4, a loan): sets end_date from next_date
+    plan_total: int | None = None       # optional: how many payments the whole plan has (4 for pay in 4), to show "payment 2 of 4"
 
 
 class AccountIn(BaseModel):
@@ -37,6 +42,11 @@ class AccountIn(BaseModel):
     balance: float | None = None
     min_balance: float | None = None
     savings_mode: str | None = None        # auto | yes | no: does this account count as savings?
+    savings_kind: str | None = None        # what it is as savings: savings, cd, money_market, bond, hsa, 529, cash, other ("" clears); setting it counts the account as savings
+    apy: float | None = None               # Coinpile-only details Firefly III has no place for (-1 / "" clear them)
+    opened: str | None = None
+    maturity: str | None = None
+    term_months: int | None = None
     nickname: str | None = None            # your own label for any account ("" clears it)
     category: str | None = None            # what the account is for ("" clears it): Checking, Bills, Savings, Emergency fund...
     pinned: bool | None = None             # show its balance on the Overview
@@ -72,6 +82,8 @@ class NoteIn(BaseModel):
     title: str
     body: str = ""
     pinned: bool = False
+    tags: str = ""                      # comma separated, e.g. "taxes, house"
+    piggy_id: str | None = None         # the Firefly III piggy bank (goal) this note is about
 
 
 KINDS = {"cash", "credit", "investment", "loan"}
@@ -149,20 +161,7 @@ def register(app, ctx):
     def history(request: Request):
         """Daily net worth built from balance snapshots (last known balance carried forward)."""
         auth(request)
-        # Only accounts that count today (as net worth does): a removed account, or one left out of net worth in Firefly III, must not be carried forward.
-        accts = {a["id"]: a for a in store.all("SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0")}
-        sign = {"credit": -1, "loan": -1}
-        last, by_day = {}, {}
-        for r in store.all("SELECT * FROM snapshots ORDER BY ts"):
-            a = accts.get(r["account_id"])
-            if not a or r["balance"] is None:
-                continue
-            last[r["account_id"]] = r["balance"] * (100.0 if a["my_share"] is None else a["my_share"]) / 100 * sign.get(a["kind"], 1)
-            by_day[r["ts"][:10]] = round(sum(last.values()), 2)
-        # savings you keep by hand (a CD, a jar) count in net worth too: from the day they were opened, at their current value
-        manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
-        extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
-        return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]
+        return ledger.net_worth_history(store)
 
     @app.get("/api/events")
     def events(request: Request, limit: int = 50):
@@ -228,9 +227,27 @@ def register(app, ctx):
             bad("the balance and type of an account from Firefly III are changed in Firefly III; only accounts you added here can be edited", 409)
         if a.savings_mode not in (None, "auto", "yes", "no"):
             bad("savings_mode must be auto, yes or no")
+        if a.savings_kind not in (None, "", *SAVINGS_KINDS):
+            bad(f"savings_kind must be one of {', '.join(SAVINGS_KINDS)}")
+        for f in ("opened", "maturity"):
+            if getattr(a, f):
+                date_ok(getattr(a, f), f)
+        if a.apy is not None and a.apy > 100:
+            bad("apy is a yearly percentage, 0-100")
         with store.tx() as c:
             if a.savings_mode:
                 c.execute("UPDATE accounts SET savings_pool=? WHERE id=?", ({"auto": None, "yes": 1, "no": 0}[a.savings_mode], aid))
+            if a.savings_kind is not None:
+                c.execute("UPDATE accounts SET sv_kind=? WHERE id=?", (a.savings_kind or None, aid))
+                if a.savings_kind and a.savings_mode is None:
+                    c.execute("UPDATE accounts SET savings_pool=1 WHERE id=?", (aid,))         # naming what it is counts it as savings
+            if a.apy is not None:
+                c.execute("UPDATE accounts SET apy=? WHERE id=?", (a.apy if a.apy >= 0 else None, aid))
+            for f in ("opened", "maturity"):
+                if getattr(a, f) is not None:
+                    c.execute(f"UPDATE accounts SET {f}=? WHERE id=?", (getattr(a, f) or None, aid))
+            if a.term_months is not None:
+                c.execute("UPDATE accounts SET term_months=? WHERE id=?", (a.term_months if a.term_months > 0 else None, aid))
             if a.min_balance is not None:
                 c.execute("UPDATE accounts SET min_balance=? WHERE id=?", (a.min_balance if a.min_balance >= 0 else None, aid))
             if a.nickname is not None:
@@ -418,6 +435,12 @@ def register(app, ctx):
         except ValueError as e:
             bad(str(e))
         date_ok(s.next_date, "next_date")
+        if s.times_left is not None:
+            if not 1 <= s.times_left <= 1000:
+                bad("times_left must be 1-1000")
+            s.end_date = recur.shift(date.fromisoformat(s.next_date), every, unit, s.times_left - 1).isoformat()     # the last of them
+        if s.plan_total is not None and not 1 <= s.plan_total <= 1000:
+            bad("plan_total must be 1-1000")
         if s.end_date:
             date_ok(s.end_date, "end_date")
             if s.end_date < s.next_date:
@@ -440,9 +463,10 @@ def register(app, ctx):
 
     def sub_row(s: Sub, every, unit):
         return (s.name.strip(), s.amount, s.currency, recur.label(every, unit), every, unit, s.next_date, s.category, s.url, s.notes, int(s.active),
-                s.account_id or None, s.payment_method, s.payer, s.payer_name.strip() if s.payer == "other" else "", s.notify_days, s.end_date or None)
+                s.account_id or None, s.payment_method, s.payer, s.payer_name.strip() if s.payer == "other" else "", s.notify_days, s.end_date or None, s.plan_total)
 
-    COLS = "name,amount,currency,cycle,every,unit,next_date,category,url,notes,active,account_id,payment_method,payer,payer_name,notify_days,end_date"
+    COLS = "name,amount,currency,cycle,every,unit,next_date,category,url,notes,active,account_id,payment_method,payer,payer_name,notify_days,end_date,plan_total"
+    PH = ",".join("?" * len(COLS.split(",")))
 
     @app.get("/api/subscriptions")
     def subs_list(request: Request):
@@ -460,7 +484,7 @@ def register(app, ctx):
             raise HTTPException(422, str(e)[:200])
         every, unit = check_sub(s)
         with store.tx() as c:
-            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({PH},?)", sub_row(s, every, unit) + (sync.now(),))
         to_bill(cur.lastrowid)
         return ledger.subscription(store, cur.lastrowid, ctx.today())
 
@@ -483,7 +507,7 @@ def register(app, ctx):
             raise HTTPException(422, str(e)[:200])
         every, unit = check_sub(s)
         with store.tx() as c:
-            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({PH},?)", sub_row(s, every, unit) + (sync.now(),))
         return ledger.subscription(store, cur.lastrowid, ctx.today())
 
     ctx.create_sub = create_sub_from_agent
@@ -493,15 +517,38 @@ def register(app, ctx):
         auth(request)
         return create_sub(s.model_dump())
 
+    def firefly_owned(sid: int) -> str | None:
+        """Why Coinpile may not change this subscription's Firefly III side: a bill while sending bills is off, or a recurring transaction (never written)."""
+        src = (store.one("SELECT source FROM subscriptions WHERE id=?", (sid,)) or {}).get("source")
+        if src == "firefly" and not sends("bills"):
+            return "this is a bill in Firefly III: change it there (or switch on sending subscriptions in Settings, Firefly III)"
+        if src == "ff-recurring":
+            return "this is a recurring transaction in Firefly III: change it there"
+        return None
+
     def from_firefly(sid: int) -> None:
-        if not sends("bills") and (store.one("SELECT source FROM subscriptions WHERE id=?", (sid,)) or {}).get("source") == "firefly":
-            bad("this is a bill in Firefly III: change or remove it there, or switch on sending subscriptions in Settings, Firefly III", 409)
+        why = firefly_owned(sid)
+        if why:
+            bad(why, 409)
+
+    # What Firefly III has no place for: kept in Coinpile on any subscription, Firefly III's included, and never sent anywhere.
+    LOCAL = ("account_id", "payment_method", "payer", "payer_name", "notify_days", "plan_total", "category")
+    FROM_FF = ("name", "amount", "every", "unit", "end_date", "active", "notes")
 
     @app.put("/api/subscriptions/{sid}")
     def subs_update(request: Request, sid: int, s: Sub):
         auth(request)
-        from_firefly(sid)
         before = store.one("SELECT * FROM subscriptions WHERE id=?", (sid,))
+        why = firefly_owned(sid) if before else None
+        if why:
+            every, unit = check_sub(s)
+            new = dict(zip(COLS.split(","), sub_row(s, every, unit)))
+            changed = [k for k in FROM_FF if (new[k] or None) != (before[k] or None) and not (k == "amount" and abs((new[k] or 0) - (before[k] or 0)) < 0.005)]
+            if changed:
+                bad(f"{why} ({', '.join(changed)}). Your own details (paid from, who pays, reminder, category, plan size) are saved here", 409)
+            with store.tx() as c:
+                c.execute(f"UPDATE subscriptions SET {','.join(k + '=?' for k in LOCAL)} WHERE id=?", tuple(new[k] for k in LOCAL) + (sid,))
+            return ledger.subscription(store, sid, ctx.today())
         every, unit = check_sub(s)
         sets = ",".join(f"{c}=?" for c in COLS.split(","))
         with store.tx() as c:
@@ -641,6 +688,22 @@ def register(app, ctx):
         return {"deleted": sid}
 
     # ------------------------------------------------------------ planner: notes + budgets
+    def piggy(pid: str | None) -> str | None:
+        if not pid:
+            return None
+        if not store.one("SELECT 1 FROM ff_piggy WHERE id=?", (str(pid),)):
+            bad("no such piggy bank", 404)
+        return str(pid)
+
+    def tags(s: str) -> str:
+        """Tidy tags: lowercase, trimmed, no duplicates, at most 12 of 30 characters."""
+        out = []
+        for t in (s or "").split(","):
+            t = t.strip().lower()[:30]
+            if t and t not in out:
+                out.append(t)
+        return ",".join(out[:12])
+
     @app.get("/api/notes")
     def notes(request: Request):
         auth(request)
@@ -653,14 +716,16 @@ def register(app, ctx):
             bad("title required")
         ts = sync.now()
         with store.tx() as c:
-            cur = c.execute("INSERT INTO notes(title,body,author,pinned,created,updated) VALUES(?,?,?,?,?,?)", (n.title.strip(), n.body, "me", int(n.pinned), ts, ts))
+            cur = c.execute("INSERT INTO notes(title,body,author,pinned,tags,piggy_id,created,updated) VALUES(?,?,?,?,?,?,?,?)", (n.title.strip(), n.body, "me", int(n.pinned), tags(n.tags), piggy(n.piggy_id), ts, ts))
         return store.one("SELECT * FROM notes WHERE id=?", (cur.lastrowid,))
 
     @app.put("/api/notes/{nid}")
     def note_update(request: Request, nid: int, n: NoteIn):
         auth(request)
+        if not n.title.strip():
+            bad("title required")
         with store.tx() as c:
-            cur = c.execute("UPDATE notes SET title=?, body=?, pinned=?, updated=? WHERE id=?", (n.title.strip(), n.body, int(n.pinned), sync.now(), nid))
+            cur = c.execute("UPDATE notes SET title=?, body=?, pinned=?, tags=?, piggy_id=?, updated=? WHERE id=?", (n.title.strip(), n.body, int(n.pinned), tags(n.tags), piggy(n.piggy_id), sync.now(), nid))
         if not cur.rowcount:
             bad("not found", 404)
         return store.one("SELECT * FROM notes WHERE id=?", (nid,))

@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS providers(
 CREATE TABLE IF NOT EXISTS proposals(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, amount REAL, every INTEGER, unit TEXT, account_id TEXT, reason TEXT, status TEXT DEFAULT 'pending');
 CREATE TABLE IF NOT EXISTS dismissed(key TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS chats(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, provider_id INTEGER, summary TEXT DEFAULT '', created TEXT, updated TEXT);
+CREATE TABLE IF NOT EXISTS joint_accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT UNIQUE, peer TEXT NOT NULL, peer_account TEXT, peer_name TEXT, peer_mask TEXT, my_share REAL NOT NULL DEFAULT 50, state TEXT NOT NULL, peer_stats TEXT, sent_sig TEXT, created TEXT);
+CREATE TABLE IF NOT EXISTS agent_actions(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, tool TEXT NOT NULL, args TEXT NOT NULL, summary TEXT NOT NULL, target TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'asked', result TEXT, created TEXT, decided TEXT);
 CREATE TABLE IF NOT EXISTS chat_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, trace TEXT DEFAULT '', compacted INTEGER DEFAULT 0, created TEXT);
 CREATE INDEX IF NOT EXISTS cm_chat ON chat_messages(chat_id, id);
 CREATE TABLE IF NOT EXISTS goals(
@@ -62,7 +64,7 @@ COLUMNS = {  # added after the first release: (table, column) -> DDL fragment
     ("subscriptions", "every"): "INTEGER DEFAULT 1", ("subscriptions", "unit"): "TEXT DEFAULT 'month'",
     ("subscriptions", "account_id"): "TEXT", ("subscriptions", "payment_method"): "TEXT DEFAULT ''",
     ("subscriptions", "payer"): "TEXT DEFAULT 'me'", ("subscriptions", "payer_name"): "TEXT DEFAULT ''",
-    ("subscriptions", "notify_days"): "INTEGER DEFAULT 3", ("subscriptions", "end_date"): "TEXT", ("subscriptions", "created"): "TEXT", ("subscriptions", "match_key"): "TEXT", ("incomes", "match_key"): "TEXT",
+    ("subscriptions", "notify_days"): "INTEGER DEFAULT 3", ("subscriptions", "plan_total"): "INTEGER", ("notes", "tags"): "TEXT DEFAULT ''", ("incomes", "source"): "TEXT DEFAULT 'manual'", ("accounts", "sv_kind"): "TEXT", ("accounts", "apy"): "REAL", ("accounts", "maturity"): "TEXT", ("accounts", "opened"): "TEXT", ("accounts", "term_months"): "INTEGER", ("notes", "piggy_id"): "TEXT", ("transactions", "tags"): "TEXT", ("transactions", "budget"): "TEXT", ("transactions", "payee"): "TEXT", ("incomes", "ff_key"): "TEXT", ("subscriptions", "end_date"): "TEXT", ("subscriptions", "created"): "TEXT", ("subscriptions", "match_key"): "TEXT", ("incomes", "match_key"): "TEXT",
     ("transactions", "plaid_category"): "TEXT", ("transactions", "category_locked"): "INTEGER DEFAULT 0", ("transactions", "notes"): "TEXT DEFAULT ''", ("transactions", "ff_group"): "TEXT",
     ("accounts", "min_balance"): "REAL", ("accounts", "subtype"): "TEXT", ("accounts", "savings_pool"): "INTEGER", ("accounts", "mask"): "TEXT", ("plaid_items", "last_sync"): "REAL", ("plaid_items", "last_slow"): "REAL", ("plaid_items", "schedule"): "TEXT", ("plaid_items", "category"): "TEXT", ("accounts", "category"): "TEXT", ("plaid_items", "last_hook"): "REAL", ("plaid_items", "status"): "TEXT", ("plaid_items", "status_detail"): "TEXT", ("plaid_items", "hook_url"): "TEXT", ("plaid_items", "recurring"): "TEXT", ("accounts", "joint_with"): "TEXT", ("accounts", "my_share"): "REAL", ("goals", "shared_id"): "TEXT", ("goals", "members"): "TEXT", ("goals", "shared_state"): "TEXT", ("goals", "rev"): "INTEGER DEFAULT 0", ("goals", "edited_by"): "TEXT", ("goals", "sent_sig"): "TEXT", ("accounts", "nickname"): "TEXT", ("accounts", "pinned"): "INTEGER DEFAULT 0", ("providers", "context_tokens"): "INTEGER DEFAULT 8192",
     # money in another currency than the person's primary one: balance/amount hold the primary-currency value (what every total adds up),
@@ -70,6 +72,8 @@ COLUMNS = {  # added after the first release: (table, column) -> DDL fragment
     ("accounts", "native_balance"): "REAL", ("accounts", "native_currency"): "TEXT", ("accounts", "in_net_worth"): "INTEGER DEFAULT 1",
     ("transactions", "native_amount"): "REAL", ("transactions", "native_currency"): "TEXT", ("transactions", "ff_bill"): "TEXT",
     ("subscriptions", "native_amount"): "REAL", ("subscriptions", "native_currency"): "TEXT",
+    # holdings: last known positions per investment account (Robinhood), for the Orb's holdings share
+    ("holdings", "net_cost"): "REAL", ("holdings", "updated"): "TEXT",
 }
 DEFAULT_CATEGORIES = [("Income", "income"), ("Food", "expense"), ("Groceries", "expense"), ("Clothes", "expense"), ("Fun", "expense"), ("Games", "expense"),
                       ("Gas", "expense"), ("Transport", "expense"), ("Bills", "expense"), ("Housing", "expense"), ("Health", "expense"), ("Shopping", "expense"),
