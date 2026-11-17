@@ -153,7 +153,13 @@ def grown(balance: float, apy: float | None, days: int) -> float | None:
 
 
 # ------------------------------------------------------------------ subscriptions
-def sub_view(row: dict, today: date) -> dict:
+def not_converted(row: dict, main: str | None) -> str | None:
+    """The currency of a Firefly III bill or recurring transaction that is not in the main currency (Firefly III did not convert it), else None."""
+    cur = row.get("currency")
+    return cur if main and cur and cur != main and row.get("source") in ("firefly", "ff-recurring") else None
+
+
+def sub_view(row: dict, today: date, main: str | None = None) -> dict:
     every, unit = row.get("every") or 1, row.get("unit") or "month"
     stop = d(row["end_date"]) if row.get("end_date") else None
     nd = recur.next_due(d(row["next_date"]), every, unit, max(today, d(row["next_date"])), stop)          # next_date is the next payment: nothing is due before it
@@ -163,29 +169,33 @@ def sub_view(row: dict, today: date) -> dict:
         left, last = recur.count_until(d(row["next_date"]), every, unit, today, stop)
         last = last.isoformat() if last else None
     total = row.get("plan_total")
-    return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended,
+    other = not_converted(row, main)                         # shown with its own currency, left out of the totals
+    return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended, "other_currency": other,
             "payments_left": left, "last_payment": last, "payment_no": (total - left + 1) if total and left is not None and 0 < left <= total else None,
-            "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended else 0.0}
+            "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended and not other else 0.0}
 
 
 SUB_SELECT = "SELECT s.*, a.name account_name, a.institution account_institution FROM subscriptions s LEFT JOIN accounts a ON a.id=s.account_id"
 
 
 def subscriptions(db, today: date) -> list[dict]:
-    return [sub_view(s, today) for s in db.all(SUB_SELECT + " ORDER BY s.active DESC, s.name")]
+    main = main_currency(db)
+    return [sub_view(s, today, main) for s in db.all(SUB_SELECT + " ORDER BY s.active DESC, s.name")]
 
 
 def subscription(db, sid: int, today: date) -> dict | None:
     row = db.one(SUB_SELECT + " WHERE s.id=?", (sid,))
-    return sub_view(row, today) if row else None
+    return sub_view(row, today, main_currency(db)) if row else None
 
 
 def upcoming(db, days: int, today: date) -> dict:
     """Every bill falling due in the next `days` days, repeats included (a weekly bill appears each week)."""
     days = max(1, min(int(days), 3650))
     end = today + timedelta(days=days)
-    items = []
+    items, main = [], main_currency(db)
     for s in db.all("SELECT * FROM subscriptions WHERE active=1"):
+        if not_converted(s, main):
+            continue                                         # in another currency, not converted by Firefly III: an alert says it is left out
         every, unit = s["every"] or 1, s["unit"] or "month"
         stop = d(s["end_date"]) if s.get("end_date") else None
         for occ in recur.occurrences(d(s["next_date"]), every, unit, max(today, d(s["next_date"])), end, stop):
@@ -270,7 +280,13 @@ def other_currencies(db) -> list[dict]:
     cur = main_currency(db)
     if not cur:
         return []
-    return db.all("SELECT currency, COUNT(*) accounts, ROUND(SUM(balance),2) balance FROM accounts WHERE source='firefly' AND currency IS NOT NULL AND currency != ? GROUP BY currency", (cur,))
+    out = {}
+    for what, sql in (("accounts", "SELECT currency, COUNT(*) n FROM accounts WHERE source='firefly' AND currency IS NOT NULL AND currency != ? GROUP BY currency"),
+                      ("bills", "SELECT currency, COUNT(*) n FROM subscriptions WHERE source IN ('firefly','ff-recurring') AND currency IS NOT NULL AND currency != ? GROUP BY currency"),
+                      ("incomes", "SELECT currency, COUNT(*) n FROM incomes WHERE source='firefly' AND currency IS NOT NULL AND currency != ? GROUP BY currency")):
+        for r in db.all(sql, (cur,)):
+            out.setdefault(r["currency"], {"currency": r["currency"], "accounts": 0, "bills": 0, "incomes": 0})[what] = r["n"]
+    return sorted(out.values(), key=lambda x: x["currency"])
 
 
 def mine(a: dict, bal: float | None = None) -> float:
@@ -442,7 +458,8 @@ def _alerts(db, today: date) -> list[dict]:
                     "detail": "Expected " + ", ".join(m["missed_dates"]) + ". Paid another way, or cancelled? Update or pause it in Subscriptions."})
     for oc in other_currencies(db):
         out.append({"kind": "other_currency", "severity": "info", "key": f"other_currency:{oc['currency']}",
-                    "title": f"{oc['accounts']} account{'s' if oc['accounts'] != 1 else ''} in {oc['currency']} {'are' if oc['accounts'] != 1 else 'is'} not in your totals",
+                    "title": ", ".join(f"{oc[k]} {w}{'s' if oc[k] != 1 else ''}" for k, w in (("accounts", "account"), ("bills", "bill"), ("incomes", "income")) if oc[k])
+                             + f" in {oc['currency']}: not in your totals",
                     "detail": f"Firefly III is not converting {oc['currency']} to {main_currency(db)}, so net worth, spending and forecasts leave it out. "
                               "Switch on \"convert to primary currency\" in Firefly III (Preferences) to include it."})
     from coinpile import plan                       # imported here: plan builds on this module
@@ -506,7 +523,7 @@ def overview(db, days: int, today: date) -> dict:
         by_kind["savings (manual)"] = round(unlinked, 2)
     up = upcoming(db, days, today)
     subs = db.all("SELECT * FROM subscriptions WHERE active=1")
-    monthly = sum(sub_view(s, today)["monthly"] for s in subs)
+    monthly = sum(sub_view(s, today, main_currency(db))["monthly"] for s in subs)
     return {"net_worth": net_worth(db), "currency": cfg.get(db, "currency") or "USD", "by_kind": by_kind, "accounts": accts, "subscriptions_monthly": round(monthly, 2), "upcoming": up,
             "events": db.all("SELECT * FROM events ORDER BY ts DESC LIMIT 10"), "alerts": alerts(db, today), "savings_total": gv["total"], "savings_free": gv["free"], "goals_needed": gv["needed"]}
 

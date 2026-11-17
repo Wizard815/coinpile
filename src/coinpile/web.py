@@ -59,6 +59,9 @@ def sha(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
+PROBLEM_HOURS = 24          # how long sessions and API tokens go on once Firefly III refuses Coinpile's sign-in for a person
+
+
 class Users:
     """Who has signed in: their Firefly III user id, email and (encrypted) token, plus browser sessions (only hashes are kept)."""
 
@@ -81,6 +84,8 @@ class Users:
                 c.execute("ALTER TABLE users ADD COLUMN handle TEXT")
             if "pw_hash" not in cols:
                 c.execute("ALTER TABLE users ADD COLUMN pw_hash TEXT")       # a Coinpile-only password, as a salted scrypt hash (never the password)
+            if "problem_since" not in cols:
+                c.execute("ALTER TABLE users ADD COLUMN problem_since REAL")  # when Firefly III first refused Coinpile's sign-in for this person
             try:                                                             # one handle, one person: the database refuses a second
                 c.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_handle ON users(handle) WHERE handle IS NOT NULL")
             except sqlite3.IntegrityError:
@@ -127,8 +132,23 @@ class Users:
         return self.db.all("SELECT * FROM users WHERE token_enc IS NOT NULL")
 
     def problem(self, uid: str, text: str | None) -> None:
+        """Firefly III refused Coinpile's sign-in for this person (text), or took it again (None). While it is refused, nobody stays signed
+        in for long on the strength of a sign-in Firefly III no longer honours: every session of theirs ends within a day."""
         with self.db.tx() as c:
-            c.execute("UPDATE users SET problem=? WHERE id=?", (text, uid))
+            if text:
+                c.execute("UPDATE users SET problem=?, problem_since=coalesce(problem_since, ?) WHERE id=?", (text, time.time(), uid))
+                c.execute("UPDATE sessions SET expires=? WHERE user_id=? AND expires>?", (time.time() + PROBLEM_HOURS * 3600, uid, time.time() + PROBLEM_HOURS * 3600))
+            else:
+                c.execute("UPDATE users SET problem=NULL, problem_since=NULL WHERE id=?", (uid,))
+
+    def stale(self, uid: str) -> bool:
+        """Has Firefly III been refusing this person's sign-in for longer than the grace time?"""
+        u = self.get(uid) or {}
+        return bool(u.get("problem") and u.get("problem_since") and time.time() - u["problem_since"] > PROBLEM_HOURS * 3600)
+
+    def end_all(self, uid: str) -> int:
+        with self.db.tx() as c:
+            return c.execute("DELETE FROM sessions WHERE user_id=?", (uid,)).rowcount
 
     def forget(self, uid: str) -> None:
         """Everything about the person goes, except a tombstone row that keeps their handle: a handle is never given to someone else,
@@ -141,7 +161,8 @@ class Users:
         tok = secrets.token_urlsafe(32)
         with self.db.tx() as c:
             c.execute("DELETE FROM sessions WHERE expires<?", (time.time(),))
-            c.execute("INSERT INTO sessions VALUES(?,?,?)", (sha(tok), uid, time.time() + SESSION_DAYS * 86400))
+            short = c.execute("SELECT 1 FROM users WHERE id=? AND problem IS NOT NULL", (uid,)).fetchone()
+            c.execute("INSERT INTO sessions VALUES(?,?,?)", (sha(tok), uid, time.time() + (PROBLEM_HOURS * 3600 if short else SESSION_DAYS * 86400)))
         return tok
 
     def session_user(self, tok: str | None) -> str | None:
@@ -1050,7 +1071,19 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 body["target_date"] = day(b.target_date)
             if b.notes:
                 body["notes"] = b.notes[:2000]
-            d = ff_for(uid).send("POST", "/piggy-banks", body)
+            f = ff_for(uid)
+            try:
+                d = f.send("POST", "/piggy-banks", body)
+            except firefly.Unreachable:                         # the answer never came: if the piggy bank is there now, it was made
+                try:
+                    known = {r["id"] for r in db.all("SELECT id FROM ff_piggy")}
+                    same = next((p for p in f.pages("/piggy-banks") if (p.get("attributes") or {}).get("name") == body["name"] and str(p.get("id")) not in known
+                                 and any(str(x.get("account_id")) == acct for x in (p.get("attributes") or {}).get("accounts") or [])), None)
+                except firefly.FireflyError:
+                    same = None
+                if not same:
+                    raise
+                d = {"data": same}
             piggy_reread_sync()
             return {"id": str((d.get("data") or {}).get("id") or "")}
 
@@ -1410,6 +1443,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         row, err = external.authenticate(db, tok, resource, sync.now())
         if err:
             raise HTTPException(*err)
+        if users.stale(uid):
+            raise HTTPException(401, "Firefly III no longer accepts Coinpile's sign-in for this person: sign in to Coinpile again and this token works again")
         if not limiter.ok((uid, row["id"])):
             raise HTTPException(429, "too many requests: slow down (limit %d a minute)" % limiter.n)
         return uid, db, row
@@ -1706,6 +1741,27 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         users.end_session(request.cookies.get(COOKIE))
         response.delete_cookie(COOKIE, path="/")
         return {"signed_out": True}
+
+    class EverywhereIn(BaseModel):
+        api_tokens: bool = False
+
+    @front.post("/auth/logout/everywhere")
+    def logout_everywhere(request: Request, response: Response, b: EverywhereIn | None = None):
+        """End every browser's session of the person signed in here (this one too). With api_tokens, their API tokens are revoked as well."""
+        uid = users.session_user(request.cookies.get(COOKIE))
+        if not uid:
+            raise HTTPException(401, "sign in first")
+        if not same_origin(request.scope, my_url):
+            raise HTTPException(403, "that request did not come from this site")
+        ended, revoked = users.end_all(uid), 0
+        if b and b.api_tokens:
+            try:
+                with person_db(uid).tx() as c:
+                    revoked = c.execute("UPDATE api_tokens SET revoked=1 WHERE revoked=0").rowcount
+            except KeyError:
+                pass
+        response.delete_cookie(COOKIE, path="/")
+        return {"signed_out": True, "sessions_ended": ended, "api_tokens_revoked": revoked}
 
     @front.get("/")
     def index():

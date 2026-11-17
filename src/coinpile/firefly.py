@@ -23,6 +23,10 @@ class TokenRefused(FireflyError):
     pass
 
 
+class Unreachable(FireflyError):
+    """No answer came. For a change that means "unknown", not "failed": Firefly III may have made it and only the answer got lost."""
+
+
 class Firefly:
     def __init__(self, url: str, token: str, transport=None):
         self.base = url.rstrip("/") + "/api/v1"
@@ -47,7 +51,7 @@ class Firefly:
         try:
             r = self.c.request(method, self.base + path, json=body, headers={"Content-Type": "application/json"})
         except httpx.HTTPError as e:
-            raise FireflyError(f"could not reach Firefly III ({type(e).__name__})")
+            raise Unreachable(f"could not reach Firefly III ({type(e).__name__})")
         if r.status_code in (401, 403):
             raise TokenRefused("Firefly III refused the change: sign in again.")
         if r.status_code == 204 or not r.content:
@@ -505,6 +509,7 @@ def sync_recurring(db, ff: Firefly, today: date) -> int:
     except FireflyError:
         return 0                                   # Firefly III cannot list them (it fails on a broken one): keep what was read before
     bills = db.all("SELECT name, amount FROM subscriptions WHERE source='firefly' AND active=1")
+    primary = cfg.get(db, "currency") or None
     seen_sub, seen_inc = set(), set()
     with db.tx() as c:
         for rid, x in rows:
@@ -525,11 +530,13 @@ def sync_recurring(db, ff: Firefly, today: date) -> int:
             else:
                 seen_inc.add(key)
                 have = c.execute("SELECT id FROM incomes WHERE ff_key=?", (key,)).fetchone()
-                vals = (x["name"], x["amount"], x["every"], x["unit"], x["next_date"], x["account_id"], x["active"])
+                other = bool(primary and x["currency"] and x["currency"] != primary)          # not converted by Firefly III: kept, but in no total
+                vals = (x["name"] + (f" ({x['currency']}, not converted)" if other else ""), x["amount"], x["every"], x["unit"], x["next_date"], x["account_id"],
+                        0 if other else x["active"], x["currency"])
                 if have:
-                    c.execute("UPDATE incomes SET name=?,amount=?,every=?,unit=?,next_date=?,account_id=?,active=? WHERE id=?", vals + (have[0],))
+                    c.execute("UPDATE incomes SET name=?,amount=?,every=?,unit=?,next_date=?,account_id=?,active=?,currency=? WHERE id=?", vals + (have[0],))
                 else:
-                    c.execute("INSERT INTO incomes(name,amount,every,unit,next_date,account_id,active,source,ff_key) VALUES(?,?,?,?,?,?,?,'firefly',?)", vals + (key,))
+                    c.execute("INSERT INTO incomes(name,amount,every,unit,next_date,account_id,active,currency,source,ff_key) VALUES(?,?,?,?,?,?,?,?,'firefly',?)", vals + (key,))
         for r in c.execute("SELECT id, plaid_stream_id k FROM subscriptions WHERE source='ff-recurring'").fetchall():
             if r[1] not in seen_sub:
                 c.execute("DELETE FROM subscriptions WHERE id=?", (r[0],))
@@ -540,12 +547,32 @@ def sync_recurring(db, ff: Firefly, today: date) -> int:
 
 
 # ---------------------------------------------------------------- budgets
+def _share_in(lim_start, lim_end, start: date, end: date) -> float:
+    """The part of a budget limit that falls inside [start, end], by days: a year's limit counts a twelfth-ish for one month, a week that
+    straddles the month's end counts for its days in the month. A limit for exactly this period, or one without dates, counts in full."""
+    if not (_is_day(lim_start) and _is_day(lim_end)):
+        return 1.0
+    a, b = date.fromisoformat(str(lim_start)[:10]), date.fromisoformat(str(lim_end)[:10])
+    if b < a:
+        return 1.0
+    inside = (min(b, end) - max(a, start)).days + 1
+    return max(0.0, min(1.0, inside / ((b - a).days + 1)))
+
+
+# an auto-budget's amount is per its own period: what that comes to over a period of n days
+_PER_PERIOD = {"daily": lambda n: n, "weekly": lambda n: n / 7, "monthly": lambda n: 1, "quarterly": lambda n: 1 / 3, "half_year": lambda n: 1 / 6, "half-year": lambda n: 1 / 6,
+               "yearly": lambda n: 1 / 12}
+
+
 def budgets(ff: Firefly, start: date, end: date) -> list[dict]:
     """Firefly III's budgets for one period, read live: the limit set for it (or the auto-budget amount) and what was spent."""
-    limits = {}
+    limits, part = {}, set()
     for lim in ff.pages("/budget-limits", start=start.isoformat(), end=end.isoformat()):
         at = lim.get("attributes") or {}
-        limits[str(at.get("budget_id"))] = limits.get(str(at.get("budget_id")), 0) + (abs(_num(at.get("pc_amount"))) or abs(_num(at.get("amount"))))
+        share = _share_in(at.get("start"), at.get("end"), start, end)
+        if share < 0.999:
+            part.add(str(at.get("budget_id")))
+        limits[str(at.get("budget_id"))] = limits.get(str(at.get("budget_id")), 0) + (abs(_num(at.get("pc_amount"))) or abs(_num(at.get("amount")))) * share
     out = []
     for b in ff.pages("/budgets", start=start.isoformat(), end=end.isoformat()):
         at = b.get("attributes") or {}
@@ -553,8 +580,9 @@ def budgets(ff: Firefly, start: date, end: date) -> list[dict]:
             continue
         tot = lambda k: abs(sum(_num(s.get("sum")) for s in (at.get(k) or []) if isinstance(s, dict)))
         spent = tot("pc_spent") or tot("spent")           # converted when Firefly III could (it says 0.00 when it has no exchange rate)
-        lim = limits.get(str(b["id"])) or (abs(_num(at.get("auto_budget_amount"))) if at.get("auto_budget_type") else 0) or None
-        out.append({"id": str(b["id"]), "name": at.get("name") or f"Budget {b['id']}", "limit": round(lim, 2) if lim else None, "spent": round(spent, 2),
+        auto = abs(_num(at.get("auto_budget_amount"))) * _PER_PERIOD.get(at.get("auto_budget_period") or "monthly", lambda n: 1)((end - start).days + 1) if at.get("auto_budget_type") else 0
+        lim = limits.get(str(b["id"])) or auto or None
+        out.append({"prorated": str(b["id"]) in part or bool(not limits.get(str(b["id"])) and auto and (at.get("auto_budget_period") or "monthly") != "monthly"), "id": str(b["id"]), "name": at.get("name") or f"Budget {b['id']}", "limit": round(lim, 2) if lim else None, "spent": round(spent, 2),
                     "left": round(lim - spent, 2) if lim else None, "pct": round(spent / lim, 3) if lim else None, "auto": at.get("auto_budget_type") or None})
     return out
 
