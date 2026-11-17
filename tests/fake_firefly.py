@@ -56,7 +56,7 @@ class FakeFirefly:
             key = "bills" if p == "/bills" else "piggies"
             att = {**b, "amount_avg": b.get("amount_min"), "date": (b.get("date") or "2026-01-01") + "T00:00:00+00:00", "pay_dates": [], "active": True}
             if key == "piggies":
-                att = {"name": b["name"], "target_amount": b.get("target_amount"), "active": True, "target_date": b.get("target_date"),
+                att = {"name": b["name"], "target_amount": b.get("target_amount"), "active": True, "target_date": b.get("target_date"), "notes": b.get("notes"),
                        "accounts": [{"account_id": a["account_id"], "name": "x", "current_amount": a["current_amount"]} for a in b["accounts"]],
                        "current_amount": str(sum(float(a["current_amount"]) for a in b["accounts"]))}
             row = {"type": key, "id": self._next(), "attributes": att}

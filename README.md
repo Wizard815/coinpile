@@ -101,6 +101,10 @@ to Coinpile's own details (paid from, who pays, reminder, category, plan size) s
 currency is changed in Firefly III itself; all the piggy banks on an account together cannot hold more than the account does. If
 Firefly III is unreachable while a goal's piggy bank is updated, the change is tried again later instead of making a second piggy bank.
 
+**A lost answer is not a failure.** If Firefly III does what it was asked but its answer never arrives (a timeout), Coinpile looks
+whether the transaction, bill or piggy bank is there before saying it failed, and a later "try again" finds the first one instead of
+making a second. A transaction you add twice on purpose is still two.
+
 ### How the numbers are worked out
 
 - **Bills already paid.** A Firefly III bill with a payment linked to it since its last due date is not due again until the next period.
@@ -109,7 +113,12 @@ Firefly III is unreachable while a goal's piggy bank is updated, the change is t
   income. A category first seen on a refund still counts as spending once money is spent in it.
 - **Other currencies.** Totals are in Firefly III's primary currency. An account or transaction Firefly III keeps in another currency
   without converting is left out of net worth, spending and forecasts, and an alert says so (switch on "convert to primary currency" in
-  Firefly III to include it). A subscription you add in Coinpile is entered in the primary currency.
+  Firefly III to include it). The same goes for a bill or recurring payment in another currency (listed with its currency, left
+  out of the monthly total and of what is due) and for recurring income (kept, switched off, named with its currency). A subscription
+  you add in Coinpile is entered in the primary currency.
+- **Budgets.** A Firefly III budget limit that is not exactly the month shown counts for the part of it that falls in the month, by
+  days: a year's limit of 12,000 shows about 986 for November, and a week that straddles the month's end counts for its days in the
+  month. Such a budget is marked "part of a longer limit". An auto-budget's amount is scaled from its own period (weekly, yearly ...).
 - **Money owed to you** counts in net worth but not as cash for paying bills in the balance projection.
 - **Paydays** are counted from the income's own date, so a salary on the 31st lands on 28 Feb and then 31 Mar. Two deposits from one
   payer on one day are one payday.
@@ -299,6 +308,8 @@ A model without tool calling gets a summary of the same data instead. "Discuss w
 - Handles are unique: two people can never be given the same name for sharing.
 - "Forget me" affects only that person; a request of theirs still on its way is answered "sign in first".
 - Numbers in requests and from another person's Coinpile must be ordinary finite numbers; a malformed message from a linked person is ignored whole.
+- **Sign out everywhere** (Settings, Firefly III, Leave) ends your session in every browser and on every device; "…and end API tokens" revokes your API tokens too.
+- If Firefly III stops accepting Coinpile's sign-in for you (the token was revoked or ran out), your sessions end within a day instead of lasting up to 30, and your API tokens stop answering after a day, until you sign in to Coinpile again.
 - Password sign-in slows down wrong guesses per name and address, so guesses from somewhere else do not lock you out where you are; old failures are forgotten after 15 minutes. Signing in ends whatever session that browser had before.
 - "Sign in with Firefly III" can only be finished in the browser that started it.
 - A person's name for sharing is never given to someone else after they use "Forget me", and the people they shared with are told.

@@ -8,13 +8,16 @@ because of something they did on a Coinpile screen.
 
 What Firefly III has no place for stays in Coinpile: savings APY and maturity, notes, agent chats, nicknames, warnings, who pays a subscription, reminders.
 After each change Coinpile reads Firefly III back, so the screens show what Firefly III holds."""
+import hashlib
 import json
+import time
 import uuid
 from datetime import date
 
 from coinpile import firefly, importers, recur, settings as cfg
 
 RULE_GROUP = "Coinpile"
+MARK = "Kept in step by Coinpile (its goal of the same name)."      # in the notes of a piggy bank Coinpile made for a goal
 PARTS = {"piggies": "ff_send_goals", "piggy_banks": "ff_send_piggies", "bills": "ff_send_bills", "categories": "ff_send_categories", "accounts": "ff_send_accounts"}
 
 
@@ -77,15 +80,64 @@ class Writer:
 
     def add_transaction(self, account_id: str, day: str, name: str, amount: float, category: str | None, external_id: str | None = None, check_duplicate: bool = False) -> dict:
         fid = account_id.split(":", 1)[1]
+        # If the answer to an earlier try never came, Firefly III may have recorded it all the same. The same transaction sent again within a
+        # day reuses that try's id and first looks whether it is there, so "try again" never records it twice.
+        key = "tx:" + hashlib.sha256(f"{account_id}|{day}|{amount:.2f}|{name}".encode()).hexdigest()[:32]
+        pend = None if external_id else self.db.one("SELECT ext FROM ff_pending WHERE key=? AND ts>?", (key, time.time() - 86400))
+        ext = external_id or (pend or {}).get("ext") or f"coinpile:{uuid.uuid4().hex[:16]}"
+
+        def settled():
+            with self.db.tx() as c:
+                c.execute("DELETE FROM ff_pending WHERE key=? OR ts<?", (key, time.time() - 7 * 86400))
+        if pend:
+            got = self._made(lambda f: self._tx_by_external(f, day, ext))
+            if got:
+                settled()
+                return {"data": got}
         leg = {"type": "deposit" if amount > 0 else "withdrawal", "date": day, "amount": f"{abs(amount):.2f}", "description": name[:255] or "(no description)",
-               "external_id": external_id or f"coinpile:{uuid.uuid4().hex[:16]}", "tags": ["coinpile"]}
+               "external_id": ext, "tags": ["coinpile"]}
         if category:
             leg["category_name"] = category
         if amount > 0:
             leg.update({"destination_id": fid, "source_name": name[:255] or "(unknown)"})
         else:
             leg.update({"source_id": fid, "destination_name": name[:255] or "(unknown)"})
-        return self.ff().send("POST", "/transactions", {"error_if_duplicate_hash": check_duplicate, "apply_rules": True, "transactions": [leg]})
+        try:
+            d = self.ff().send("POST", "/transactions", {"error_if_duplicate_hash": check_duplicate, "apply_rules": True, "transactions": [leg]})
+        except firefly.Unreachable:
+            got = self._made(lambda f: self._tx_by_external(f, day, ext))
+            if got:
+                settled()
+                return {"data": got}
+            if not external_id:
+                with self.db.tx() as c:
+                    c.execute("INSERT OR REPLACE INTO ff_pending(key, ext, ts) VALUES(?,?,?)", (key, ext, time.time()))
+            raise
+        if pend:
+            settled()
+        return d
+
+    # ---------------- a change whose answer never came
+    def _made(self, find):
+        """Look in Firefly III for the thing a lost answer was about. None when it is not there, or Firefly III still cannot be reached."""
+        try:
+            return find(self.ff())
+        except firefly.FireflyError:
+            return None
+
+    @staticmethod
+    def _tx_by_external(f, day: str, ext: str):
+        for g in f.pages("/transactions", start=day, end=day, type="all"):
+            if any((s.get("external_id") or "") == ext for s in (g.get("attributes") or {}).get("transactions") or []):
+                return g
+        return None
+
+    def _bill_named(self, f, name: str):
+        """A bill of that name in Firefly III that no subscription here is tied to yet (Firefly III allows one bill per name)."""
+        for b in f.pages("/bills"):
+            if ((b.get("attributes") or {}).get("name") or "").strip().lower() == name.strip().lower() and b.get("id") is not None:
+                return None if self.db.one("SELECT 1 FROM subscriptions WHERE plaid_stream_id=?", (f"ff-bill:{b['id']}",)) else b
+        return None
 
     def import_csv(self, account_id: str, text: str, flip: bool) -> dict:
         try:
@@ -154,7 +206,17 @@ class Writer:
         body = s and self._bill_body(s)
         if not body:
             return                                              # Firefly III has no daily bills: it stays a Coinpile subscription
-        d = self.ff().send("POST", "/bills", body)
+        try:
+            d = self.ff().send("POST", "/bills", body)
+        except firefly.TokenRefused:
+            raise
+        except firefly.FireflyError:
+            # No answer, or Firefly III says the name is taken: an earlier try may have made this very bill. If a bill of this name is
+            # there and nothing here is tied to it, it is this one.
+            same = self._made(lambda f: self._bill_named(f, body["name"]))
+            if not same:
+                raise
+            d = {"data": same}
         with self.db.tx() as c:
             c.execute("UPDATE subscriptions SET source='firefly', plaid_stream_id=? WHERE id=?", (f"ff-bill:{d['data']['id']}", sid))
 
@@ -211,7 +273,7 @@ class Writer:
                 fid = a["place"].split(":")[2]
                 accts[fid] = round(accts.get(fid, 0) + a["amount"], 2)
             body = {"name": g["name"][:255], "target_amount": f"{g['target']:.2f}", "start_date": (g.get("created") or start)[:10], "target_date": g.get("deadline"),
-                    "notes": "Kept in step by Coinpile (its goal of the same name).", "accounts": [{"account_id": k, "current_amount": f"{v:.2f}"} for k, v in accts.items()],
+                    "notes": MARK, "accounts": [{"account_id": k, "current_amount": f"{v:.2f}"} for k, v in accts.items()],
                     "transaction_currency_code": cfg.get(self.db, "currency") or "USD"}
             sig = json.dumps(body, sort_keys=True)
             if gid in links:
@@ -234,7 +296,21 @@ class Writer:
                         c.execute("DELETE FROM ff_goal_piggy WHERE goal_id=?", (gid,))
             if not accts:
                 continue                                        # nothing on a Firefly III account yet: a piggy bank needs one
-            d = f.send("POST", "/piggy-banks", body)
+            mine_ = lambda ff_: next((p for p in ff_.pages("/piggy-banks") if (p.get("attributes") or {}).get("name") == body["name"]      # noqa: E731
+                                      and MARK in ((p.get("attributes") or {}).get("notes") or "") and str(p.get("id")) not in set(links.values())), None)
+            orphan = self._made(mine_)                          # made by an earlier try whose answer never came
+            if orphan:
+                f.send("PUT", f"/piggy-banks/{orphan['id']}", body)
+                d = {"data": orphan}
+            else:
+                try:
+                    d = f.send("POST", "/piggy-banks", body)
+                except firefly.Unreachable:
+                    orphan = self._made(mine_)
+                    if not orphan:
+                        raise
+                    d = {"data": orphan}
+            links[gid] = str(d["data"]["id"])
             with self.db.tx() as c:
                 c.execute("INSERT OR REPLACE INTO ff_goal_piggy(goal_id, piggy_id, sig) VALUES(?,?,?)", (gid, str(d["data"]["id"]), sig))
             made += 1
