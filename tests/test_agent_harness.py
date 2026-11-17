@@ -4,7 +4,7 @@ import json
 import httpx
 
 from coinpile import web
-from coinpile.agent import calculate, check_args, figures, known_numbers, unverified
+from coinpile.agent import calculate, check_args, figures, known_numbers, known_percent, unverified
 from tests.test_coinpile import TODAY, signed_in, world
 
 
@@ -96,6 +96,7 @@ def test_the_calculator_takes_several_items(tmp_path):
 
 def test_figure_helpers():
     assert [v for _, v in figures("Rent $1,500.00 is 32% of income; 3 bills; due 2026-12-01; in 2027; 12k saved")] == [1500.0, 32.0, 12000.0]
-    k = known_numbers([{"rate": 0.0475, "bal": -2500}])
-    assert unverified("4.75% on $2,500", k) == [] and unverified("4.8% on $2,500", k) == []
+    k, pc = known_numbers([{"rate": 0.0475, "bal": -2500}]), known_percent([{"rate": 0.0475, "bal": -2500}])
+    assert unverified("4.75% on $2,500", k, pc) == [] and unverified("4.8% on $2,500", k, pc) == []
+    assert unverified("$250,000 or $25", k, pc) == ["$250,000", "$25"]                 # a known value times or divided by 100 is not known
     assert check_args({"properties": {"x": {"type": "number"}}, "required": ["x"]}, {"x": "1,200.50"}) is None
