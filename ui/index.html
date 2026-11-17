@@ -262,6 +262,8 @@ function spark(points, w = 560, ht = 120, key = "net_worth", xkey = "date") {
   for (const [i, anchor] of [[0, "start"], [points.length - 1, "end"]]) { const t = mk("text", { x: X(i), y: ht - 3, "text-anchor": anchor }); t.textContent = String(points[i][xkey]).slice(5, 10); svg.append(t); }
   return svg;
 }
+// A cell for a CSV a spreadsheet will open: text that starts like a formula (= + - @, tab, return) gets a leading ' so it stays text. Numbers stay numbers.
+function csvCell(c) { let s = String(c ?? ""); if (typeof c !== "number" && /^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }
 function downloadText(name, text, type) { const a = h("a", { href: URL.createObjectURL(new Blob([text], { type })), download: name }); document.body.append(a); a.click(); a.remove(); }
 const sure = (btn, label, run) => (ev) => { if (ev.target.dataset.sure) run(); else { ev.target.dataset.sure = 1; ev.target.textContent = label; } };
 
@@ -341,7 +343,7 @@ async function txBrowser(root, fixed = {}, accounts = null) {
         spend.length && !fixed.account_id ? h("div", { style: "margin-top:14px" }, h("h3", {}, "Spending by category (these dates)"), barList(spend.slice(0, 8).map((x) => [x.category, x.spent]))) : null);
       fill(foot, h("span", { class: "muted small" }, r.total ? `${F.offset + 1}–${Math.min(F.offset + 50, r.total)} of ${r.total}` : ""),
         h("div", { class: "chips" }, h("button", { class: "btn sm", disabled: F.offset === 0, onclick: () => { F.offset = Math.max(0, F.offset - 50); load(); } }, "Previous"), h("button", { class: "btn sm", disabled: F.offset + 50 >= r.total, onclick: () => { F.offset += 50; load(); } }, "Next"),
-          h("button", { class: "btn sm", onclick: async () => { const all = await api("/api/transactions?" + qs({ ...F, limit: 500, offset: 0 })); downloadText("transactions.csv", "date,description,account,category,amount\n" + all.items.map((x) => [x.date, x.name, x.account_name || "", x.category, x.amount].map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(",")).join("\n"), "text/csv"); } }, "Export CSV")));
+          h("button", { class: "btn sm", onclick: async () => { const all = await api("/api/transactions?" + qs({ ...F, limit: 500, offset: 0 })); downloadText("transactions.csv", "date,description,account,category,amount\n" + all.items.map((x) => [x.date, x.name, x.account_name || "", x.category, x.amount].map(csvCell).join(",")).join("\n"), "text/csv"); } }, "Export CSV")));
     } catch (e) { list.replaceChildren(h("p", { class: "neg" }, e.message)); }
   }
   add(out, h("div", { class: "panel" },
@@ -526,6 +528,8 @@ const goalCard = (g, v, rerender, lk = { me: "", links: [] }) => {
     h("div", { style: "margin:8px 0" }, bar(g.pct, g.funded ? "var(--teal)" : "var(--brass)")),
     h("div", { class: "small" }, g.status !== "active" ? `Closed ${g.closed || ""}` : g.funded ? `Fully set aside (${usd(g.allocated)}).` : `${usd(g.allocated)} set aside, ${usd(g.shortfall)} still needed.`),
     shared ? h("div", { class: "small" }, `Together ${usd(g.team_allocated)} of ${usd(g.target)}: you ${usd(g.allocated)}`, (g.partners || []).map((x) => `, ${x.peer} ${usd(x.amount)}`).join("")) : null,
+    shared && (g.added_by_others || []).length ? h("div", { class: "small" }, `${g.added_by_others.join(", ")} was added by someone else and does not see your amount or notes. `,
+      h("button", { class: "btn sm", onclick: async () => { await api(`/api/goals/${g.id}/share`, send("POST", { peers: g.added_by_others })); rerender(); } }, "Share with them too")) : null,
     noteBox,
     g.status === "active" && !g.funded ? h("div", { class: "small muted" }, [g.deadline ? `Due ${g.deadline}: save ${usd(g.monthly_needed)} a month.` : "", g.ready_date ? ` At ${usd(g.monthly)} a month it is ready ${g.ready_date}.` : "", g.can_fund_now ? " Free savings cover the rest now." : ""].join("")) : null,
     g.note ? h("div", { class: "small muted" }, g.note) : null,

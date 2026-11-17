@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import agent_actions, agent_skills, crypto, links, feed, netguard, ledger, plan, recur, settings as cfg, sync
 
@@ -623,14 +623,14 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_u
         gv, sv = plan.goals_view(store, today(), own_only=not peer_data), ledger.savings_summary(store, today())
         return {"places": gv["places"], "total_savings": gv["total"], "earmarked_for_goals": gv["allocated"], "free_savings": gv["free"], "overallocated": gv["overallocated"],
                 "weighted_apy": sv["weighted_apy"], "yearly_interest": sv["yearly_interest"], "maturing_soon": sv["maturing_soon"],
-                "goals": [{k: g[k] for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "priority", "monthly", "status") if k in g} for g in gv["items"]],
+                "goals": [{k: g[k] for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "priority", "monthly", "status") if k in g} for g in gv["items"] if g.get("shared_state") != "offered"],
                 "piggy_banks": [{k: p[k] for k in ("piggy_id", "name", "saved", "target", "still_needed", "target_date")} for p in piggy_banks(store)]}
 
     def t_goals(a):
         gv = plan.goals_view(store, today(), own_only=not peer_data)
         return {"free_savings": gv["free"], "total_savings": gv["total"], "set_aside": gv["allocated"], "still_needed_for_goals": gv["needed"],
                 "goals_are_piggy_banks": piggy_banks(store),
-                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations" and (peer_data or k not in PEER_FIELDS)} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active"]}
+                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations" and (peer_data or k not in PEER_FIELDS)} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active" and g.get("shared_state") != "offered"]}
 
     def t_add_goal(a):
         try:

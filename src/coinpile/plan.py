@@ -105,6 +105,8 @@ def goals_view(db, today: date, own_only: bool = False) -> dict:
     items = []
     team_extra = {} if own_only else {r["goal_id"]: r["n"] for r in db.all("SELECT p.goal_id, SUM(p.amount) n FROM goal_partners p JOIN goals g ON g.id=p.goal_id WHERE g.shared_state='active' GROUP BY p.goal_id")}   # what the others on a shared goal have set aside
     for g in db.all("SELECT * FROM goals ORDER BY status='done', priority, deadline IS NULL, deadline, id"):
+        if own_only and g.get("shared_state") == "offered":
+            continue                                         # an offer I have not answered is not mine: nothing outside Coinpile hears of it
         got = round(sum(a["amount"] for a in by_goal.get(g["id"], [])), 2)
         team = round(got + team_extra.get(g["id"], 0), 2)
         short = round(max(0.0, g["target"] - team), 2)

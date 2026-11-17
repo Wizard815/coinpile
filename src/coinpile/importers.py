@@ -44,6 +44,8 @@ def _num(s: str) -> float:
     if not re.fullmatch(r"\d+|\d{1,3}(?:" + re.escape(sep) + r"\d{3})+", whole) or (_ and not re.fullmatch(r"\d+", frac)):
         raise ValueError(f"not an amount: {s[:20]!r}")              # thousands come in groups of three, and only one decimal mark
     whole = whole.replace(sep, "")
+    if len(whole) > 13:
+        raise ValueError(f"not an amount: {s[:20]!r}")              # no account holds that; as a number it would be infinite
     v = float(whole + ("." + frac if frac else ""))
     neg = bool(m["lp"]) or any((m[k] or "") in ("-", "\u2212") and m[k] for k in ("s1", "s2", "s3")) or (m["crdr"] or "").upper() == "DR"
     return -v if neg else v
@@ -69,6 +71,9 @@ def _date(s: str) -> str:
     raise ValueError(f"not a date: {s[:30]!r}")
 
 
+PROVIDERS = ("paypal", "venmo", "cashapp")
+
+
 def detect(headers: list[str]) -> str | None:
     h = {x.strip().lower() for x in headers}
     if {"transaction id", "transaction type", "net amount"} <= h:
@@ -86,6 +91,8 @@ def parse(text: str, provider: str | None = None) -> tuple[str, list[dict]]:
         lines = text.splitlines()
         i = next((n for n, l in enumerate(lines) if "Datetime" in l and "Note" in l), 0)
         text = "\n".join(lines[i:])
+    if provider is not None and provider not in PROVIDERS:
+        raise UnknownFormat("provider is paypal, venmo or cashapp")
     rows = _rows(text)
     if not rows:
         return provider or "unknown", []
@@ -104,9 +111,17 @@ def parse(text: str, provider: str | None = None) -> tuple[str, list[dict]]:
     return prov, out
 
 
+MAX_ROWS = 20_000         # one file; a longer history goes in as several
+
+
 def _rows(text: str) -> list[dict]:
     try:
-        return list(csv.DictReader(io.StringIO(text.replace("\x00", ""))))
+        rows = []
+        for r in csv.DictReader(io.StringIO(text.replace("\x00", ""))):
+            if len(rows) >= MAX_ROWS:
+                raise ValueError(f"that file has more than {MAX_ROWS:,} rows: split it and import the parts")
+            rows.append({k: (v if isinstance(v, str) else "") for k, v in r.items() if isinstance(k, str)})     # a row longer or shorter than the header
+        return rows
     except csv.Error as e:
         raise ValueError(f"this is not a readable CSV file ({e})")
 
@@ -135,12 +150,13 @@ def store(db, provider: str, rows: list[dict]) -> int:
     acct = f"manual:{provider}"
     from coinpile.sync import money, now
     from coinpile import ledger
-    with db.tx() as c:
+    if not rows or provider not in PROVIDERS:
+        return 0                                             # an empty file makes no account
+    added = 0
+    with db.tx() as c:                                       # one transaction for the whole file
         c.execute("INSERT OR IGNORE INTO accounts(id,source,institution,name,kind,balance,updated) VALUES(?,?,?,?,?,?,?)",
                   (acct, "csv", provider.title(), f"{provider.title()} (CSV import)", "cash", None, now()))
-    added = 0
-    for r in rows:
-        with db.tx() as c:
+        for r in rows:
             cur = c.execute("INSERT OR IGNORE INTO transactions(id,account_id,date,name,amount,source,category) VALUES(?,?,?,?,?,?,?)",
                             (r["id"], acct, r["date"], r["name"], r["amount"], "csv", ledger.categorize(db, r["name"], r["amount"])))
             if cur.rowcount:
@@ -204,8 +220,8 @@ def store_bank(db, account_id: str, rows: list[dict], balance: float | None = No
     from coinpile.sync import money, now, record_balance
     acct = db.one("SELECT * FROM accounts WHERE id=?", (account_id,))
     added = 0
-    for r in rows:
-        with db.tx() as c:
+    with db.tx() as c:                                       # one transaction for the whole file
+        for r in rows:
             tid = f"{r['id']}@{account_id}"                    # the same line in two accounts' files is two transactions
             cur = c.execute("INSERT OR IGNORE INTO transactions(id,account_id,date,name,amount,source,category) VALUES(?,?,?,?,?,?,?)",
                             (tid, account_id, r["date"], r["name"], r["amount"], "csv", ledger.categorize(db, r["name"], r["amount"], None, acct["kind"])))

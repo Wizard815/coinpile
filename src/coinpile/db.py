@@ -66,7 +66,7 @@ COLUMNS = {  # added after the first release: (table, column) -> DDL fragment
     ("subscriptions", "payer"): "TEXT DEFAULT 'me'", ("subscriptions", "payer_name"): "TEXT DEFAULT ''",
     ("subscriptions", "notify_days"): "INTEGER DEFAULT 3", ("subscriptions", "plan_total"): "INTEGER", ("notes", "tags"): "TEXT DEFAULT ''", ("incomes", "source"): "TEXT DEFAULT 'manual'", ("accounts", "sv_kind"): "TEXT", ("accounts", "apy"): "REAL", ("accounts", "maturity"): "TEXT", ("accounts", "opened"): "TEXT", ("accounts", "term_months"): "INTEGER", ("notes", "piggy_id"): "TEXT", ("transactions", "tags"): "TEXT", ("transactions", "budget"): "TEXT", ("transactions", "payee"): "TEXT", ("incomes", "ff_key"): "TEXT", ("subscriptions", "end_date"): "TEXT", ("subscriptions", "created"): "TEXT", ("subscriptions", "match_key"): "TEXT", ("incomes", "match_key"): "TEXT",
     ("transactions", "plaid_category"): "TEXT", ("transactions", "category_locked"): "INTEGER DEFAULT 0", ("transactions", "notes"): "TEXT DEFAULT ''", ("transactions", "ff_group"): "TEXT",
-    ("accounts", "min_balance"): "REAL", ("accounts", "subtype"): "TEXT", ("accounts", "savings_pool"): "INTEGER", ("accounts", "mask"): "TEXT", ("plaid_items", "last_sync"): "REAL", ("plaid_items", "last_slow"): "REAL", ("plaid_items", "schedule"): "TEXT", ("plaid_items", "category"): "TEXT", ("accounts", "category"): "TEXT", ("plaid_items", "last_hook"): "REAL", ("plaid_items", "status"): "TEXT", ("plaid_items", "status_detail"): "TEXT", ("plaid_items", "hook_url"): "TEXT", ("plaid_items", "recurring"): "TEXT", ("accounts", "joint_with"): "TEXT", ("accounts", "my_share"): "REAL", ("goals", "shared_id"): "TEXT", ("goals", "members"): "TEXT", ("goals", "shared_state"): "TEXT", ("goals", "rev"): "INTEGER DEFAULT 0", ("goals", "edited_by"): "TEXT", ("goals", "sent_sig"): "TEXT", ("accounts", "nickname"): "TEXT", ("accounts", "pinned"): "INTEGER DEFAULT 0", ("providers", "context_tokens"): "INTEGER DEFAULT 8192", ("chat_messages", "peer"): "INTEGER DEFAULT 0", ("chats", "summary_peer"): "INTEGER DEFAULT 0",
+    ("accounts", "min_balance"): "REAL", ("accounts", "subtype"): "TEXT", ("accounts", "savings_pool"): "INTEGER", ("accounts", "mask"): "TEXT", ("plaid_items", "last_sync"): "REAL", ("plaid_items", "last_slow"): "REAL", ("plaid_items", "schedule"): "TEXT", ("plaid_items", "category"): "TEXT", ("accounts", "category"): "TEXT", ("plaid_items", "last_hook"): "REAL", ("plaid_items", "status"): "TEXT", ("plaid_items", "status_detail"): "TEXT", ("plaid_items", "hook_url"): "TEXT", ("plaid_items", "recurring"): "TEXT", ("accounts", "joint_with"): "TEXT", ("accounts", "my_share"): "REAL", ("goals", "shared_id"): "TEXT", ("goals", "members"): "TEXT", ("goals", "shared_state"): "TEXT", ("goals", "rev"): "INTEGER DEFAULT 0", ("goals", "edited_by"): "TEXT", ("goals", "sent_sig"): "TEXT", ("accounts", "nickname"): "TEXT", ("accounts", "pinned"): "INTEGER DEFAULT 0", ("providers", "context_tokens"): "INTEGER DEFAULT 8192", ("chat_messages", "peer"): "INTEGER DEFAULT 0", ("chats", "summary_peer"): "INTEGER DEFAULT 0", ("goals", "approved"): "TEXT",
     # money in another currency than the person's primary one: balance/amount hold the primary-currency value (what every total adds up),
     # native_* the account's own amount and currency (NULL when it is the primary currency)
     ("accounts", "native_balance"): "REAL", ("accounts", "native_currency"): "TEXT", ("accounts", "in_net_worth"): "INTEGER DEFAULT 1",
@@ -80,7 +80,20 @@ DEFAULT_CATEGORIES = [("Income", "income"), ("Food", "expense"), ("Groceries", "
                       ("Subscriptions", "expense"), ("Travel", "expense"), ("Savings", "transfer"), ("Investing", "transfer"), ("Transfer", "transfer"), ("Misc", "expense")]
 
 
+class Closed(Exception):
+    """This person's database was closed (Forget me) while something still wanted it."""
+
+
 class DB:
+    closed = False
+
+    def close(self) -> None:
+        """Close under the lock, so no other thread is inside a query on this connection when it goes."""
+        with self.lock:
+            if not self.closed:
+                self.closed = True
+                self.conn.close()
+
     def __init__(self, path: str | None = None):
         path = path or os.environ.get("COINPILE_DB", "/data/coinpile.db")
         if path != ":memory:":
@@ -103,6 +116,8 @@ class DB:
     @contextmanager
     def tx(self):
         with self.lock:
+            if self.closed:
+                raise Closed()
             try:
                 yield self.conn
                 self.conn.commit()
@@ -112,6 +127,8 @@ class DB:
 
     def all(self, sql, args=()):
         with self.lock:
+            if self.closed:
+                raise Closed()
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
     def one(self, sql, args=()):

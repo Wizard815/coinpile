@@ -1,6 +1,6 @@
 """Routes for linking people and sharing goals. Logic lives in links.py."""
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import links, plan
 
@@ -118,14 +118,14 @@ def register(app, ctx):
     @app.post("/api/joint")
     def joint_offer(request: Request, b: JointIn):
         auth(request)
-        r = run(links.joint_offer, store, name, b.peer.strip().lower(), b.account_id, b.my_share)
+        r = run(links.joint_offer, store, name, b.peer.strip().lower(), b.account_id, b.my_share, ctx.today())
         ctx.link_flush()
         return done(r)
 
     @app.post("/api/joint/{jid}/accept")
     def joint_accept(request: Request, jid: int, b: JointAcceptIn):
         auth(request)
-        r = run(links.joint_accept, store, name, jid, b.account_id)
+        r = run(links.joint_accept, store, name, jid, b.account_id, ctx.today())
         ctx.link_flush()
         return done(r)
 
