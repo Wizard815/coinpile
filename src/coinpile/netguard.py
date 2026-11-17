@@ -17,7 +17,7 @@ class Blocked(httpx.HTTPError):
     pass
 
 
-METADATA = {ipaddress.ip_address(x) for x in ("100.100.100.200", "192.0.0.192", "fd00:ec2::254")}     # cloud metadata services outside 169.254/16
+METADATA = {ipaddress.ip_address(x) for x in ("100.100.100.200", "192.0.0.192", "168.63.129.16", "fd00:ec2::254")}     # cloud metadata services outside 169.254/16
 
 
 def bad_ip(ip: str, public_only: bool = False) -> bool:

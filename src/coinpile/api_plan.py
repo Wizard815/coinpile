@@ -2,7 +2,7 @@
 from datetime import date
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import links, plan, recur, sync
 

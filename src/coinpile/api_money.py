@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import plaidplan, feed, ledger, recur, sync
 
@@ -252,6 +252,12 @@ def register(app, ctx):
                 c.execute("UPDATE accounts SET min_balance=? WHERE id=?", (a.min_balance if a.min_balance >= 0 else None, aid))
             if a.nickname is not None:
                 c.execute("UPDATE accounts SET nickname=? WHERE id=?", (a.nickname.strip()[:60] or None, aid))
+            if a.joint_with is not None or a.my_share is not None:
+                tied = store.one("SELECT peer FROM joint_accounts WHERE account_id=? AND state='active'", (aid,))
+                if tied:                                     # the split was agreed with them: one side cannot change it alone
+                    bad(f"this account is tied as joint with {tied['peer']}: end that under Settings, Sharing to change the split", 409)
+                if row["kind"] not in ("cash", "credit", "loan"):
+                    bad("only a bank account, card or loan can be joint")
             if a.joint_with is not None:
                 c.execute("UPDATE accounts SET joint_with=? WHERE id=?", (a.joint_with.strip().lower()[:32] or None, aid))
             if a.my_share is not None:
@@ -294,6 +300,9 @@ def register(app, ctx):
             for t in ("transactions", "snapshots", "holdings"):
                 c.execute(f"DELETE FROM {t} WHERE account_id=?", (aid,))
             c.execute("DELETE FROM accounts WHERE id=?", (aid,))
+        changed = getattr(ctx, "shared_changed", None)
+        if changed:
+            changed()                                       # anyone it was shared or joint with is told it is gone
         return {"deleted": aid}
 
     # ------------------------------------------------------------ transactions + categories

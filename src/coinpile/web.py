@@ -20,11 +20,12 @@ import httpx
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
-from coinpile.db import DB
+from coinpile.db import DB, Closed
 from coinpile.oplog import log
 from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
 
@@ -80,6 +81,10 @@ class Users:
                 c.execute("ALTER TABLE users ADD COLUMN handle TEXT")
             if "pw_hash" not in cols:
                 c.execute("ALTER TABLE users ADD COLUMN pw_hash TEXT")       # a Coinpile-only password, as a salted scrypt hash (never the password)
+            try:                                                             # one handle, one person: the database refuses a second
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS users_handle ON users(handle) WHERE handle IS NOT NULL")
+            except sqlite3.IntegrityError:
+                pass                                                         # two people already share one (an older version): new ones still cannot
 
     def save(self, uid: str, email: str, kind: str, token: str, refresh: str | None = None, expires: float | None = None) -> None:
         from coinpile import crypto
@@ -91,18 +96,22 @@ class Users:
 
     def ensure_handle(self, uid: str) -> str:
         """The name other people see and link to: the start of the Firefly III email, made unique."""
-        u = self.get(uid) or {}
-        if u.get("handle"):
-            return u["handle"]
-        base = re.sub(r"[^a-z0-9_-]", "", (u.get("email") or "").split("@")[0].lower())[:24] or "person"
-        if not base[0].isalnum():
-            base = "p" + base
-        h, taken = base, {r["handle"] for r in self.db.all("SELECT handle FROM users WHERE handle IS NOT NULL AND id<>?", (uid,))}
-        if h in taken:
-            h = f"{base[:20]}-{re.sub(r'[^a-z0-9]', '', uid.lower())[:8] or secrets.token_hex(2)}"
-        with self.db.tx() as c:
-            c.execute("UPDATE users SET handle=? WHERE id=?", (h, uid))
-        return h
+        with self.db.lock:                                   # looked up and taken in one step: two sign-ins at once cannot get the same one
+            u = self.get(uid) or {}
+            if u.get("handle"):
+                return u["handle"]
+            base = re.sub(r"[^a-z0-9_-]", "", (u.get("email") or "").split("@")[0].lower())[:24] or "person"
+            if not base[0].isalnum():
+                base = "p" + base
+            taken = {r["handle"] for r in self.db.all("SELECT handle FROM users WHERE handle IS NOT NULL AND id<>?", (uid,))}
+            h = base
+            if h in taken:
+                h = f"{base[:20]}-{re.sub(r'[^a-z0-9]', '', uid.lower())[:8] or secrets.token_hex(2)}"
+            while h in taken:                                # someone's email already spells that (bob-9@...): a random ending until it is free
+                h = f"{base[:20]}-{secrets.token_hex(3)}"
+            with self.db.tx() as c:
+                c.execute("UPDATE users SET handle=? WHERE id=?", (h, uid))
+            return h
 
     def by_handle(self, handle: str) -> str | None:
         r = self.db.one("SELECT id FROM users WHERE handle=? AND token_enc IS NOT NULL", (handle,))
@@ -290,6 +299,18 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         yield
 
     front = FastAPI(title="Coinpile", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+
+    @front.exception_handler(RequestValidationError)
+    async def invalid_front(_request, e):
+        return JSONResponse({"detail": [{"loc": list(x.get("loc", ())), "msg": str(x.get("msg", "")), "type": str(x.get("type", ""))} for x in e.errors()]}, 422)
+
+    @front.exception_handler(Closed)
+    async def gone_front(_request, e):
+        return JSONResponse({"detail": "invalid token"}, 401)
+
+    @front.exception_handler(OverflowError)
+    async def too_big_front(_request, e):
+        return JSONResponse({"detail": "a number in that request is out of range"}, 422)
     http = httpx.Client(timeout=30, transport=firefly_transport)
 
     def safe_id(uid: str) -> str:
@@ -499,7 +520,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             other = users.by_handle(peer)
             if not other or other == uid:
                 return False
-            r = links.receive(person_db(other), peer, me, kind, payload)
+            r = links.receive(person_db(other), peer, me, kind, payload, today())
             if r.get("ok"):
                 threading.Thread(target=lambda: flush_for(other), daemon=True).start()       # their answer (if any) goes back on its own
             return True
@@ -550,6 +571,22 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         @app.exception_handler(netguard.Busy)
         async def busy(_request, e):
             return JSONResponse({"detail": str(e)}, 429, headers={"Retry-After": "5"})
+
+        @app.exception_handler(RequestValidationError)
+        async def invalid(_request, e):                               # the usual 422, without echoing the input (an infinite number cannot be sent back as JSON)
+            return JSONResponse({"detail": [{"loc": list(x.get("loc", ())), "msg": str(x.get("msg", "")), "type": str(x.get("type", ""))} for x in e.errors()]}, 422)
+
+        @app.exception_handler(Closed)
+        async def gone(_request, e):                                  # Forget me ran while this request was on its way
+            return JSONResponse({"detail": "sign in first"}, 401)
+
+        @app.exception_handler(OverflowError)
+        async def too_big(_request, e):                               # an id or a number no database row can hold
+            return JSONResponse({"detail": "a number in that request is out of range"}, 422)
+
+        @app.exception_handler(httpx.InvalidURL)
+        async def bad_url(_request, e):
+            return JSONResponse({"detail": "that address is not a valid web address"}, 422)
 
         def read_back() -> None:
             """After a change in Firefly III: read the recent part of it again so the screens show what Firefly III now holds."""
@@ -710,11 +747,13 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     raise HTTPException(502, str(e))
             if a["source"] != "manual":
                 raise HTTPException(409, "import into an account you added in Coinpile")
-            try:
+            def work():                                       # off the event loop: a big file must not hold up everyone else
                 rows, bal = importers.parse_bank(raw.decode("utf-8", "replace"), flip)
+                return {"rows": len(rows), "added": importers.store_bank(db, account_id, rows, bal), "balance": bal}
+            try:
+                return await run_in_threadpool(work)
             except ValueError as e:
                 raise HTTPException(422, str(e))
-            return {"rows": len(rows), "added": importers.store_bank(db, account_id, rows, bal), "balance": bal}
 
         @app.post("/api/import/csv")
         async def import_csv(request: Request, provider: str | None = None):
@@ -722,11 +761,13 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             raw = await request.body()
             if len(raw) > 5_000_000:
                 raise HTTPException(413, "file too large")
-            try:
+            def work():
                 prov, rows = importers.parse(raw.decode("utf-8", "replace"), provider)
+                return {"provider": prov, "rows": len(rows), "added": importers.store(db, prov, rows)}
+            try:
+                return await run_in_threadpool(work)
             except ValueError as e:
                 raise HTTPException(422, str(e))
-            return {"provider": prov, "rows": len(rows), "added": importers.store(db, prov, rows)}
 
         api_money.register(app, ctx)
         api_plan.register(app, ctx)
@@ -1115,8 +1156,11 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             url, user, pw = (cfg.get(db, k) for k in ("caldav_url", "caldav_user", "caldav_password"))
             if not url:
                 raise HTTPException(503, "CalDAV is not set up yet (Settings, Calendar)")
-            with outbound.hold():
-                return feed.push_caldav(db.all("SELECT * FROM subscriptions"), url, user, pw, caldav_transport)
+            try:
+                with outbound.hold():
+                    return feed.push_caldav(db.all("SELECT * FROM subscriptions"), url, user, pw, caldav_transport)
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"could not reach the calendar server ({type(e).__name__})")
 
         @app.get("/subscriptions.ics")
         def subs_ics():
@@ -1284,7 +1328,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             shutil.rmtree(os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), ignore_errors=True)
             shutil.rmtree(os.path.join(data_dir, "people", f"{safe_id(uid)}-imports"), ignore_errors=True)
             if d:
-                d.conn.close()
+                d.close()
             try:
                 os.remove(os.path.join(data_dir, "people", f"{safe_id(uid)}.db"))
             except FileNotFoundError:
@@ -1445,7 +1489,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         except ValueError:
             t = 0
         want = hmac.new(secret.encode(), f"{t}.".encode() + body, hashlib.sha3_256).hexdigest() if secret else ""
-        if not secret or not hmac.compare_digest(want, parts.get("v1", "")) or abs(time.time() - t) > 600:
+        if not secret or not hmac.compare_digest(want.encode(), parts.get("v1", "").encode("utf-8", "replace")) or abs(time.time() - t) > 600:
             raise HTTPException(401, "bad signature")
         cfg.set_value(db, "ff_last_hook", sync.now())
         if time.time() - hook_seen.get(uid, 0) > 5:                   # a burst (a CSV import in Firefly III) becomes one read
@@ -1458,6 +1502,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         return request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https" or my_url.startswith("https://")
 
     def signed_in(response: Response, request: Request, uid: str) -> None:
+        users.end_session(request.cookies.get(COOKIE))        # whoever was signed in in this browser before is signed out of it
         tok = users.new_session(uid)
         response.set_cookie(COOKIE, tok, max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax", secure=is_secure(request), path="/")
 
@@ -1483,9 +1528,11 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         tok = b.token.strip()
         if len(tok) < 20 or len(tok) > 5000:
             raise HTTPException(422, "that is not a Firefly III Personal Access Token (it is a very long string)")
+        ip_throttle.check(client_ip(request))                  # each try is a call to Firefly III: guessing from one place is slowed down
         try:
             me_ = await run_in_threadpool(lambda: firefly.Firefly(ff_url, tok, firefly_transport).me())
         except firefly.TokenRefused:
+            ip_throttle.fail(client_ip(request))
             raise HTTPException(401, "Firefly III did not accept that token")
         except firefly.FireflyError as e:
             raise HTTPException(502, str(e))
@@ -1520,7 +1567,8 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     @front.post("/auth/password")
     async def auth_password(b: PasswordIn, request: Request, response: Response):
         """Sign in with your Firefly III email and the Coinpile password you set (Settings, Firefly III). It only opens Coinpile."""
-        key, ip = "pw:" + b.email.strip().lower()[:200], client_ip(request)
+        ip = client_ip(request)
+        key = "pw:" + b.email.strip().lower()[:200] + "|" + ip      # per name and place: guesses from elsewhere cannot lock you out where you are
         pw_throttle.check(key)
         ip_throttle.check(ip)                                  # many names from one place is guessing too
         u = users.by_email(b.email)
@@ -1567,7 +1615,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 c.execute("UPDATE api_tokens SET revoked=1 WHERE revoked=0")
         except KeyError:
             pass
-        pw_throttle.ok("pw:" + (me_["email"] or "").lower())
+        pw_throttle.ok_prefix("pw:" + (me_["email"] or "").lower() + "|")
         signed_in(response, request, me_["id"])
         refresh_soon(me_["id"])
         return {"signed_in": True, "email": me_["email"], "password_set": True}
@@ -1619,7 +1667,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
     @front.get("/auth/callback")
     async def auth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-        if error or not state or not hmac.compare_digest(request.cookies.get("coinpile_oauth", ""), sha(state)):
+        if error or not state or not hmac.compare_digest(request.cookies.get("coinpile_oauth", "").encode("utf-8", "replace"), sha(state).encode()):
             return RedirectResponse("/?signin=failed", 302)             # not started in this browser: someone may be trying to sign you in as them
         with oauth_lock:
             got = pending_oauth.pop(state, None)
