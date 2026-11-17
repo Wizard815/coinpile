@@ -611,7 +611,8 @@ def test_editing_a_euro_bill_keeps_it_in_euros_in_firefly(tmp_path):
     s = next(x for x in c.get("/api/subscriptions").json()["items"] if x["name"] == "Spotify EU")
     c.put(f"/api/subscriptions/{s['id']}", json={"name": "Spotify EU", "amount": s["amount"], "next_date": s["next_date"], "cycle": "monthly", "notify_days": 7})
     b = next(x for x in ff.data["1"]["bills"] if x["id"] == "9")["attributes"]
-    assert (b["currency_code"], b["amount_min"]) == ("EUR", "10.00")                                  # its own amount and currency, not the converted dollars
+    assert (b["currency_code"], float(b["amount_min"])) == ("EUR", 10.0)                              # its own amount and currency, not the converted dollars
+    assert not [x for x in ff.calls if x[0] == "PUT" and x[1].endswith("/bills/9")]                   # only a reminder changed: nothing was sent at all
 
 
 def test_forms_refuse_impossible_dates(tmp_path):

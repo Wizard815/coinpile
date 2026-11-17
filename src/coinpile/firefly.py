@@ -6,6 +6,7 @@ what you add in Coinpile itself (goals, notes, savings you track by hand, chats)
 
 Amounts are signed per account: positive = money in. A transfer between two of your accounts is two rows, one out and one in."""
 import json
+import math
 import re
 from datetime import date, timedelta
 
@@ -97,10 +98,13 @@ def split_name(name: str) -> tuple[str, str, str | None]:
 
 
 def _num(v) -> float:
+    """A number Firefly III sent. Anything that is not an ordinary number (missing, text, NaN, Infinity) is 0: one such value stored
+    in a row would make every page that adds it up fail."""
     try:
-        return float(v or 0)
-    except (TypeError, ValueError):
+        f = float(v or 0)
+    except (TypeError, ValueError, OverflowError):
         return 0.0
+    return f if math.isfinite(f) and abs(f) < 1e15 else 0.0
 
 
 def _pc(at: dict, field: str, own: str | None, primary: str | None) -> tuple[float, str | None, bool]:
@@ -152,7 +156,7 @@ def sync_accounts(db, ff: Firefly) -> dict[str, dict]:
         raw += list(ff.pages("/accounts", type=t))
     primary = next((x["attributes"].get("primary_currency_code") for x in raw if (x.get("attributes") or {}).get("primary_currency_code")), None)
     for a in raw:
-        r = account_row(a, primary)
+        r = account_row(a, primary) if isinstance(a, dict) and a.get("id") is not None else None       # a row without an id is skipped, not a failed read
         if r:
             rows[r["ff_id"]] = r
     if primary:
@@ -166,6 +170,8 @@ def sync_accounts(db, ff: Firefly) -> dict[str, dict]:
                       (r["id"], None, "firefly", r["institution"], r["name"], r["kind"], r["balance"], r["currency"], sync.now(), r["subtype"], r["mask"],
                        r["native_balance"], r["native_currency"], r["in_net_worth"]))
         gone = [x["id"] for x in db.all("SELECT id FROM accounts WHERE source='firefly'") if x["id"][3:] not in rows]
+        if gone and not rows:
+            raise FireflyError("Firefly III answered with no accounts at all: nothing was changed here (if you really removed them all, use Forget me)")
         for aid in gone:                                                     # removed or closed in Firefly III
             c.execute("DELETE FROM transactions WHERE account_id=?", (aid,))
             c.execute("DELETE FROM snapshots WHERE account_id=?", (aid,))
@@ -244,7 +250,11 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
     groups = list(ff.pages("/transactions", **params))           # read everything first: the person's database is not held while Firefly III answers
     with db.tx() as c:
         for g in groups:
+            if not isinstance(g, dict) or g.get("id") is None:
+                continue
             for r in tx_rows(g, mine, primary):
+                if not _is_day(r["date"]):
+                    continue                                 # a journal without a usable date cannot be placed in any month
                 seen.add(r["id"])
                 cats.setdefault(r["category"], set()).add("in" if r["amount"] > 0 and (r["type"] or "").lower() == "deposit" else "out")
                 c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill,tags,budget,payee)
@@ -269,6 +279,8 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
         for cat, ways in cats.items():                  # a new category only ever seen on deposits (Salary, Dividends...) is income, not spending
             kind = "income" if cat == "Income" or ways == {"in"} else "transfer" if cat == "Transfer" else "expense"
             c.execute("INSERT OR IGNORE INTO categories(name,kind,builtin) VALUES(?,?,0)", (cat, kind))
+            if "out" in ways and kind == "expense":      # first seen on a refund and filed as income: money is spent in it, so it is spending
+                c.execute("UPDATE categories SET kind='expense' WHERE name=? AND kind='income' AND builtin=0 AND name != 'Income'", (cat,))
     return {"transactions": n, "removed": len(removed)}
 
 
@@ -276,7 +288,7 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
 FREQ = {"daily": (1, "day"), "weekly": (1, "week"), "monthly": (1, "month"), "quarterly": (3, "month"), "half-year": (6, "month"), "yearly": (1, "year")}
 
 
-def bill_row(b: dict, today: date, primary: str | None = None) -> tuple | None:
+def bill_row(b: dict, today: date, primary: str | None = None, last_paid: str | None = None) -> tuple | None:
     """A Firefly III bill as a subscription row, or None when it has no name. Missing amounts, dates or frequency fall back to sensible defaults."""
     at = b.get("attributes") or {}
     if not at.get("name"):
@@ -290,13 +302,24 @@ def bill_row(b: dict, today: date, primary: str | None = None) -> tuple | None:
         anchor = date.fromisoformat(str(at.get("date"))[:10])
     except ValueError:
         anchor = today
-    end = str(at.get("end_date"))[:10] if at.get("end_date") else None
-    nxt = next((str(p)[:10] for p in (at.get("pay_dates") or []) if str(p)[:10] >= today.isoformat()), None)
+    end = str(at.get("end_date"))[:10] if at.get("end_date") and _is_day(at.get("end_date")) and str(at.get("end_date")) < "9999" else None
+    pays = sorted({str(p)[:10] for p in (at.get("pay_dates") or []) if _is_day(str(p)[:10])})
+    nxt = next((p for p in pays if p >= today.isoformat()), None)
     if not nxt:
         n = recur.next_due(anchor, every, unit, today)
         nxt = (n or anchor).isoformat()
         if end and nxt > end:
             nxt = end                                        # an ended bill: its last date, not a date after the end
+    # Already paid for this period (a payment linked to the bill since the due date before this one): the next one is due, not this one again.
+    paid = [str(x.get("date"))[:10] for x in (at.get("paid_dates") or []) if isinstance(x, dict)] + ([last_paid] if last_paid else [])
+    prev = recur.shift(date.fromisoformat(nxt), every, unit, -1).isoformat()
+    if any(_is_day(p) and prev < p <= max(nxt, today.isoformat()) for p in paid):
+        later = next((p for p in pays if p > nxt), None)
+        if not later:
+            n = recur.next_due(anchor, every, unit, date.fromisoformat(nxt) + timedelta(days=1))
+            later = n.isoformat() if n else None
+        if later:
+            nxt = later
     primary = at.get("primary_currency_code") or primary
     own = at.get("currency_code") or primary or "USD"
     amt, cur, conv = _pc(at, "amount_avg", own, primary)
@@ -318,13 +341,21 @@ def sync_bills(db, ff: Firefly, today: date) -> int:
     for r in db.all("SELECT t.ff_bill, t.category, COUNT(*) n FROM transactions t JOIN categories k ON k.name=t.category WHERE coalesce(t.ff_bill,'') != '' AND t.amount < 0 "
                     "AND k.kind = 'expense' GROUP BY t.ff_bill, t.category ORDER BY n"):
         paid_as[r["ff_bill"]] = r["category"]
+    last_paid = {r["ff_bill"]: str(r["d"])[:10] for r in db.all("SELECT ff_bill, MAX(date) d FROM transactions WHERE coalesce(ff_bill,'') != '' GROUP BY ff_bill")}
     with db.tx() as c:
         for b in bills:
-            row = bill_row(b, today, primary)
+            row = bill_row(b, today, primary, last_paid.get(str(b.get("id")))) if b.get("id") is not None else None
             if not row:
                 continue
             key = f"ff-bill:{b['id']}"
             seen.add(key)
+            if not c.execute("SELECT 1 FROM subscriptions WHERE plaid_stream_id=?", (key,)).fetchone():
+                # the same subscription already kept in Coinpile (same payee, about the same amount): that row becomes the bill, with its
+                # own details (paid from, reminder, category), so it is not counted twice
+                for m in c.execute("SELECT id, name, amount FROM subscriptions WHERE coalesce(source,'manual') NOT IN ('firefly','ff-recurring') AND coalesce(plaid_stream_id,'')=''").fetchall():
+                    if recur.same_payee(m["name"], row[0]) and abs(m["amount"] - row[1]) <= 0.2 * max(row[1], 0.01):
+                        c.execute("UPDATE subscriptions SET source='firefly', plaid_stream_id=? WHERE id=?", (key, m["id"]))
+                        break
             cat = paid_as.get(str(b["id"]))
             c.execute("""INSERT INTO subscriptions(name,amount,currency,cycle,every,unit,next_date,active,end_date,notes,native_amount,native_currency,source,plaid_stream_id,category,created)
                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'firefly',?,coalesce(?,'Subscriptions'),?)
@@ -339,6 +370,14 @@ def sync_bills(db, ff: Firefly, today: date) -> int:
 
 
 # ---------------------------------------------------------------- piggy banks
+def _is_day(s) -> bool:
+    try:
+        date.fromisoformat(str(s)[:10])
+        return len(str(s)) >= 10
+    except ValueError:
+        return False
+
+
 def piggy_row(p: dict, primary: str | None = None) -> dict:
     at = p.get("attributes") or {}
     primary = at.get("primary_currency_code") or primary
@@ -348,15 +387,17 @@ def piggy_row(p: dict, primary: str | None = None) -> dict:
     for x in at.get("accounts") or []:
         if not isinstance(x, dict) or not x.get("account_id"):
             continue
-        accts.append({"account_id": f"ff:{x['account_id']}", "name": x.get("name") or "", "amount": _pc(x, "current_amount", own, primary)[0]})
-    return {"id": str(p["id"]), "name": at.get("name") or f"Piggy bank {p['id']}", "target": target or None, "current": _pc(at, "current_amount", own, primary)[0],
+        accts.append({"account_id": f"ff:{x['account_id']}", "name": x.get("name") or "", "amount": _pc(x, "current_amount", own, primary)[0],
+                      "native": _num(x.get("current_amount"))})                # what Firefly III itself holds, in the piggy bank's own currency
+    conv = _pc(at, "current_amount", own, primary)[2] or any(_pc(x, "current_amount", own, primary)[2] for x in at.get("accounts") or [] if isinstance(x, dict))
+    return {"own_currency": own, "converted": conv, "id": str(p["id"]), "name": at.get("name") or f"Piggy bank {p['id']}", "target": target or None, "current": _pc(at, "current_amount", own, primary)[0],
             "currency": cur or "USD", "target_date": str(at["target_date"])[:10] if at.get("target_date") else None, "active": bool(at.get("active", True)),
             "accounts": accts, "save_per_month": _pc(at, "save_per_month", own, primary)[0] or None, "notes": at.get("notes") or ""}
 
 
 def sync_piggies(db, ff: Firefly) -> int:
     primary = cfg.get(db, "currency") or None
-    rows = [piggy_row(p, primary) for p in ff.pages("/piggy-banks")]
+    rows = [piggy_row(p, primary) for p in ff.pages("/piggy-banks") if isinstance(p, dict) and p.get("id") is not None]
     with db.tx() as c:
         c.execute("DELETE FROM ff_piggy")
         c.executemany("INSERT INTO ff_piggy(id, data) VALUES(?,?)", [(r["id"], json.dumps(r)) for r in rows])
@@ -424,7 +465,7 @@ def recurrence_row(r: dict, today: date) -> dict | None:
         every = max(0, int(rp.get("skip") or 0)) + 1
     except (TypeError, ValueError):
         every = 1
-    occ = sorted(str(x)[:10] for x in rp.get("occurrences") or [])
+    occ = sorted(str(x)[:10] for x in rp.get("occurrences") or [] if _is_day(x))
     try:
         first = date.fromisoformat(str(at.get("first_date"))[:10])
     except ValueError:
@@ -439,9 +480,11 @@ def recurrence_row(r: dict, today: date) -> dict | None:
         total = None
     if total:
         end = recur.shift(start, every, unit, total - 1).isoformat()
-    if at.get("repeat_until"):
+    if at.get("repeat_until") and _is_day(at["repeat_until"]):
         until = str(at["repeat_until"])[:10]
         end = min(end, until) if end else until
+    if end and end >= "9999":
+        end, total = None, (total if total and total < 100000 else None)        # "until the end of time" is no end
     if not nxt:
         n = recur.next_due(start, every, unit, today)
         nxt = (n or start).isoformat()
@@ -458,10 +501,10 @@ def sync_recurring(db, ff: Firefly, today: date) -> int:
     """Firefly III's recurring transactions: payments appear as subscriptions, deposits as income. Read only, like bills.
     A payment Firefly III also has as a bill (same payee, about the same amount) is left to the bill so it is not counted twice."""
     try:
-        rows = [(str(r["id"]), recurrence_row(r, today)) for r in ff.pages("/recurrences")]
+        rows = [(str(r["id"]), recurrence_row(r, today)) for r in ff.pages("/recurrences") if isinstance(r, dict) and r.get("id") is not None]
     except FireflyError:
         return 0                                   # Firefly III cannot list them (it fails on a broken one): keep what was read before
-    bills = db.all("SELECT name, amount FROM subscriptions WHERE source='firefly'")
+    bills = db.all("SELECT name, amount FROM subscriptions WHERE source='firefly' AND active=1")
     seen_sub, seen_inc = set(), set()
     with db.tx() as c:
         for rid, x in rows:
@@ -476,7 +519,7 @@ def sync_recurring(db, ff: Firefly, today: date) -> int:
                              VALUES(?,?,?,?,?,?,?,?,?,?,'ff-recurring',?,coalesce(?,'Subscriptions'),?,?,?)
                              ON CONFLICT(plaid_stream_id) DO UPDATE SET name=excluded.name,amount=excluded.amount,currency=excluded.currency,cycle=excluded.cycle,every=excluded.every,
                              unit=excluded.unit,next_date=excluded.next_date,active=excluded.active,end_date=excluded.end_date,notes=excluded.notes,
-                             plan_total=excluded.plan_total,account_id=coalesce(excluded.account_id,subscriptions.account_id)""",
+                             plan_total=coalesce(excluded.plan_total,subscriptions.plan_total),account_id=coalesce(subscriptions.account_id,excluded.account_id)""",
                           (x["name"], x["amount"], x["currency"], recur.label(x["every"], x["unit"]), x["every"], x["unit"], x["next_date"], x["active"], x["end_date"], x["notes"],
                            key, x["category"], x["account_id"], x["plan_total"], sync.now()))
             else:

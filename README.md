@@ -96,6 +96,30 @@ Only things Coinpile made are ever changed or removed. Firefly III's own piggy b
 
 What Firefly III has no place for always stays in Coinpile: savings APY and maturity, notes, chats, nicknames, minimum-balance warnings, who pays a subscription, reminders, Robinhood, PayPal/Venmo/Cash App and cash accounts you keep in Coinpile only.
 
+A bill in Firefly III is sent only what you changed here: its amount range and its own start date stay as they are, and a change
+to Coinpile's own details (paid from, who pays, reminder, category, plan size) sends nothing. A piggy bank Firefly III keeps in another
+currency is changed in Firefly III itself; all the piggy banks on an account together cannot hold more than the account does. If
+Firefly III is unreachable while a goal's piggy bank is updated, the change is tried again later instead of making a second piggy bank.
+
+### How the numbers are worked out
+
+- **Bills already paid.** A Firefly III bill with a payment linked to it since its last due date is not due again until the next period.
+  Nothing is due before a subscription's next payment date.
+- **Refunds.** Money coming back into a spending category takes the purchase back out of that category (never below zero); it is not
+  income. A category first seen on a refund still counts as spending once money is spent in it.
+- **Other currencies.** Totals are in Firefly III's primary currency. An account or transaction Firefly III keeps in another currency
+  without converting is left out of net worth, spending and forecasts, and an alert says so (switch on "convert to primary currency" in
+  Firefly III to include it). A subscription you add in Coinpile is entered in the primary currency.
+- **Money owed to you** counts in net worth but not as cash for paying bills in the balance projection.
+- **Paydays** are counted from the income's own date, so a salary on the 31st lands on 28 Feb and then 31 Mar. Two deposits from one
+  payer on one day are one payday.
+- **CDs.** APY is the yearly yield: 10,000 at 5.00% APY is worth 10,500 after a year. Two CDs maturing on one day each have their own alert.
+- **Subscriptions.** A new subscription is not called missing before its first payment. The same subscription kept in Coinpile and
+  later added as a Firefly III bill becomes one row. An end date far in the future (year 9999) is read as "no end".
+- **A read that looks wrong changes nothing.** If Firefly III answers with no accounts at all, the refresh stops with a message and
+  nothing is deleted. Rows without an id or a usable date are skipped; a value that is not a number is read as 0.
+- **Dates and amounts** are checked when entered: dates as YYYY-MM-DD between 1900 and 2200, amounts up to a trillion.
+
 ### Firefly III using Coinpile
 
 Firefly III cannot read other apps, but it can tell them when something changes. Add a **webhook** in Firefly III (Automation, Webhooks) pointing at the address shown under Settings, Firefly III, Instant updates, and paste the webhook's secret into Coinpile: Coinpile then shows a new or changed transaction within seconds instead of at the next read. Coinpile checks Firefly III's signature on every call. If Webhooks is greyed out in Firefly III, the owner turns them on under Administration, Configuration.

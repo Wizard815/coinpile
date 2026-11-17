@@ -170,6 +170,26 @@ class Writer:
         body = self._bill_body(s)
         if not body:
             raise firefly.FireflyError("Firefly III bills cannot repeat daily: choose weekly or longer")
+        if before:
+            # Only what was changed here goes to Firefly III. The bill there may have an amount range (50 to 150) and its own start date,
+            # which Coinpile shows as one amount and the next due date: sending those back unasked would overwrite both.
+            diff = lambda k: (s.get(k) or None) != (before.get(k) or None)                                  # noqa: E731
+            send = {"name": body["name"]}
+            if abs(float(s["amount"]) - float(before.get("amount") or 0)) >= 0.005:
+                send.update({k: body[k] for k in ("amount_min", "amount_max", "currency_code")})
+            if diff("every") or diff("unit"):
+                send.update({k: body[k] for k in ("repeat_freq", "skip")})
+            if diff("next_date"):
+                send["date"] = body["date"]
+            if diff("end_date"):
+                send["end_date"] = s.get("end_date") or None
+            if bool(s.get("active", 1)) != bool(before.get("active", 1)):
+                send["active"] = body["active"]
+            if diff("notes"):
+                send["notes"] = body["notes"]
+            if len(send) == 1 and not diff("name"):
+                return                                      # only Coinpile's own details changed (paid from, reminder, category ...)
+            body = send
         self.ff().send("PUT", f"/bills/{s['plaid_stream_id'].split(':')[1]}", body)
 
     def sub_deleted(self, row: dict) -> None:
@@ -204,11 +224,12 @@ class Writer:
                     changed += 1
                     continue
                 except firefly.FireflyError as e:
-                    # Firefly III 6.7 can fail to change a piggy bank's amount (an internal error). This piggy bank is Coinpile's own, so replace it instead.
-                    try:
-                        f.send("DELETE", f"/piggy-banks/{links[gid]}")
-                    except firefly.FireflyError:
-                        pass
+                    # Firefly III 6.7 can fail to change a piggy bank's amount (an internal error, 500). This piggy bank is Coinpile's own, so
+                    # replace it instead. Anything else (not reachable, not signed in, busy) is tried again next time: replacing it then would
+                    # leave two piggy banks for one goal.
+                    if "500" not in str(e):
+                        raise
+                    f.send("DELETE", f"/piggy-banks/{links[gid]}")          # if this fails too, the link stays and nothing is made twice
                     with self.db.tx() as c:
                         c.execute("DELETE FROM ff_goal_piggy WHERE goal_id=?", (gid,))
             if not accts:

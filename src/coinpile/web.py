@@ -941,7 +941,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             amount: float                        # positive puts money in, negative takes it out
 
         def ff_asset(aid: str | None) -> str:
-            row = db.one("SELECT id FROM accounts WHERE id=? AND kind='cash'", (aid or "",)) if (aid or "").startswith("ff:") else None
+            row = db.one("SELECT id FROM accounts WHERE id=? AND kind='cash' AND coalesce(subtype,'') != 'owed to you'", (aid or "",)) if (aid or "").startswith("ff:") else None
             if not row:
                 raise HTTPException(422, "choose one of your Firefly III asset accounts")
             return aid.split(":", 1)[1]
@@ -1097,10 +1097,17 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             acct = ff_asset(b.account_id)
             if not b.amount:
                 raise HTTPException(422, "enter an amount")
-            now = {x["account_id"]: x["amount"] or 0 for x in p["accounts"]}
+            if p.get("converted"):                          # shown here in your main currency, kept there in its own: amounts cannot be sent back as they are shown
+                raise HTTPException(422, f"this piggy bank is kept in {p.get('own_currency')} in Firefly III: add or take out money there (use the Firefly III link on it)")
+            now = {x["account_id"]: x.get("native", x["amount"]) or 0 for x in p["accounts"]}
             new = round(now.get(b.account_id, 0) + b.amount, 2)
             if new < 0:
                 raise HTTPException(422, f"only {now.get(b.account_id, 0):,.2f} is in it on that account")
+            if b.amount > 0:                               # all the piggy banks on an account together cannot hold more than the account does
+                held = sum((x.get("native", x["amount"]) or 0) for row in db.all("SELECT data FROM ff_piggy") for x in json.loads(row["data"])["accounts"] if x["account_id"] == b.account_id)
+                bal = (db.one("SELECT coalesce(native_balance, balance) b FROM accounts WHERE id=?", (b.account_id,)) or {}).get("b") or 0
+                if held + b.amount > bal + 0.005:
+                    raise HTTPException(422, f"that account holds {bal:,.2f} and {held:,.2f} of it is already in piggy banks")
             if p["target"] and sum(now.values()) + b.amount > p["target"] + 0.005:
                 raise HTTPException(422, f"that is more than the piggy bank still needs ({p['target'] - sum(now.values()):,.2f})")
             accts = [{"account_id": k.split(":", 1)[1], "current_amount": f"{(new if k == b.account_id else v):.2f}"} for k, v in now.items()]
@@ -1390,7 +1397,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             out["holdings"] = [{"symbol": h["symbol"], "quantity": h["quantity"], "net_cost": h["net_cost"], "equity": h["value"], "account": h["account_id"], "as_of": h["updated"]}
                                for h in db.all("SELECT * FROM holdings WHERE quantity IS NOT NULL AND quantity != 0 ORDER BY account_id, symbol LIMIT 300")]
         if "daily" in share:                  # per-day totals for the last 31 days, never the transactions behind them
-            out["daily"] = ledger.daily_totals(db, t, 31)
+            out["daily"] = [{k: x[k] for k in ("date", "spent", "income")} for x in ledger.daily_totals(db, t, 31)]      # the shape the Orb reads
         return out
 
     def token_holder(request: Request, resource: str):

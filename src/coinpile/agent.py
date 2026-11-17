@@ -238,7 +238,13 @@ def paycheck_plan(store, today_: date, income: str | None = None) -> dict:
         inc = [i for i in inc if str(income).lower() in i["name"].lower()] or inc
     pay = min(inc, key=lambda i: i["next_due"])
     first = date.fromisoformat(pay["next_due"])
-    nxt = recur.shift(first, pay["every"], pay["unit"], 1)
+    try:
+        anchor = date.fromisoformat(str(pay.get("next_date") or pay["next_due"])[:10])
+    except ValueError:
+        anchor = first
+    nxt = recur.shift(anchor, pay["every"], pay["unit"], recur.first_k_on_or_after(anchor, pay["every"], pay["unit"], first) + 1)
+    if nxt <= first:
+        nxt = recur.shift(first, pay["every"], pay["unit"], 1)
     window = (nxt - first).days
     due = [b for b in ledger.upcoming(store, (nxt - today_).days, today_)["items"] if first.isoformat() <= b["date"] < nxt.isoformat() and b["payer"] == "me"]
     per_month = 30.4375 / window if window else 1
