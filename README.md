@@ -32,6 +32,10 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
 - **Robinhood MCP**: Settings, Robinhood, Connect Robinhood: you sign in on Robinhood's own site (its official MCP server, `https://agent.robinhood.com/mcp/trading`, for the Agentic Trading account) and Coinpile gets permission to read. Coinpile asks only for reading and can only call read tools (portfolio and positions); there is no code path to place, cancel or change an order. Its value is recorded each time it is read, so Investments shows value by month from then on. Robinhood's own documentation of the server was not available to test against; the sign-in follows the MCP standard (OAuth 2.1 with PKCE and app registration), and a token can be pasted instead if needed.
 - **Robinhood**: positions from Robinhood's activity-report CSV, or the optional live/agent connector containers. Coinpile only (Firefly III cannot hold stock positions).
 - **Sharing**: link with other Coinpile people (others signed in to the same Coinpile with their own Firefly III login). Share a goal (each sets money aside, notes thread), or let them see one of your Firefly III accounts. Nothing is shared until you pick it, one item at a time.
+  * A goal someone offers you is not yours until you accept: if they take it back or the link ends first, it is gone, and until then it is left out of the Orb, API tokens, webhooks and the agent. One person can have at most 20 offers waiting for you.
+  * If another member adds a third person to a shared goal, that person does not get your amount or notes until you press "Share with them too" on the goal.
+  * Outside Coinpile (the Orb, API tokens, webhooks, a cloud model, MCP), a shared goal's progress and "still needed" count only your own part, so the others' amounts cannot be worked out from them.
+  * An account you delete in Coinpile, or close in Firefly III, stops being shared (and stops being joint) on the other side.
 - **Joint accounts at the Plaid connector** (Settings, Banks): ask to share one of your bank accounts with another person on the connector;
   no admin is needed. They accept (as a new account in their Firefly III, linked to one of their own accounts that is not already used, or
   skipped) or decline, and either can stop later (you with Stop, they with Leave). Only accepted accounts reach their Firefly III. The
@@ -42,9 +46,12 @@ Firefly III stays in charge of your data. Coinpile reads it every few minutes an
   balance its own Firefly III shows and what that person moved in, and both see a settle-up line ("bob owes you 137.50") and whether the two
   Firefly III copies agree. Either can stop it. Coinpile only: nothing is written to Firefly III, and every number comes from each person's own Firefly III.
   * **What you put in** counts Firefly III transfers from your own bank accounts, and bank-feed pairs: a deposit into the joint account matched
-    by a withdrawal of the same amount from one of your own bank accounts within 3 days. Each withdrawal matches one deposit only. Card
-    purchases, other joint accounts and pending lines are not counted, so the other person's money is never counted as yours.
-  * Only bank accounts, cards and loans can be joint. The two shares must add up to 100%; an acceptance that does not is ended on both sides.
+    by a withdrawal of the same amount from one of your own bank accounts within 3 days. The withdrawal has to read like a transfer (its
+    category is a transfer, or its text says transfer, Zelle, ACH and the like, or names the joint account), and a deposit that names the
+    other person ("Zelle from Sam") is theirs. Each withdrawal matches one deposit only. Card purchases, ordinary bills of the same
+    amount, other joint accounts and pending lines are not counted, so the other person's money is not counted as yours.
+  * Only bank accounts, cards and loans can be joint. The two shares must add up to 100% (each between 0.01 and 99.99); an acceptance that
+    does not is ended on both sides. Once an account is tied as joint, the split cannot be changed on the account's own page by one side.
   * Offering the account to someone else withdraws the earlier offer. Unlinking a person, or Forget me, ends every joint account with them and
     both sides count the whole account again. One person can have at most 20 offers waiting for you.
   * **The agent and joint accounts:** your own side (your account, your share, what you put in) is always available to it. The other
@@ -192,10 +199,19 @@ Your Yes is the consent, so an approved change runs even with the matching "send
 decimal and percentage in it against the tool results and what you typed. A figure that came from nowhere sends the answer back once with
 "compute these with calculate"; whatever still is not from a tool is marked under the answer ("⚠ not from a tool: ..."), and a clean answer shows
 "✓ every figure from a tool". Tool arguments are checked before a tool runs (a wrong type or a missing value comes back as a plain error the model
-can fix), and calling the same thing twice returns "already done, use the result above" instead of looping.
+can fix; numbers written as "$5,000" are read, and nan or infinity are refused), and calling the same thing twice returns "already done, use
+the result above" instead of looping. What does not count as a source: the model's own earlier text (a compacted summary included), an
+error that only repeats what the model sent, and today's date as money. A known figure times or divided by 100 is not known; only a
+fraction from a tool said as a percentage is (0.013 as 1.3%). Names such as 401k, 529 plan, Form 1040 and W-2 are not figures.
+
+**Questions before changes.** A question shows on one line everything a Yes will write (amount first, then who pays, the account, dates
+and notes). Things that cannot work are refused before you are asked (an amount that is not a number, a piggy bank on a card, more money
+than the account holds). The same request is asked once, and at most 20 wait for your answer.
 
 **The calculator** takes one expression or a list of labelled ones, percentages (5%), and money functions: pmt (loan payment), fv (savings
-growth), nper (months to pay off), compound, pct, round, sqrt and friends. Nothing but arithmetic can run in it.
+growth), nper (months to pay off), compound, pct, round, sqrt and friends. Nothing but arithmetic can run in it, and nothing in it can
+keep the server busy: results are limited in size and anything larger is refused. Inside a function or a list a comma between digits is
+refused as ambiguous ("max(1,200)"): the model is told to write numbers there without thousands separators and with a space after each comma.
 
 **Skills** are step-by-step playbooks the agent loads for a job and follows, each naming the tools to call and what to work out: monthly
 review, debt payoff (avalanche vs snowball), emergency fund, subscription audit, goal plan, big purchase, budget setup, idle cash and CDs
@@ -227,7 +243,14 @@ pending payments don't count; never the transactions themselves).
 the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.
 With a **SearXNG** address in Settings, Agent models, Web search (or `SEARXNG_URL`), web_search looks up current rates, limits and rules and
 read_webpage reads a page it found to check a figure; it names the source and date. SearXNG must allow JSON (`search.formats: [html, json]` in
-its settings.yml). The agent is told never to put personal details in a search, and it can only open pages its search just returned.
+its settings.yml). The agent is told never to put personal details in a search, and a query that holds an email address, an account or
+card number or one of your exact balances is not sent. It can only open pages its search returned in the last ten minutes, and only on the
+public internet: a page (or a redirect) that leads into your home network or to the server is refused. A page is read up to 2 MB and 30 seconds.
+
+**Which models count as local.** A model is local when its address leads to this machine or your home network. That is decided on where
+the address really goes: a number that is a public address in disguise, a look-alike dot, or a local-looking name that resolves to a
+public address is not local, so it needs "allow cloud" and gets other people's numbers withheld. If you switch a chat from a local model
+to a cloud one, earlier answers (and a summary) that may hold what other people share with you are left out of what the cloud model sees.
 A model without tool calling gets a summary of the same data instead. "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
 
 ## Settings
@@ -248,7 +271,11 @@ A model without tool calling gets a summary of the same data instead. "Discuss w
 ### Security notes
 
 - Each person's settings and secrets are their own: nothing falls back to the container's environment for a person (except `CONNECTOR_URL` and `REFRESH_MINUTES`, which are not secret).
-- Addresses a person types (a model server, a calendar, a chat webhook, the connector) cannot reach the container itself or the cloud metadata address; your home network is allowed.
+- Addresses a person types (a model server, a calendar, a chat webhook, the connector) cannot reach the container itself or cloud metadata addresses; your home network is allowed. Pages the agent reads from a web search may only be on the public internet.
+- Handles are unique: two people can never be given the same name for sharing.
+- "Forget me" affects only that person; a request of theirs still on its way is answered "sign in first".
+- Numbers in requests and from another person's Coinpile must be ordinary finite numbers; a malformed message from a linked person is ignored whole.
+- Password sign-in slows down wrong guesses per name and address, so guesses from somewhere else do not lock you out where you are; old failures are forgotten after 15 minutes. Signing in ends whatever session that browser had before.
 - "Sign in with Firefly III" can only be finished in the browser that started it.
 - A person's name for sharing is never given to someone else after they use "Forget me", and the people they shared with are told.
 - What the agent adds (subscriptions, goals, notes) stays in Coinpile: it is never sent to Firefly III without you.
@@ -272,7 +299,7 @@ The tests use a stand-in for Firefly III's API (`tests/fake_firefly.py`) and a s
 
 ## Drop folder
 
-PayPal, Venmo and Cash App CSVs put in `/data/people/<your Firefly III user id>-imports/` are imported into Coinpile accounts within a minute, then moved to `done/` (or `failed/` if the file is not one of those exports). Uploading them on the Accounts tab does the same.
+PayPal, Venmo and Cash App CSVs put in `/data/people/<your Firefly III user id>-imports/` are imported into Coinpile accounts within a minute, then moved to `done/` (or `failed/` if the file is not one of those exports). Uploading them on the Accounts tab does the same. One file holds up to 20,000 rows (split a longer history); an empty file makes no account. "Export CSV" on Transactions keeps text that looks like a spreadsheet formula as text.
 
 ## Webhooks (Coinpile tells other apps)
 
