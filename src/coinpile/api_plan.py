@@ -155,7 +155,7 @@ def register(app, ctx):
     @app.get("/api/afford")
     def afford(request: Request, amount: float):
         auth(request)
-        if amount <= 0:
+        if not (0 < amount <= 1e12):                             # also turns away nan and infinity
             raise HTTPException(422, "amount must be above 0")
         return plan.afford(store, amount, ctx.today())
 
@@ -164,16 +164,16 @@ def register(app, ctx):
         auth(request)
         month = month or ctx.today().strftime("%Y-%m")
         try:
-            date.fromisoformat(month + "-01")
-        except ValueError:
+            assert len(month) == 7 and 1900 <= date.fromisoformat(month + "-01").year <= 2200
+        except (ValueError, AssertionError):
             raise HTTPException(422, "month must be YYYY-MM")
         return plan.monthly_plan(store, month, ctx.today())
 
     # ---- income
     def check_income(i: IncomeIn):
         try:
-            date.fromisoformat(i.next_date)
-        except (ValueError, TypeError):
+            assert len(i.next_date) == 10 and 1900 <= date.fromisoformat(i.next_date).year <= 2200
+        except (ValueError, TypeError, AssertionError):
             raise HTTPException(422, "next_date must be a date (YYYY-MM-DD)")
         try:
             every, unit = recur.resolve(i.every, i.unit, i.cycle)

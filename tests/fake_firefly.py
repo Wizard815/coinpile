@@ -85,7 +85,7 @@ class FakeFirefly:
                             self.piggy_events = getattr(self, "piggy_events", {})
                             self.piggy_events.setdefault(row["id"], []).append({"type": "piggy_bank_events", "id": self._next(), "attributes": {"amount": f"{moved:.2f}", "created_at": "2026-11-10T10:00:00+00:00", "account_name": "Axos"}})
             else:
-                row["attributes"].update({**b, "amount_avg": b["amount_min"], "date": b["date"] + "T00:00:00+00:00"})
+                row["attributes"].update({**b, **({"amount_avg": b["amount_min"]} if "amount_min" in b else {}), **({"date": b["date"] + "T00:00:00+00:00"} if "date" in b else {})})
             return httpx.Response(200, json={"data": row})
         if p == "/budgets" and method == "POST":
             row = {"type": "budgets", "id": self._next(), "attributes": {"name": b["name"], "active": True, "spent": []}}
