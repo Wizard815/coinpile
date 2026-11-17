@@ -414,7 +414,7 @@ def _alerts(db, today: date) -> list[dict]:
     elif gv["free"] >= 50 and any(g["status"] == "active" and g.get("shared_state") != "offered" and g["shortfall"] > 0 for g in gv["items"]):
         top = next(g for g in gv["items"] if g["status"] == "active" and g.get("shared_state") != "offered" and g["shortfall"] > 0)
         out.append({"kind": "free_savings", "severity": "info", "title": f"${gv['free']:,.2f} of your savings is free",
-                    "detail": f"{top['name']} still needs ${top['shortfall']:,.2f}"})
+                    "detail": f"{top['name']} is not fully funded yet" if top.get("shared_id") else f"{top['name']} still needs ${top['shortfall']:,.2f}"})
     try:
         warn_days = int(float(cfg.get(db, "alert_maturity_days") or 30))   # how early to warn; 0 turns it off
     except ValueError:

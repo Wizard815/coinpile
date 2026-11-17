@@ -1320,7 +1320,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         if "goals" in share:                  # goals are Firefly III piggy banks (older Coinpile goals still count until closed)
             out["goals"] = ([{"name": p["name"], "target": p["target"], "allocated": p["current"], "pct": round(min(1.0, p["current"] / p["target"]), 3) if p["target"] else None,
                               **({"by": p["target_date"]} if p.get("target_date") else {})} for p in plan._piggies(db)]
-                            + [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t)["items"] if g["status"] == "active"])
+                            + [{"name": g["name"], "target": g["target"], "allocated": g["allocated"], "pct": g["pct"]} for g in plan.goals_view(db, t, own_only=True)["items"] if g["status"] == "active"])
         if "budgets" in share:
             try:
                 b = contexts[uid].ff_budgets(t.isoformat()[:7]) if uid in contexts and getattr(contexts[uid], "ff_budgets", None) else None
@@ -1374,13 +1374,13 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
     # ---------------- MCP: the agent's tools for other AI assistants (Pondering Orb, Claude Desktop...), with a token that has the "mcp" scope
     @front.post("/api/v1/mcp")
     async def mcp_endpoint(request: Request):
-        uid, _, _ = token_holder(request, "mcp")
+        uid, _, row = token_holder(request, "mcp")
         person_app(uid)                                       # builds this person's context if nobody has opened Coinpile since a restart
         try:
             msg = await request.json()
-        except ValueError:
+        except (ValueError, RecursionError):
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "not JSON"}}, 400)
-        res = await run_in_threadpool(agent.mcp_handle, contexts[uid], msg)
+        res = await run_in_threadpool(agent.mcp_handle, contexts[uid], msg, set(str(row["scopes"] or "").split(",")))
         return Response(status_code=202) if res is None else JSONResponse(res)
 
     @front.get("/api/v1/me")

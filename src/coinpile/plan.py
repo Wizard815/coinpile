@@ -77,7 +77,9 @@ def piggy_goals(db, today: date) -> list[dict]:
     return out
 
 
-def goals_view(db, today: date) -> dict:
+def goals_view(db, today: date, own_only: bool = False) -> dict:
+    """own_only: count only what this person set aside toward a shared goal. For anything that leaves Coinpile (a cloud model, another app
+    over MCP or an API token, the Pondering Orb): what is still needed would otherwise give away what the other people put in."""
     pl = places(db, today)
     total = round(sum(p["balance"] for p in pl), 2)
     allocs = _allocs(db)
@@ -101,7 +103,7 @@ def goals_view(db, today: date) -> dict:
         p["earmarked"] = round(pinned.get(p["key"], 0), 2)
         p["free"] = round(p["balance"] - p["earmarked"], 2)
     items = []
-    team_extra = {r["goal_id"]: r["n"] for r in db.all("SELECT p.goal_id, SUM(p.amount) n FROM goal_partners p JOIN goals g ON g.id=p.goal_id WHERE g.shared_state='active' GROUP BY p.goal_id")}   # what the others on a shared goal have set aside
+    team_extra = {} if own_only else {r["goal_id"]: r["n"] for r in db.all("SELECT p.goal_id, SUM(p.amount) n FROM goal_partners p JOIN goals g ON g.id=p.goal_id WHERE g.shared_state='active' GROUP BY p.goal_id")}   # what the others on a shared goal have set aside
     for g in db.all("SELECT * FROM goals ORDER BY status='done', priority, deadline IS NULL, deadline, id"):
         got = round(sum(a["amount"] for a in by_goal.get(g["id"], [])), 2)
         team = round(got + team_extra.get(g["id"], 0), 2)
