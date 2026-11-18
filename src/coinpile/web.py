@@ -1269,6 +1269,9 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 raise HTTPException(502, str(e))
 
         ctx.banks = lambda: conn_call(lambda: connector().banks())
+        ctx.bank_problems = lambda: conn_call(lambda: connector().problems())
+        ctx.bank_pull = lambda item_id, full=False: conn_call(lambda: connector().pull_bank(item_id, full))
+        ctx.bank_match = lambda account_id: conn_call(lambda: connector().match_balance(account_id))
 
         @app.get("/api/banks")
         async def banks():

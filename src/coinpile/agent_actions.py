@@ -180,6 +180,55 @@ def r_cat(ctx, a):
     return {"category": out["category"], "rule": out.get("rule")}
 
 
+def _bank_problems(ctx) -> dict:
+    try:
+        return hook(ctx, "bank_problems")()
+    except Refused:
+        raise
+    except Exception as e:
+        raise Refused(f"could not reach the Plaid connector: {getattr(e, 'detail', None) or e}"[:200])
+
+
+def p_bank_pull(ctx, a):
+    banks = _bank_problems(ctx)["banks"]
+    b = next((x for x in banks if x["item_id"] == str(a.get("item_id") or "")), None) if a.get("item_id") else (banks[0] if len(banks) == 1 else None)
+    if not b:
+        raise Refused("which bank? give item_id from bank_problems" if banks else "no bank is linked at the connector")
+    full = bool(a.get("full"))
+    return ({"item_id": b["item_id"], "full": full},
+            f"Pull {b['bank']} now at the Plaid connector" + (" (full: ask the bank for fresh data, which Plaid bills per call, and read its whole history again; nothing is doubled)" if full else " (what is new since the last pull)")
+            + ", and send what changed to Firefly III", "connector")
+
+
+def r_bank_pull(ctx, a):
+    out = hook(ctx, "bank_pull")(a["item_id"], a["full"])
+    try:
+        hook(ctx, "refresh_now")()                     # read the result into Coinpile
+    except Exception:
+        pass
+    return {k: out.get(k) for k in ("ok", "error", "added", "modified", "removed", "firefly")}
+
+
+def p_bank_match(ctx, a):
+    d = next((x for x in _bank_problems(ctx)["balance_differs"] if x["account_id"] == str(a.get("account_id") or "")), None)
+    if not d:
+        raise Refused("that account's Firefly III balance does not differ (give account_id from bank_problems' balance_differs)")
+    owed = d.get("kind") in ("credit", "loan")
+    bank = -abs(float(d["bank_says"] or 0)) if owed else float(d["bank_says"] or 0)
+    return ({"account_id": d["account_id"]},
+            f"Match {d['account']} in Firefly III to the bank: Firefly III says {float(d['firefly_says'] or 0):,.2f}, the bank {bank:,.2f}. "
+            "Its opening balance moves by the difference; no transaction is added", "firefly")
+
+
+def r_bank_match(ctx, a):
+    out = hook(ctx, "bank_match")(a["account_id"])
+    try:
+        hook(ctx, "refresh_now")()
+    except Exception:
+        pass
+    return {"changed": out.get("changed"), "difference": out.get("difference")}
+
+
 def p_piggy_new(ctx, a):
     name = txt(a.get("name"), 255)
     if not name:
@@ -311,6 +360,10 @@ ACTIONS = {
                               S({"piggy_id": STR, "amount": NUM, "account_id": STR}, ["piggy_id", "amount"]), p_piggy_money, r_piggy_money),
     "set_budget": ("Set a Firefly III budget's amount for a month (YYYY-MM, default this month); the budget is made if it does not exist.",
                    S({"name": STR, "amount": NUM, "month": STR}, ["name", "amount"]), p_budget, r_budget),
+    "update_bank": ("Pull one bank now at the Plaid connector and send what changed to Firefly III (item_id from bank_problems). full=true asks the bank for fresh data first "
+                    "(Plaid bills it) and reads the whole history again; use it only when a quick pull did not help.", S({"item_id": STR, "full": {"type": "boolean"}}), p_bank_pull, r_bank_pull),
+    "match_bank_balance": ("Make an account's Firefly III balance equal the bank's by moving its opening balance (account_id from bank_problems' balance_differs). Try update_bank first.",
+                           S({"account_id": STR}, ["account_id"]), p_bank_match, r_bank_match),
     "mark_account_as_savings": ("Mark an account as a CD (or savings, money_market, bond, hsa, 529...) in Coinpile with its APY, opened, maturity and term.",
                                 S({"account_id": STR, "savings_kind": STR, "apy": NUM, "opened": DATE, "maturity": DATE, "term_months": INT}, ["account_id"]), p_cd, r_cd),
 }

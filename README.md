@@ -168,6 +168,14 @@ Then open `http://<unraid address>:8190`.
 
 See [docker-compose.example.yml](docker-compose.example.yml).
 
+## The agent and your bank connector
+
+When a Plaid connector is set up (Settings, Banks), the agent can look at what is wrong there with **bank_problems**: banks that need
+signing in again, a last pull that failed (with Plaid's error), accounts whose Firefly III balance is not the bank's, batches the
+connector held back from Firefly III, and accounts that look duplicated. It can then ask to **pull a bank** (quick, or full, which Plaid
+bills) or to **match a balance** in Firefly III (the opening balance moves; no transaction is added). Both wait for your Yes. Signing in
+to a bank again, approving accounts and releasing a held batch stay with you or the connector's admin.
+
 ## AI categories (optional, off by default)
 
 Payments no rule, bank category or keyword could place stay on Misc (or Income). In Categories, **AI categories** lets your chat model

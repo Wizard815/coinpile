@@ -110,6 +110,39 @@ class Connector:
     def pull(self) -> dict:
         return self.call("POST", "sync", {})
 
+    def problems(self) -> dict:
+        """What is wrong at the connector, for the agent: banks that need signing in again or whose last pull failed, accounts whose Firefly III
+        balance is not the bank's, batches held back from Firefly III, and the recent pull and send log (counts and error codes)."""
+        st, ff = self.call("GET", "api/status"), self.call("GET", "api/firefly/status")
+        try:
+            log = self.call("GET", "api/plaid/log?limit=30").get("log", [])
+        except ConnectorError:
+            log = []                                    # an older connector without the log
+        try:
+            accts = self.call("GET", "api/firefly/accounts").get("accounts", [])
+        except ConnectorError:
+            accts = []
+        last = {}
+        for l in log:
+            if l.get("item_id") and l["item_id"] not in last and l.get("what") != "refresh":
+                last[l["item_id"]] = {"what": l.get("what"), "ok": l.get("ok"), "detail": l.get("detail"), "at": l.get("at")}
+        banks = [{"item_id": it.get("item_id"), "bank": it.get("institution"), "needs_sign_in_again": it.get("status") == "error", "status": it.get("status"),
+                  "problem": it.get("status_detail"), "last_pull": it.get("last_sync"), "last_result": last.get(it.get("item_id"))} for it in (st.get("plaid") or {}).get("items", [])]
+        sent = [a for a in accts if a.get("mode") in ("create", "link") and a.get("ff_id")]
+        return {"banks": banks,
+                "balance_differs": [{"account_id": a.get("id"), "account": a.get("label"), "bank_says": a.get("balance"), "kind": a.get("kind"), "firefly_says": a.get("ff_balance")} for a in sent if a.get("drift")],
+                "held_from_firefly": [{"account_id": a.get("id"), "account": a.get("label"), "waiting": a.get("held"), "already_in_firefly": a.get("ff_seen")} for a in accts if a.get("held")],
+                "looks_duplicated": [{"account_id": a.get("id"), "account": a.get("label")} for a in accts if a.get("looks_like")],
+                "waiting_for_admin_approval": [a.get("label") for a in accts if a.get("mode") == "pending"],
+                "firefly_sending": {k: ff.get(k) for k in ("configured", "sent", "waiting", "failed", "last_ok", "last_error")},
+                "recent_log": [{k: l.get(k) for k in ("at", "institution", "what", "ok", "detail")} for l in log[:15]]}
+
+    def pull_bank(self, item_id: str, full: bool = False) -> dict:
+        return self.call("POST", f"api/plaid/items/{self._item(item_id)}/pull" + ("?full=true" if full else ""), {})
+
+    def match_balance(self, account_id: str) -> dict:
+        return self.call("POST", f"api/firefly/accounts/{self._seg(account_id, 'bank account id')}/rebalance", {})
+
     def link_token(self, item_id: str | None = None) -> dict:
         from urllib.parse import quote
         return self.call("POST", "plaid/link-token" + (f"?item_id={quote(item_id, safe='')}" if item_id else ""), {})
