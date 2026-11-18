@@ -24,7 +24,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from coinpile.strict import BaseModel
 
-from coinpile import agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import aicat, agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
 from coinpile.db import DB, Closed
 from coinpile.oplog import log
 from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
@@ -32,7 +32,7 @@ from coinpile.security import Throttle, check_password_strength, hash_password, 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
 USER_KEYS = {"searx_url", "share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
-             "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider"}
+             "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider", "ai_categorize", "ai_categorize_auto"}
 
 
 def ui_dir() -> Path:
@@ -407,6 +407,12 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             raise
         try:
             out = firefly.refresh(db, ff_for(uid), today(), full)
+            try:                                                    # AI categories for what just arrived (only when switched on; never stops a refresh)
+                ai = aicat.run(db, llm_transport, only_new=True)
+                if not ai.get("skipped"):
+                    out["ai_categorize"] = ai
+            except Exception as e:
+                out["ai_categorize"] = {"error": type(e).__name__}
             try:
                 person_app(uid)                                     # makes sure this person's Robinhood reader exists
                 rh_ = robinhood.Robinhood(db, os.path.join(data_dir, "people", f"{safe_id(uid)}-robinhood"), robinhood_transport, (users.get(uid) or {}).get("email", ""), mcp_transport)
