@@ -14,6 +14,7 @@ from coinpile import netguard
 
 MAX_PAGE = 2_000_000
 TEXT_LIMIT = 6000
+TOTAL_SECONDS = 30
 
 
 class SearchError(Exception):
@@ -83,27 +84,68 @@ class _Text(HTMLParser):
             self.parts.append(data)
 
 
+def _body(r, deadline: float) -> bytes:
+    """The page's bytes, never more than MAX_PAGE in memory and never past the deadline. The body is read as it is sent (still compressed)
+    and unpacked here with a limit, so a small compressed page cannot unfold into gigabytes."""
+    import time
+    import zlib
+    enc = (r.headers.get("content-encoding") or "").strip().lower()
+    if enc not in ("", "identity", "gzip", "x-gzip", "deflate"):
+        raise SearchError("the page is packed in a way that cannot be read safely")
+    unpack = zlib.decompressobj(47) if enc in ("gzip", "x-gzip") else zlib.decompressobj() if enc == "deflate" else None
+    if r.is_stream_consumed:                      # a ready-made answer (a stand-in transport in tests): it is in memory already
+        if len(r.content) > MAX_PAGE:
+            raise SearchError("the page is too large")
+        return r.content
+    out, raw = bytearray(), 0
+    for chunk in r.iter_raw(16384):
+        if time.monotonic() > deadline:
+            raise SearchError("the page took too long")
+        raw += len(chunk)
+        if unpack:
+            try:
+                while chunk:
+                    out += unpack.decompress(chunk, MAX_PAGE + 1 - len(out))
+                    chunk = unpack.unconsumed_tail
+                    if len(out) > MAX_PAGE:
+                        break
+            except zlib.error:
+                raise SearchError("the page could not be unpacked")
+        else:
+            out += chunk
+        if len(out) > MAX_PAGE or raw > MAX_PAGE:
+            raise SearchError("the page is too large")
+    return bytes(out)
+
+
 def read_page(url: str, transport=None) -> dict:
+    """A page a web search found. It came from the internet, so it (and anything it redirects to) may only be on the public internet."""
+    import time
     if urlparse(url).scheme not in ("http", "https"):
         raise SearchError("only web pages can be read")
+    deadline = time.monotonic() + TOTAL_SECONDS
     try:
-        with netguard.client(transport, timeout=20) as c:
-            r = c.get(url, headers={"Accept": "text/html,text/plain;q=0.9", "User-Agent": "Coinpile/1 (personal finance assistant)"}, follow_redirects=True)
+        with netguard.client(transport, public_only=True, timeout=10, max_redirects=5) as c:
+            with c.stream("GET", url, headers={"Accept": "text/html,text/plain;q=0.9", "Accept-Encoding": "gzip, deflate", "User-Agent": "Coinpile/1 (personal finance assistant)"},
+                          follow_redirects=True) as r:
+                if r.status_code >= 400:
+                    raise SearchError(f"the page answered {r.status_code}")
+                ctype = r.headers.get("content-type", "")
+                if "html" not in ctype and not ctype.startswith("text/"):
+                    raise SearchError(f"not a web page ({ctype.split(';')[0] or 'unknown type'})")
+                raw, final, charset = _body(r, deadline), str(r.url), r.charset_encoding or "utf-8"
     except (httpx.HTTPError, netguard.Blocked) as e:
         raise SearchError(f"could not read the page ({type(e).__name__})")
-    if r.status_code >= 400:
-        raise SearchError(f"the page answered {r.status_code}")
-    if len(r.content) > MAX_PAGE:
-        raise SearchError("the page is too large")
-    ctype = r.headers.get("content-type", "")
+    try:
+        body = raw.decode(charset, "replace")
+    except LookupError:
+        body = raw.decode("utf-8", "replace")
     if "html" in ctype:
         p = _Text()
-        p.feed(r.text)
+        p.feed(body)
         text, title = "".join(p.parts), p.title
-    elif ctype.startswith("text/"):
-        text, title = r.text, ""
     else:
-        raise SearchError(f"not a web page ({ctype.split(';')[0] or 'unknown type'})")
+        text, title = body, ""
     text = re.sub(r"[ \t\r\f\v]+", " ", html.unescape(text))
     text = re.sub(r"\n\s*\n+", "\n", text).strip()
-    return {"url": str(r.url), "title": " ".join(title.split())[:200], "text": text[:TEXT_LIMIT], "truncated": len(text) > TEXT_LIMIT}
+    return {"url": final, "title": " ".join(title.split())[:200], "text": text[:TEXT_LIMIT], "truncated": len(text) > TEXT_LIMIT}

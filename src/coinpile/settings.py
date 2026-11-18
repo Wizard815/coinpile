@@ -78,8 +78,8 @@ def validate(key: str, value) -> str:
     if kind in ("num", "int") and v:
         try:
             n = float(v)
-            assert n >= 0 and (kind == "num" or n == int(n))
-        except (ValueError, AssertionError):
+            assert 0 <= n < 1e12 and (kind == "num" or n == int(n))
+        except (ValueError, AssertionError, OverflowError):
             raise ValueError(f"{key} must be a non-negative {'number' if kind == 'num' else 'whole number'}")
     if key == "plaid_env" and v not in ("", "sandbox", "production"):
         raise ValueError("plaid_env must be sandbox or production")

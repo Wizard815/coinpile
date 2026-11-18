@@ -26,11 +26,14 @@ class Connector:
     def _login(self) -> None:
         try:
             r = self.c.post(f"{self.url}/login", json={"name": self.name, "password": self.secret})
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, httpx.InvalidURL) as e:
             raise ConnectorError(f"could not reach the Plaid connector ({type(e).__name__})")
         if r.status_code != 200:
             raise ConnectorError("the Plaid connector refused that name and password")
-        self.token = r.json()["token"]
+        try:
+            self.token = str(r.json()["token"])
+        except (ValueError, KeyError, TypeError):
+            raise ConnectorError("that address did not answer like the Plaid connector")
 
     def call(self, method: str, path: str, body: dict | None = None):
         for attempt in (0, 1):
@@ -38,7 +41,7 @@ class Connector:
                 self._login()
             try:
                 r = self.c.request(method, f"{self.url}/g/{self.name}/{path.lstrip('/')}", json=body, headers={"Authorization": f"Bearer {self.token}"})
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, httpx.InvalidURL) as e:
                 raise ConnectorError(f"could not reach the Plaid connector ({type(e).__name__})")
             if r.status_code == 401 and attempt == 0:
                 self.token = None                                   # a session ran out, or it was a password after all: sign in with it
@@ -47,6 +50,10 @@ class Connector:
                 data = r.json()
             except ValueError:
                 data = {}
+            if not isinstance(data, dict):
+                if r.status_code >= 400:
+                    raise ConnectorError(f"the Plaid connector answered {r.status_code}")
+                data = {"items": data} if isinstance(data, list) else {}
             if r.status_code >= 400:
                 raise ConnectorError(data.get("detail") if isinstance(data.get("detail"), str) else f"the Plaid connector answered {r.status_code}")
             return data

@@ -61,4 +61,16 @@ def monthly(db, ids: list[str], months: int = 12) -> list[dict]:
     for r in rows:
         last[r["account_id"]] = r["balance"] or 0
         by[r["m"]] = round(sum(last.values()), 2)
-    return [{"month": m, "value": v} for m, v in sorted(by.items())][-months:]
+    out, prev = [], None
+    for m in sorted(by):                                     # a month with no reading carries the last known value
+        while prev and _next_month(prev) < m:
+            prev = _next_month(prev)
+            out.append({"month": prev, "value": out[-1]["value"]})
+        out.append({"month": m, "value": by[m]})
+        prev = m
+    return out[-months:]
+
+
+def _next_month(m: str) -> str:
+    y, mo = int(m[:4]), int(m[5:7])
+    return f"{y + (mo == 12):04d}-{mo % 12 + 1:02d}"

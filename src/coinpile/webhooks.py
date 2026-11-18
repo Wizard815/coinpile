@@ -77,6 +77,11 @@ def view(row: dict) -> dict:
 def check_fields(url: str, events: list[str]) -> None:
     if not url.startswith(("http://", "https://")) or len(url) > 1000:
         raise ValueError("the address must start with http:// or https://")
+    try:
+        if not httpx.URL(url).host:
+            raise ValueError
+    except (httpx.InvalidURL, ValueError, TypeError):
+        raise ValueError("that is not a valid web address (check the port and the spelling)")
     netguard.check(url)
     bad = [e for e in events if e not in EVENTS]
     if not events or bad:
@@ -151,7 +156,7 @@ def collect(db, person: str, today, refreshed: dict | None = None) -> int:
         cfg.set_value(db, "wh_cursor", str(last))
         for a in ledger.alerts(db, today):
             _seen(db, "alert:" + (a.get("key") or a["kind"] + ":" + a["title"]))
-        for g in plan.goals_view(db, today)["items"]:
+        for g in plan.goals_view(db, today, own_only=True)["items"]:
             _seen(db, f"goal:{g['id']}:{g['status']}:{g['allocated']}:{g['target']}")
         return 0
     accts = {a["id"]: a for a in db.all("SELECT id, name, nickname, institution, kind FROM accounts")}
@@ -175,7 +180,7 @@ def collect(db, person: str, today, refreshed: dict | None = None) -> int:
         event = "bill.due" if a["kind"] == "due_soon" else "alert.new"
         full = {k: a.get(k) for k in ("kind", "severity", "title", "detail", "date") if a.get(k) is not None}
         n += queue(db, person, event, full, {"kind": a["kind"], "severity": a["severity"]})
-    for g in plan.goals_view(db, today)["items"]:
+    for g in plan.goals_view(db, today, own_only=True)["items"]:
         if _seen(db, f"goal:{g['id']}:{g['status']}:{g['allocated']}:{g['target']}"):
             continue
         full = {"id": g["id"], "name": g["name"], "target": g["target"], "set_aside": g["allocated"], "still_needed": g["shortfall"], "status": g["status"], "deadline": g.get("deadline")}
@@ -201,7 +206,7 @@ def deliver(db, transport=None, limit: int = 50) -> dict:
                 r = http.post(o["url"], content=body, headers={"Content-Type": "application/json", "User-Agent": "Coinpile-Webhooks/1",
                                                                 "Coinpile-Event": o["event"], "Coinpile-Signature": sign(crypto.decrypt(o["secret_enc"]), body)})
                 ok, status = 200 <= r.status_code < 300, str(r.status_code)
-            except httpx.HTTPError as e:
+            except Exception as e:                           # one address that cannot be called at all must not hold up everything after it
                 ok, status = False, type(e).__name__
             tries = o["tries"] + 1
             with db.tx() as c:

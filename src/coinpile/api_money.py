@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from types import SimpleNamespace
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import plaidplan, feed, ledger, recur, sync
 
@@ -114,9 +114,11 @@ def register(app, ctx):
 
     def date_ok(v, field):
         try:
-            date.fromisoformat(v)
+            ok = isinstance(v, str) and len(v) == 10 and date.fromisoformat(v).isoformat() == v and 1900 <= int(v[:4]) <= 2200
         except (TypeError, ValueError):
-            bad(f"{field} must be YYYY-MM-DD")
+            ok = False
+        if not ok:
+            bad(f"{field} must be a date written YYYY-MM-DD")
 
     # ------------------------------------------------------------ overview
     @app.get("/api/overview")
@@ -252,6 +254,12 @@ def register(app, ctx):
                 c.execute("UPDATE accounts SET min_balance=? WHERE id=?", (a.min_balance if a.min_balance >= 0 else None, aid))
             if a.nickname is not None:
                 c.execute("UPDATE accounts SET nickname=? WHERE id=?", (a.nickname.strip()[:60] or None, aid))
+            if a.joint_with is not None or a.my_share is not None:
+                tied = store.one("SELECT peer FROM joint_accounts WHERE account_id=? AND state='active'", (aid,))
+                if tied:                                     # the split was agreed with them: one side cannot change it alone
+                    bad(f"this account is tied as joint with {tied['peer']}: end that under Settings, Sharing to change the split", 409)
+                if row["kind"] not in ("cash", "credit", "loan"):
+                    bad("only a bank account, card or loan can be joint")
             if a.joint_with is not None:
                 c.execute("UPDATE accounts SET joint_with=? WHERE id=?", (a.joint_with.strip().lower()[:32] or None, aid))
             if a.my_share is not None:
@@ -294,6 +302,9 @@ def register(app, ctx):
             for t in ("transactions", "snapshots", "holdings"):
                 c.execute(f"DELETE FROM {t} WHERE account_id=?", (aid,))
             c.execute("DELETE FROM accounts WHERE id=?", (aid,))
+        changed = getattr(ctx, "shared_changed", None)
+        if changed:
+            changed()                                       # anyone it was shared or joint with is told it is gone
         return {"deleted": aid}
 
     # ------------------------------------------------------------ transactions + categories
@@ -429,12 +440,19 @@ def register(app, ctx):
         return {"changed": ledger.recategorize(store)}
 
     # ------------------------------------------------------------ subscriptions
-    def check_sub(s: Sub) -> tuple[int, str]:
+    def check_sub(s: Sub, before_currency: str | None = None) -> tuple[int, str]:
         try:
             every, unit = recur.resolve(s.every, s.unit, s.cycle)
         except ValueError as e:
             bad(str(e))
         date_ok(s.next_date, "next_date")
+        from coinpile import settings as cfg
+        main = cfg.get(store, "currency") or "USD"             # everything is added up in one currency
+        s.currency = (s.currency or main).upper()
+        if s.currency == "USD" and main != "USD":
+            s.currency = main                                # the form's default, not a choice
+        if s.currency != main and not (before_currency and s.currency == before_currency):
+            bad(f"amounts are added up in {main}: enter this one in {main}")
         if s.times_left is not None:
             if not 1 <= s.times_left <= 1000:
                 bad("times_left must be 1-1000")
@@ -541,7 +559,7 @@ def register(app, ctx):
         before = store.one("SELECT * FROM subscriptions WHERE id=?", (sid,))
         why = firefly_owned(sid) if before else None
         if why:
-            every, unit = check_sub(s)
+            every, unit = check_sub(s, before["currency"])
             new = dict(zip(COLS.split(","), sub_row(s, every, unit)))
             changed = [k for k in FROM_FF if (new[k] or None) != (before[k] or None) and not (k == "amount" and abs((new[k] or 0) - (before[k] or 0)) < 0.005)]
             if changed:
@@ -549,7 +567,7 @@ def register(app, ctx):
             with store.tx() as c:
                 c.execute(f"UPDATE subscriptions SET {','.join(k + '=?' for k in LOCAL)} WHERE id=?", tuple(new[k] for k in LOCAL) + (sid,))
             return ledger.subscription(store, sid, ctx.today())
-        every, unit = check_sub(s)
+        every, unit = check_sub(s, (before or {}).get("currency"))
         sets = ",".join(f"{c}=?" for c in COLS.split(","))
         with store.tx() as c:
             cur = c.execute(f"UPDATE subscriptions SET {sets} WHERE id=?", sub_row(s, every, unit) + (sid,))
@@ -615,7 +633,7 @@ def register(app, ctx):
                 unit=a.unit or sug["unit"], account_id=a.account_id or sug.get("account_id"), payer=a.payer, payer_name=a.payer_name, category=a.category)
         every, unit = check_sub(s)
         with store.tx() as c:
-            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({','.join('?' * 17)},?)", sub_row(s, every, unit) + (sync.now(),))
+            cur = c.execute(f"INSERT INTO subscriptions({COLS},created) VALUES({PH},?)", sub_row(s, every, unit) + (sync.now(),))
             if sug.get("proposal_id"):
                 c.execute("UPDATE proposals SET status='accepted' WHERE id=?", (sug["proposal_id"],))
             else:
@@ -631,6 +649,8 @@ def register(app, ctx):
         auth(request)
         with store.tx() as c:
             if b.key.startswith("proposal:"):
+                if not b.key.split(":", 1)[1].isdigit() or len(b.key) > 30:
+                    bad("suggestion not found", 404)
                 c.execute("UPDATE proposals SET status='dismissed' WHERE id=?", (int(b.key.split(":")[1]),))
             else:
                 c.execute("INSERT OR IGNORE INTO dismissed VALUES(?)", (b.key,))
@@ -747,8 +767,8 @@ def register(app, ctx):
         today = ctx.today()
         month = month or today.strftime("%Y-%m")
         try:
-            date.fromisoformat(month + "-01")
-        except ValueError:
+            assert len(month) == 7 and 1900 <= date.fromisoformat(month + "-01").year <= 2200
+        except (ValueError, AssertionError):
             bad("month must be YYYY-MM")
         return {"month": month, "items": ledger.budget_status(store, month, today)}
 

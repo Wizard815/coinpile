@@ -82,7 +82,7 @@ class Throttle:
 
     def __init__(self, clock=None):
         self.clock = clock or (lambda: time.monotonic())
-        self.state: dict[str, list[float]] = {}          # key -> [failures, locked_until]
+        self.state: dict[str, list[float]] = {}          # key -> [failures, locked_until, last failure]
 
     def wait_for(self, key: str) -> float:
         s = self.state.get(key)
@@ -99,10 +99,18 @@ class Throttle:
             now = self.clock()
             free = next((k for k, v in self.state.items() if v[1] <= now), None)
             self.state.pop(free if free is not None else min(self.state, key=lambda k: self.state[k][1]))
-        s = self.state.setdefault(key, [0, 0.0])
+        s = self.state.setdefault(key, [0, 0.0, 0.0])
+        if len(s) > 2 and s[0] and self.clock() - s[2] > self.MAX_WAIT:
+            s[0] = 0                                     # old failures are forgotten: a household's typos over weeks never add up to a lock
         s[0] += 1
+        if len(s) > 2:
+            s[2] = self.clock()
         if s[0] > self.FREE:
             s[1] = self.clock() + min(self.MAX_WAIT, 2.0 ** (s[0] - self.FREE))
 
     def ok(self, key: str) -> None:
         self.state.pop(key, None)
+
+    def ok_prefix(self, prefix: str) -> None:
+        for k in [k for k in self.state if k.startswith(prefix)]:
+            del self.state[k]
