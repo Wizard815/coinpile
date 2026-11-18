@@ -140,7 +140,9 @@ def account_row(a: dict, primary: str | None = None) -> dict | None:
         if not debt:
             debt, cur, conv = cb, cur2, conv2
         bal, nat = abs(debt), abs(_num(at.get("debt_amount")) or _num(at.get("current_balance")))
-        if (at.get("liability_direction") or "credit") == "debit":
+        # Firefly III: "debit" is "I owe this debt to somebody else" (a loan), "credit" is "I am owed this debt" (checked against 6.7.9's own labels).
+        # A liability with no direction (older Firefly III) is a debt you owe.
+        if (at.get("liability_direction") or "debit") == "credit":
             kind, subtype = "cash", "owed to you"                # money someone owes you counts for you
     else:
         return None

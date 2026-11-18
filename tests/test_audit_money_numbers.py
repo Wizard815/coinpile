@@ -76,7 +76,7 @@ def test_w5_a_cd_at_5_percent_apy_earns_5_percent_in_a_year():
 def test_w6_money_owed_to_you_is_not_cash_for_paying_bills():
     ff = alone()
     ff.acct("1", 1, "Checking", balance="300")
-    ff.acct("1", 2, "Loan to Bob", type="liabilities", role=None, balance="5000", debt_amount="5000", liability_type="loan", liability_direction="debit")
+    ff.acct("1", 2, "Loan to Bob", type="liabilities", role=None, balance="5000", debt_amount="5000", liability_type="loan", liability_direction="credit")      # "I am owed this debt"
     db = read(ff, T)
     with db.tx() as c:
         c.execute("INSERT INTO subscriptions(name,amount,cycle,every,unit,next_date,active) VALUES('Rent',1000,'monthly',1,'month','2026-11-15',1)")
@@ -187,3 +187,15 @@ def test_nothing_is_due_before_the_next_payment_date():
     with db.tx() as c:
         c.execute("INSERT INTO subscriptions(name,amount,cycle,every,unit,next_date,active) VALUES('Insurance',90,'monthly',1,'month','2027-03-15',1)")
     assert ledger.subscriptions(db, T)[0]["next_due"] == "2027-03-15" and ledger.upcoming(db, 60, T)["count"] == 0
+
+
+def test_a_loan_marked_i_owe_this_debt_is_a_loan_and_one_marked_i_am_owed_is_yours():
+    """Firefly III 6.7.9's own labels: liability_direction "debit" = "I owe this debt to somebody else", "credit" = "I am owed this debt"."""
+    ff = alone()
+    ff.acct("1", 1, "Checking", balance="300")
+    ff.acct("1", 2, "Car loan", type="liabilities", role=None, balance="-13637.35", debt_amount="13637.35", liability_type="loan", liability_direction="debit")
+    ff.acct("1", 3, "Loan to Bob", type="liabilities", role=None, balance="500", debt_amount="500", liability_type="loan", liability_direction="credit")
+    db = read(ff, T)
+    k = {r["name"]: (r["kind"], r["balance"]) for r in db.all("SELECT name, kind, balance FROM accounts")}
+    assert k["Car loan"] == ("loan", 13637.35) and k["Loan to Bob"][0] == "cash"
+    assert not any("overdrawn" in a["title"] for a in ledger.overview(db, 30, T)["alerts"])
