@@ -171,7 +171,7 @@ class Writer:
             body.update({"type": "asset", "account_role": "ccAsset", "credit_card_type": "monthlyFull", "monthly_payment_date": today,
                          "opening_balance": f"{-abs(balance or 0):.2f}", "opening_balance_date": today})
         elif kind == "loan":
-            body.update({"type": "liabilities", "liability_type": "loan", "liability_direction": "credit", "opening_balance": f"{-abs(balance or 0):.2f}",
+            body.update({"type": "liabilities", "liability_type": "loan", "liability_direction": "debit", "opening_balance": f"{-abs(balance or 0):.2f}",
                          "opening_balance_date": today, "interest": "0", "interest_period": "monthly"})
         else:
             body.update({"type": "asset", "account_role": "defaultAsset", "opening_balance": f"{balance or 0:.2f}", "opening_balance_date": today})
