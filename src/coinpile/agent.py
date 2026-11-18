@@ -408,6 +408,21 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_u
         except Exception as e:
             return {"error": f"could not read it from Firefly III: {e}"[:200]}
 
+    def t_bank_problems(a):
+        f = hook("bank_problems")
+        if not f:
+            return {"error": "no Plaid connector is set up (Settings, Banks)"}
+        try:
+            out = f()
+        except Exception as e:
+            return {"error": f"could not reach the Plaid connector: {getattr(e, 'detail', None) or e}"[:200]}
+        out["what_you_can_do"] = ("needs_sign_in_again: only the user can fix it, with Relink in Coinpile (Settings, Banks) or the connector; then ask update_bank. "
+                                  "A failed last_result: ask update_bank (quick); full only when quick did not help, it costs a Plaid call. "
+                                  "balance_differs: ask update_bank first (the bank may simply be newer), then match_bank_balance if it still differs. "
+                                  "held_from_firefly, looks_duplicated and waiting_for_admin_approval: only the connector's admin can decide; tell the user. "
+                                  "After a pull, refresh_from_firefly reads the result into Coinpile.")
+        return out
+
     def t_banks(a):
         f = hook("banks")
         if not f:
@@ -755,6 +770,8 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_u
         ("list_investments", "Investment and retirement accounts tracked in Coinpile, their total, and value by month.", S({}), t_investments),
         ("piggy_bank_history", "Money put into and taken out of one piggy bank (piggy_id from list_goals), read from Firefly III.", S({"piggy_id": STR}, ["piggy_id"]), t_piggy_history),
         ("bank_connections", "The user's banks at the Plaid connector (plaid-proxy): which are linked, which need signing in again, and the Firefly III sending status.", S({}), t_banks),
+        ("bank_problems", "What is wrong at the Plaid connector: banks needing sign-in or whose last pull failed (with the error), accounts whose Firefly III balance differs from the bank's, "
+                          "batches held back from Firefly III, accounts that look duplicated, and the recent pull/send log. Start here when balances look wrong or data seems stale.", S({}), t_bank_problems),
         ("get_alerts", "Active alerts: overdrawn or low accounts, expected payments not seen, CDs maturing, bills due soon.", S({}), t_alerts),
         ("project_balance", "Estimate cash balance over the next N days from today's balances, upcoming bills and detected steady income. Excludes everyday spending.",
          S({"days": INT, "account_id": STR, "include_income": {"type": "boolean"}}), t_project),
@@ -802,7 +819,7 @@ def system_prompt(name: str, today: date) -> str:
             "it does nothing until they press Yes. Ask only for changes that follow from what the user wants, one clear action per tool call, and say what you asked and why. "
             "Never move money between banks: you cannot. If a change was declined, do not ask again unless the user brings it up.\n"
             "BEING USEFUL: look before you answer. For 'how am I doing' start with get_overview, cashflow and get_alerts; for a goal, list_goals and savings_plan; for debt, account_details and "
-            "loan_payoff (higher interest first saves the most); for budgets, firefly_budgets and spending_by_category. Point out what matters: money left over or short this month, "
+            "loan_payoff (higher interest first saves the most); for budgets, firefly_budgets and spending_by_category. For a balance that looks wrong, data that seems stale or a bank error, bank_problems, then update_bank or match_bank_balance. Point out what matters: money left over or short this month, "
             "missed or unusual payments, a CD maturing, a piggy bank behind schedule, high-interest debt, idle cash. Give a short answer first, then the numbers, then one or two concrete next steps. "
             "Projections leave out everyday spending: say so. You are not a licensed adviser; for taxes, investments or legal questions give the general facts and suggest checking with a professional.\n"
             "OUTSIDE FACTS: for current rates, limits, rules or prices use web_search (through the user's own SearXNG), read_webpage the best source, and name the source and its date. "

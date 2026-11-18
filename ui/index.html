@@ -832,7 +832,7 @@ async function viewAgent(root, rerender) {
 }
 /* A change the agent asked for: exactly what will happen, where, and Yes / No. Nothing happens before Yes. */
 function actionCard(a, after) {
-  const where = a.target === "firefly" ? h("span", { class: "pill b", title: "This changes your Firefly III" }, "Firefly III") : h("span", { class: "pill t", title: "Kept in Coinpile only" }, "Coinpile");
+  const where = a.target === "firefly" ? h("span", { class: "pill b", title: "This changes your Firefly III" }, "Firefly III") : a.target === "connector" ? h("span", { class: "pill b", title: "The Plaid connector pulls your bank and sends what changed to Firefly III" }, "Bank connector") : h("span", { class: "pill t", title: "Kept in Coinpile only" }, "Coinpile");
   const state = { asked: null, running: "working…", done: "✓ done", declined: "✗ you said no", failed: "✗ failed" }[a.status];
   const decide = (yes) => async (e) => { e.target.closest(".action").querySelectorAll("button").forEach((b) => (b.disabled = true));
     try { const r = await api(`/api/agent/actions/${a.id}/${yes ? "yes" : "no"}`, { method: "POST" }); if (r.status === "failed") toast("It did not work: " + (r.result?.error || "")); after(); } catch (err) { fail(err); after(); } };
