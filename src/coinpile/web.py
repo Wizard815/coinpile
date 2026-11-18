@@ -1323,9 +1323,14 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         @app.post("/api/banks/pull")
         async def banks_pull():
+            """Ask the connector to pull every linked bank from Plaid now (not just whatever was already due) and send what changed to
+            Firefly III, then read Firefly III back here before answering: nothing is left stale, no guessing how long that takes."""
             r = await run_in_threadpool(conn_call, lambda: connector().pull())
-            refresh_soon(uid)                     # the connector has sent the news on to Firefly III; read it back
-            return {"pulled": True, "firefly": (r or {}).get("firefly")}
+            try:
+                read = await run_in_threadpool(refresh, uid, True)
+            except (firefly.TokenRefused, firefly.FireflyError) as e:
+                return {"pulled": True, "firefly": (r or {}).get("firefly"), "read_error": str(e)}
+            return {"pulled": True, "firefly": (r or {}).get("firefly"), "accounts": read.get("accounts"), "transactions": read.get("transactions")}
 
         class LinkIn(BaseModel):
             item_id: str | None = None

@@ -171,7 +171,7 @@ const fmtMoney = (n, code) => { try { return Math.abs(n).toLocaleString("en-US",
 const usd = (n, signed) => (n == null ? "–" : (signed && n > 0 ? "+" : n < 0 ? "−" : "") + fmtMoney(n, S.cur || "USD"));
 const cur = (x, field) => (x && x.native_currency && x[field] != null ? h("span", { class: "muted small", style: "margin-left:6px" }, (x[field] < 0 ? "−" : "") + fmtMoney(x[field], x.native_currency)) : null);
 const store = { get(k) { try { return localStorage.getItem(k); } catch { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch {} } };
-const an = (a) => (a.nickname || a.name || "") + (a.mask && !a.nickname && !String(a.name).includes(a.mask) ? " ••" + a.mask : "");
+const an = (a) => a.nickname ? a.nickname + (a.mask ? " - " + a.mask : "") : (a.name || "") + (a.mask && !String(a.name).includes(a.mask) ? " ••" + a.mask : "");
 const today = () => new Date().toISOString().slice(0, 10);
 const addDays = (d, n) => { const x = new Date(d + "T00:00:00Z"); x.setUTCDate(x.getUTCDate() + n); return x.toISOString().slice(0, 10); };
 const ago = (iso) => { const d = Math.round((Date.now() - new Date(iso)) / 36e5); return d < 1 ? "now" : d < 24 ? d + "h ago" : Math.round(d / 24) + "d ago"; };
@@ -997,7 +997,7 @@ async function tabBanks(root, rerender) {
   add(root, h("div", { class: "panel" }, h("h3", {}, "Your banks"),
     h("p", { class: "muted small" }, `Plaid ${b.plaid_configured ? "is set up (" + b.plaid_env + ")" : "is not set up on the connector"}. Sent to Firefly III: ${ff.sent ?? 0}, waiting ${ff.waiting ?? 0}, failed ${ff.failed ?? 0}.` + (ff.awaiting_approval ? ` ${ff.awaiting_approval} account(s) wait for your admin's approval before they are sent.` : "")),
     h("div", { class: "chips" }, h("button", { class: "btn primary", onclick: async () => { try { await openLink(null, rerender); } catch (e) { fail(e); } } }, "Link a bank"),
-      h("button", { class: "btn", onclick: async () => { try { await api("/api/banks/pull", { method: "POST" }); toast("Banks pulled. Firefly III and Coinpile update in a moment."); setTimeout(rerender, 4000); } catch (e) { fail(e); } } }, "Pull my banks now")),
+      h("button", { class: "btn", onclick: async (e) => { const btn = e.target; btn.disabled = true; try { const r = await api("/api/banks/pull", { method: "POST" }); toast(r.read_error ? `Banks pulled; could not read Firefly III back: ${r.read_error}` : `Banks pulled: ${r.accounts} accounts, ${r.transactions} transactions, up to date now`); rerender(); } catch (err) { fail(err); } finally { btn.disabled = false; } } }, "Pull my banks now")),
     b.items.length ? h("div", { style: "margin-top:12px;display:grid;gap:10px" }, b.items.map((it) => h("div", { class: "card" },
       h("div", { class: "bar" }, h("b", {}, it.institution || "Bank"), h("span", { class: "small muted" }, it.status ? h("span", { class: "pill r" }, it.status === "error" ? "sign in again" : it.status) : null, it.webhook_live ? h("span", { class: "pill t" }, "live updates") : null, ` ${it.last_sync ? "last checked " + ago(new Date(it.last_sync * 1000).toISOString()) : "not checked yet"}`)),
       h("div", { class: "small muted" }, it.accounts.map((a) => a.name + (a.mask ? " ••" + a.mask : "")).join(", ")),
