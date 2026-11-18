@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from fastapi import HTTPException, Request
 from coinpile.strict import BaseModel
 
-from coinpile import plaidplan, feed, ledger, recur, sync
+import httpx
+
+from coinpile import aicat, plaidplan, feed, ledger, recur, settings as cfg, sync
 
 
 SAVINGS_KINDS = ("savings", "cd", "money_market", "bond", "hsa", "529", "cash", "other")
@@ -436,8 +438,16 @@ def register(app, ctx):
 
     @app.post("/api/categories/recategorize")
     def recategorize(request: Request):
+        """Rules again over everything not set by hand; then, when AI categories are switched on, one AI pass over what is still on Income/Misc."""
         auth(request)
-        return {"changed": ledger.recategorize(store)}
+        out = {"changed": ledger.recategorize(store)}
+        if cfg.get(store, "ai_categorize") == "on":
+            from coinpile.agent import ModelError
+            try:
+                out["ai"] = aicat.run(store, getattr(ctx, "llm_transport", None))
+            except (httpx.HTTPError, httpx.InvalidURL, ModelError) as e:
+                out["ai"] = {"error": f"the model could not be asked ({type(e).__name__}); the rules still ran"}
+        return out
 
     # ------------------------------------------------------------ subscriptions
     def check_sub(s: Sub, before_currency: str | None = None) -> tuple[int, str]:
