@@ -56,6 +56,7 @@ main.free>.blk{grid-column:span var(--span,12)}
 .kpi .label{font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .kpi .value{white-space:nowrap;font:500 1.9rem var(--mono);font-variant-numeric:tabular-nums;margin-top:2px}
 .kpi .sub{font-size:.85rem;color:var(--muted)}
+a.kpi.link{display:block;color:inherit;text-decoration:none;cursor:pointer}a.kpi.link:hover,a.kpi.link:focus-visible{outline:2px solid var(--accent,#17766b);outline-offset:-2px}a.kpi.link:hover .label{text-decoration:underline}
 .pos{color:var(--teal)} .neg{color:var(--red)}
 .comp{display:flex;height:14px;border-radius:7px;overflow:hidden;background:var(--line);margin:10px 0 8px}
 .comp i{display:block;height:100%}
@@ -240,7 +241,10 @@ function filterTx(all, P) {
 
 /* ---------- shared bits ---------- */
 const KIND = { cash: ["Cash", "var(--teal)"], investment: ["Investments", "var(--brass)"], credit: ["Credit owed", "var(--red)"], loan: ["Loans", "#8a5a7a"], "savings (manual)": ["Savings (manual)", "#4a6fa5"] };
-const kpi = (label, value, sub, cls) => h("div", { class: "panel kpi" }, h("div", { class: "label" }, label), h("div", { class: "value " + (cls || "") }, value), h("div", { class: "sub" }, sub));
+/* A key number. With `to` (a tab id) the whole tile is a link to that page. */
+const goTab = (id) => { S.tab = id; S.acct = null; S.edit = null; location.hash = id; render(); window.scrollTo(0, 0); };
+const kpi = (label, value, sub, cls, to) => h(to ? "a" : "div", { class: "panel kpi" + (to ? " link" : ""), ...(to ? { href: "#" + to, title: "Open " + ((TABS.find((t) => t[0] === to) || [])[1] || to), onclick: (e) => { if (e.ctrlKey || e.metaKey || e.shiftKey || e.button) return; e.preventDefault(); goTab(to); } } : {}) },
+  h("div", { class: "label" }, label), h("div", { class: "value " + (cls || "") }, value), h("div", { class: "sub" }, sub));
 const field = (id, label, value, o = {}) => h("label", {}, label, h("input", { id, value: value ?? "", autocomplete: "off", ...o }));
 const select = (id, label, options, value, o = {}) => h("label", {}, label, h("select", { id, ...o }, options.map(([v, t]) => h("option", { value: v, selected: String(v) === String(value ?? "") }, t))));
 const val = (id, root = document) => $("#" + id, root)?.value.trim();
@@ -300,8 +304,8 @@ async function viewOverview(root, rerender) {
   const setDays = (d) => { S.days = Math.min(Math.max(parseInt(d) || 30, 1), 3650); store.set("gb_days", S.days); rerender(); };
   add(root, 
     o.alerts.length ? h("div", { class: "panel wide" }, h("h3", {}, "Needs attention"), h("div", { class: "alerts" }, o.alerts.slice(0, 6).map(alertRow))) : null,
-    h("div", { class: "grid wide", "data-title": "Key numbers" }, kpi("Net worth", usd(o.net_worth), o.savings_total ? `savings ${usd(o.savings_total)}, ${usd(o.savings_free)} free` : `${o.accounts.length} accounts`), kpi("Owed on cards", usd(owed), "Credit + loans", "neg"),
-      kpi("Subscriptions / month", usd(o.subscriptions_monthly), usd(o.subscriptions_monthly * 12) + " a year"), kpi(`Bills, next ${up.days} days`, usd(up.total), `${up.count} payments${up.others_total ? " · others pay " + usd(up.others_total) : ""}`)),
+    h("div", { class: "grid wide", "data-title": "Key numbers" }, kpi("Net worth", usd(o.net_worth), o.savings_total ? `savings ${usd(o.savings_total)}, ${usd(o.savings_free)} free` : `${o.accounts.length} accounts`, "", "accounts"), kpi("Owed on cards", usd(owed), "Credit + loans", "neg", "accounts"),
+      kpi("Subscriptions / month", usd(o.subscriptions_monthly), usd(o.subscriptions_monthly * 12) + " a year", "", "subs"), kpi(`Bills, next ${up.days} days`, usd(up.total), `${up.count} payments${up.others_total ? " · others pay " + usd(up.others_total) : ""}`, "", "subs")),
     pinnedPanel(allAcc, rerender),
     h("div", { class: "panel wide" }, h("div", { class: "bar" }, h("h3", {}, "Net worth" + (hist.length ? ` since ${hist[0].date}` : ""))), spark(hist)),
     h("div", { class: "panel" }, h("h3", {}, "Where the money sits"), h("div", { class: "comp" }, Object.entries(o.by_kind).map(([k, v]) => h("i", { style: `width:${(Math.abs(v) / gross) * 100}%;background:${(KIND[k] || ["", "var(--muted)"])[1]}`, title: `${(KIND[k] || [k])[0]} ${usd(v)}` }))),
