@@ -832,7 +832,7 @@ async function viewAgent(root, rerender) {
 }
 /* A change the agent asked for: exactly what will happen, where, and Yes / No. Nothing happens before Yes. */
 function actionCard(a, after) {
-  const where = a.target === "firefly" ? h("span", { class: "pill b", title: "This changes your Firefly III" }, "Firefly III") : h("span", { class: "pill t", title: "Kept in Coinpile only" }, "Coinpile");
+  const where = a.target === "firefly" ? h("span", { class: "pill b", title: "This changes your Firefly III" }, "Firefly III") : a.target === "connector" ? h("span", { class: "pill b", title: "The Plaid connector pulls your bank and sends what changed to Firefly III" }, "Bank connector") : h("span", { class: "pill t", title: "Kept in Coinpile only" }, "Coinpile");
   const state = { asked: null, running: "working…", done: "✓ done", declined: "✗ you said no", failed: "✗ failed" }[a.status];
   const decide = (yes) => async (e) => { e.target.closest(".action").querySelectorAll("button").forEach((b) => (b.disabled = true));
     try { const r = await api(`/api/agent/actions/${a.id}/${yes ? "yes" : "no"}`, { method: "POST" }); if (r.status === "failed") toast("It did not work: " + (r.result?.error || "")); after(); } catch (err) { fail(err); after(); } };
@@ -1120,7 +1120,7 @@ function modelForm(D, edit, rerender) {
 }
 
 async function tabCategories(root, rerender) {
-  const [cats, rules] = await Promise.all([api("/api/categories"), api("/api/category-rules")]);
+  const [cats, rules, cfg] = await Promise.all([api("/api/categories"), api("/api/category-rules"), api("/api/settings")]);
   add(root, h("div", { class: "panel" }, h("h3", {}, "Categories"), h("p", { class: "muted small" }, "Each category carries a tag. Tag it 'Not counted' (like Transfer or Investing) to keep it out of spending totals, budgets and charts."),
     h("div", { class: "scroll" }, h("table", {}, h("tbody", {}, cats.map((c) => h("tr", {}, h("td", {}, c.name, c.builtin ? null : h("span", { class: "pill" }, "yours")),
       h("td", {}, h("select", { class: "bare", "aria-label": "Tag for " + c.name, onchange: async (e) => { try { await api("/api/categories/" + encodeURIComponent(c.name), send("PUT", { kind: e.target.value })); toast("Tag saved"); } catch (err) { fail(err); } } },
@@ -1128,9 +1128,13 @@ async function tabCategories(root, rerender) {
       h("td", { class: "r" }, c.builtin ? null : h("button", { class: "btn sm danger", onclick: sure(null, "Sure?", async () => { try { await api("/api/categories/" + encodeURIComponent(c.name), { method: "DELETE" }); rerender(); } catch (e) { fail(e); } }) }, "Delete"))))))),
     h("form", { class: "row", style: "margin-top:12px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/categories", send("POST", { name: val("cn-name"), kind: val("cn-kind") })); rerender(); } catch (err) { fail(err); } } },
       field("cn-name", "New category", "", { required: true, maxlength: 30 }), select("cn-kind", "Tag", [["expense", "Spending"], ["income", "Income"], ["transfer", "Not counted"]], "expense"), h("button", { class: "btn primary", type: "submit" }, "Add"))),
-    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Automatic rules"), h("button", { class: "btn sm", onclick: async () => { const r = await api("/api/categories/recategorize", { method: "POST" }); toast(`${r.changed} updated`); } }, "Re-run on all")),
+    h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Automatic rules"), h("button", { class: "btn sm", onclick: async () => { try { const r = await api("/api/categories/recategorize", { method: "POST" }); toast(`${r.changed} updated by rules` + (r.ai ? (r.ai.error ? ` · AI: ${r.ai.error}` : r.ai.skipped ? ` · AI: ${r.ai.skipped}` : ` · AI placed ${r.ai.set} of ${r.ai.asked}`) : "")); rerender(); } catch (e) { fail(e); } } }, "Re-run on all")),
       h("p", { class: "muted small" }, "Created when you change a category with 'remember for similar payments' ticked on the Money movement page. Payments you set by hand are never overwritten."),
-      rules.length ? rules.map((r) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto" }, h("span", { class: "mono" }, `"${r.pattern}"`), h("span", { class: "pill b" }, r.category), h("button", { class: "btn sm", onclick: async () => { await api("/api/category-rules/" + r.id, { method: "DELETE" }); rerender(); } }, "Delete"))) : h("p", { class: "muted" }, "No rules yet.")));
+      rules.length ? rules.map((r) => h("div", { class: "ev", style: "grid-template-columns:1fr auto auto" }, h("span", { class: "mono" }, `"${r.pattern}"`), h("span", { class: "pill b" }, r.category), h("button", { class: "btn sm", onclick: async () => { await api("/api/category-rules/" + r.id, { method: "DELETE" }); rerender(); } }, "Delete"))) : h("p", { class: "muted" }, "No rules yet.")),
+    h("div", { class: "panel" }, h("h3", {}, "AI categories"),
+      h("p", { class: "muted small" }, "For payments no rule, bank category or keyword could place (they would stay Misc or Income), Coinpile can ask your chat model. Many go in one message, with your category names; an answer that is not one of them is thrown away. A payment you or Firefly III already categorized is never touched, and nothing is sent to Firefly III. The model sees the description, payee and amount. Each run costs model calls; a cloud model is only used if you ticked 'allow cloud' on it (Settings, Models)."),
+      h("label", { class: "check" }, h("input", { type: "checkbox", id: "ai-cat", checked: cfg.ai_categorize === "on", onchange: (e) => saveCfg({ ai_categorize: e.target.checked ? "on" : "off" }, rerender) }), "Use AI for payments the rules cannot place (when you press Re-run on all)"),
+      h("label", { class: "check" }, h("input", { type: "checkbox", id: "ai-auto", checked: cfg.ai_categorize_auto === "on", disabled: cfg.ai_categorize !== "on", onchange: (e) => saveCfg({ ai_categorize_auto: e.target.checked ? "on" : "off" }, rerender) }), "Auto-categorize new entries: after each read from Firefly III, only the payments that just arrived (at most 80 a time)")));
 }
 async function tabGeneral(root, rerender) {
   const mode = store.get("gb_mode") || "system", pal = PALETTES[store.get("gb_palette")] ? store.get("gb_palette") : "teal";

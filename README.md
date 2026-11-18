@@ -168,6 +168,23 @@ Then open `http://<unraid address>:8190`.
 
 See [docker-compose.example.yml](docker-compose.example.yml).
 
+## The agent and your bank connector
+
+When a Plaid connector is set up (Settings, Banks), the agent can look at what is wrong there with **bank_problems**: banks that need
+signing in again, a last pull that failed (with Plaid's error), accounts whose Firefly III balance is not the bank's, batches the
+connector held back from Firefly III, and accounts that look duplicated. It can then ask to **pull a bank** (quick, or full, which Plaid
+bills) or to **match a balance** in Firefly III (the opening balance moves; no transaction is added). Both wait for your Yes. Signing in
+to a bank again, approving accounts and releasing a held batch stay with you or the connector's admin.
+
+## AI categories (optional, off by default)
+
+Payments no rule, bank category or keyword could place stay on Misc (or Income). In Categories, **AI categories** lets your chat model
+suggest one: many payments go in one message with your exact category names, and an answer that is not one of them is thrown away.
+A payment already categorized in Firefly III, or set by hand in Coinpile, is never touched, and nothing is sent to Firefly III: the
+guess shows in Coinpile and lasts until a category is set in Firefly III. The model sees the description, payee and amount; a cloud
+model is used only if you ticked "allow cloud" on it. **Re-run on all** asks about everything still on Misc/Income;
+**Auto-categorize new entries** asks only about payments that just arrived, after each read from Firefly III (at most 80 a time).
+
 ## Sign in
 
 Coinpile has no passwords of its own: you sign in with your Firefly III account. Every Firefly III user on that Firefly III gets their own Coinpile, kept apart.

@@ -237,7 +237,8 @@ def tx_rows(group: dict, mine, primary: str | None = None) -> list[dict]:
             amt, cur, nat, ncur = _leg_money(s, cur_of(aid), primary)
             out.append({**base, "id": f"ff:{jid}" + (suffix if both else ""), "account_id": f"ff:{aid}", "amount": sign * amt, "currency": cur or "USD",
                         "native_amount": sign * nat if nat is not None else None, "native_currency": ncur,
-                        "name": s.get("description") or s.get(fallback) or "", "category": cat, "payee": (s.get(fallback) or None)})
+                        "name": s.get("description") or s.get(fallback) or "", "category": cat, "payee": (s.get(fallback) or None),
+                        "uncat": int(own_cat is None and cat in ("Misc", "Income"))})           # Firefly III has no category on it: an AI guess may stand in
     return out
 
 
@@ -261,13 +262,14 @@ def sync_transactions(db, ff: Firefly, accounts: dict, start: date | None, end: 
                     continue                                 # a journal without a usable date cannot be placed in any month
                 seen.add(r["id"])
                 cats.setdefault(r["category"], set()).add("in" if r["amount"] > 0 and (r["type"] or "").lower() == "deposit" else "out")
-                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill,tags,budget,payee)
-                             VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?,?,?,?,?,?,?)
+                c.execute("""INSERT INTO transactions(id,account_id,date,name,amount,currency,category,pending,source,category_locked,notes,ff_group,native_amount,native_currency,ff_bill,tags,budget,payee,ff_uncat)
+                             VALUES(?,?,?,?,?,?,?,0,'firefly',1,?,?,?,?,?,?,?,?,?)
                              ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,date=excluded.date,name=excluded.name,amount=excluded.amount,
-                             currency=excluded.currency,category=excluded.category,notes=excluded.notes,ff_group=excluded.ff_group,native_amount=excluded.native_amount,
+                             currency=excluded.currency,category=CASE WHEN excluded.ff_uncat=1 AND transactions.ai_category IS NOT NULL THEN transactions.ai_category ELSE excluded.category END,
+                             ff_uncat=excluded.ff_uncat,ai_category=CASE WHEN excluded.ff_uncat=1 THEN transactions.ai_category ELSE NULL END,notes=excluded.notes,ff_group=excluded.ff_group,native_amount=excluded.native_amount,
                              native_currency=excluded.native_currency,ff_bill=excluded.ff_bill,tags=excluded.tags,budget=excluded.budget,payee=excluded.payee""",
                           (r["id"], r["account_id"], r["date"], r["name"][:255], r["amount"], r["currency"], r["category"], r["notes"], r["group"],
-                           r["native_amount"], r["native_currency"], r["bill"], r["tags"], r["budget"], r["payee"]))
+                           r["native_amount"], r["native_currency"], r["bill"], r["tags"], r["budget"], r["payee"], r["uncat"]))
                 if r["id"] not in known and r["date"] >= recent:          # new and recent: it goes in the "latest movement" list and the feed
                     inst = (accounts.get(r["account_id"][3:]) or {}).get("institution", "")
                     c.execute("INSERT OR IGNORE INTO events VALUES(?,?,?,?,?,?,?)", (f"tx:{r['id']}", f"{r['date']}T00:00:00+00:00", "transaction",

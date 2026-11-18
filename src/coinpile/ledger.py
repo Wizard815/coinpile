@@ -39,6 +39,11 @@ KEYWORDS = {  # last-resort guesses for payees with no bank category (CSV import
 
 
 def categorize(db, name: str, amount: float, plaid_cat: str | None = None, account_kind: str | None = None) -> str:
+    return rule_category(db, name, amount, plaid_cat, account_kind) or ("Income" if amount > 0 else "Misc")
+
+
+def rule_category(db, name: str, amount: float, plaid_cat: str | None = None, account_kind: str | None = None) -> str | None:
+    """What your rules, the bank's category or the keyword list say; None when nothing matched (categorize() then falls back to Income or Misc)."""
     low = (name or "").lower()
     for r in db.all("SELECT pattern, category FROM category_rules ORDER BY length(pattern) DESC"):
         if r["pattern"].lower() in low:
@@ -59,7 +64,7 @@ def categorize(db, name: str, amount: float, plaid_cat: str | None = None, accou
     for cat, words in KEYWORDS.items():
         if any(w in low for w in words) and (cat == "Income") == (amount > 0 or cat == "Income" and "refund" in low):
             return cat
-    return "Income" if amount > 0 else "Misc"
+    return None
 
 
 def set_category(db, tx_id: str, category: str, make_rule: bool = False) -> dict:
@@ -79,10 +84,10 @@ def set_category(db, tx_id: str, category: str, make_rule: bool = False) -> dict
 
 
 def recategorize(db) -> int:
-    """Re-run rules over every transaction the user has not set by hand."""
+    """Re-run rules over every transaction the user has not set by hand. Where no rule matches, an AI guess made earlier (ai_category) stands in for the bare Income/Misc."""
     n = 0
-    for t in db.all("SELECT id, name, amount, plaid_category, category FROM transactions WHERE category_locked=0"):
-        new = categorize(db, t["name"], t["amount"], t["plaid_category"])
+    for t in db.all("SELECT id, name, amount, plaid_category, category, ai_category FROM transactions WHERE category_locked=0"):
+        new = rule_category(db, t["name"], t["amount"], t["plaid_category"]) or t["ai_category"] or ("Income" if t["amount"] > 0 else "Misc")
         if new != t["category"]:
             with db.tx() as c:
                 c.execute("UPDATE transactions SET category=? WHERE id=?", (new, t["id"]))
