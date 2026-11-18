@@ -327,7 +327,7 @@ async function txBrowser(root, fixed = {}, accounts = null) {
   const F = { q: "", account_id: fixed.account_id || "", category: "", direction: "", min_amount: "", max_amount: "", start: "", end: "", sort: "date_desc", offset: 0 };
   let remember = false;
   const out = h("div", {}), list = h("div", {}), foot = h("div", { class: "bar" });
-  const rangeBtn = (label, s, e) => h("button", { class: "chip", type: "button", onclick: () => { F.start = s; F.end = e; if ($("#f-start", out)) { $("#f-start", out).value = s; $("#f-end", out).value = e; } F.offset = 0; load(); } }, label);
+  const rangeBtn = (label, s, e) => h("button", { class: "chip", type: "button", onclick: () => { F.start = s; F.end = e; if ($("#f-start")) { $("#f-start").value = s; $("#f-end").value = e; } F.offset = 0; load(); } }, label);
   const t = new Date(), ymd = (d) => d.toISOString().slice(0, 10);
   const bind = (id, key) => ({ id, onchange: (e) => { F[key] = e.target.value; F.offset = 0; load(); } });
   let seq = 0;
@@ -1277,7 +1277,8 @@ function layoutKey() { return "gb_layout_" + S.tab + (S.tab === "settings" ? ":"
 function blocksOf(main) {
   const out = [];
   for (const el of [...main.children].slice(1)) {                          // child 0 is the title bar
-    if (!el.classList.length && el.children.length > 1 && [...el.children].every((c) => c.classList.contains("panel"))) out.push(...el.children); else out.push(el);
+    if (!el.classList.length && el.children.length > 1 && [...el.children].every((c) => c.classList.contains("panel"))) { const kids = [...el.children]; el.replaceWith(...kids); out.push(...kids); }      // a plain wrapper of panels: its panels take part in the layout (left inside it, they got one column of twelve)
+    else out.push(el);
   }
   return out;
 }
