@@ -182,9 +182,9 @@ def _db(*accts):
     return db
 
 
-def _tx(db, tid, acct, date, amount, pending=0):
+def _tx(db, tid, acct, date, amount, pending=0, name="ONLINE TRANSFER"):
     with db.tx() as c:
-        c.execute("INSERT INTO transactions(id,account_id,date,name,amount,pending,source) VALUES(?,?,?,?,?,?,'firefly')", (tid, acct, date, tid, amount, pending))
+        c.execute("INSERT INTO transactions(id,account_id,date,name,amount,pending,source) VALUES(?,?,?,?,?,?,'firefly')", (tid, acct, date, name, amount, pending))
 
 
 def test_contributions_count_each_withdrawal_once_and_only_from_my_own_accounts():
@@ -206,6 +206,10 @@ def test_contributions_count_each_withdrawal_once_and_only_from_my_own_accounts(
     _tx(db, "w3", "chk", "2026-11-08", -15, pending=1)
     _tx(db, "d4", "joint", "2026-11-08", 15)               # pending withdrawal: not counted yet
     _tx(db, "d5", "joint", "2026-12-01", 70)               # after the app's today
+    _tx(db, "w6", "chk", "2026-11-09", -100, name="City Electric bill")
+    _tx(db, "d6", "joint", "2026-11-10", 100, name="Deposit")                      # bob's 100; my 100 that week was a bill, not a transfer
+    _tx(db, "w7", "chk", "2026-11-11", -45, name="Zelle payment")
+    _tx(db, "d7", "joint", "2026-11-11", 45, name="Zelle from Bob")                # the deposit says it is bob's
     assert links.contributions(db, "joint", today=date(2026, 11, 14)) == {"2026-11": 60}
     assert links.contributions(db, "joint", months=1, today=date(2026, 12, 2)) == {}                   # November is outside one month
 

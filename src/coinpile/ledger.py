@@ -131,56 +131,74 @@ def query_transactions(db, q=None, account_id=None, category=None, min_amount=No
 
 
 def spending_by_category(db, start=None, end=None) -> list[dict]:
-    """Money out per category. Transfers are excluded so paying a card is not counted as spending twice."""
-    w, a = "t.amount<0 AND c.kind='expense'", []
+    """Money out per category, less what came back into it (a refund takes the purchase back out; a category is never below zero).
+    Transfers are excluded so paying a card is not counted as spending twice."""
+    cw, ca = in_main(db, "t")
+    w, a = f"c.kind='expense' AND {cw}", list(ca)
     if start:
         w += " AND t.date>=?"; a.append(start)
     if end:
         w += " AND t.date<=?"; a.append(end)
-    rows = db.all(f"SELECT t.category, ROUND(-SUM(t.amount),2) spent, COUNT(*) n FROM transactions t JOIN categories c ON c.name=t.category WHERE {w} GROUP BY t.category ORDER BY spent DESC", a)
+    rows = db.all(f"SELECT t.category, ROUND(-SUM(t.amount),2) spent, SUM(t.amount<0) n FROM transactions t JOIN categories c ON c.name=t.category WHERE {w} "
+                  "GROUP BY t.category HAVING -SUM(t.amount) > 0.004 ORDER BY spent DESC", a)
     return rows
 
 
+def grown(balance: float, apy: float | None, days: int) -> float | None:
+    """What a balance is worth after `days` at an APY. APY is the yearly yield with compounding already in it: 5% APY is 5% in a year."""
+    try:
+        return round(balance * (1 + (apy or 0) / 100) ** (days / 365), 2)
+    except (OverflowError, ZeroDivisionError, ValueError):
+        return None                                      # a maturity too far off to mean anything
+
+
 # ------------------------------------------------------------------ subscriptions
-def sub_view(row: dict, today: date) -> dict:
+def not_converted(row: dict, main: str | None) -> str | None:
+    """The currency of a Firefly III bill or recurring transaction that is not in the main currency (Firefly III did not convert it), else None."""
+    cur = row.get("currency")
+    return cur if main and cur and cur != main and row.get("source") in ("firefly", "ff-recurring") else None
+
+
+def sub_view(row: dict, today: date, main: str | None = None) -> dict:
     every, unit = row.get("every") or 1, row.get("unit") or "month"
     stop = d(row["end_date"]) if row.get("end_date") else None
-    nd = recur.next_due(d(row["next_date"]), every, unit, today, stop)
+    nd = recur.next_due(d(row["next_date"]), every, unit, max(today, d(row["next_date"])), stop)          # next_date is the next payment: nothing is due before it
     ended = stop is not None and nd is None                  # past its end date: nothing more to pay
     left = last = None
     if stop is not None:                                     # a set number of payments: how many are still to come, and the last one
-        occ = recur.occurrences(d(row["next_date"]), every, unit, today, stop, stop)
-        left, last = len(occ), (occ[-1].isoformat() if occ else None)
-        if last is None:
-            past = recur.occurrences(d(row["next_date"]), every, unit, d(row["next_date"]), stop, stop)
-            last = past[-1].isoformat() if past else None
+        left, last = recur.count_until(d(row["next_date"]), every, unit, today, stop)
+        last = last.isoformat() if last else None
     total = row.get("plan_total")
-    return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended,
+    other = not_converted(row, main)                         # shown with its own currency, left out of the totals
+    return {**row, "every": every, "unit": unit, "label": recur.label(every, unit), "next_due": nd.isoformat() if nd else None, "ended": ended, "other_currency": other,
             "payments_left": left, "last_payment": last, "payment_no": (total - left + 1) if total and left is not None and 0 < left <= total else None,
-            "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended else 0.0}
+            "monthly": round(recur.monthly_equiv(row["amount"], every, unit), 2) if row.get("active", 1) and (row.get("payer") or "me") == "me" and not ended and not other else 0.0}
 
 
 SUB_SELECT = "SELECT s.*, a.name account_name, a.institution account_institution FROM subscriptions s LEFT JOIN accounts a ON a.id=s.account_id"
 
 
 def subscriptions(db, today: date) -> list[dict]:
-    return [sub_view(s, today) for s in db.all(SUB_SELECT + " ORDER BY s.active DESC, s.name")]
+    main = main_currency(db)
+    return [sub_view(s, today, main) for s in db.all(SUB_SELECT + " ORDER BY s.active DESC, s.name")]
 
 
 def subscription(db, sid: int, today: date) -> dict | None:
     row = db.one(SUB_SELECT + " WHERE s.id=?", (sid,))
-    return sub_view(row, today) if row else None
+    return sub_view(row, today, main_currency(db)) if row else None
 
 
 def upcoming(db, days: int, today: date) -> dict:
     """Every bill falling due in the next `days` days, repeats included (a weekly bill appears each week)."""
     days = max(1, min(int(days), 3650))
     end = today + timedelta(days=days)
-    items = []
+    items, main = [], main_currency(db)
     for s in db.all("SELECT * FROM subscriptions WHERE active=1"):
+        if not_converted(s, main):
+            continue                                         # in another currency, not converted by Firefly III: an alert says it is left out
         every, unit = s["every"] or 1, s["unit"] or "month"
         stop = d(s["end_date"]) if s.get("end_date") else None
-        for occ in recur.occurrences(d(s["next_date"]), every, unit, today, end, stop):
+        for occ in recur.occurrences(d(s["next_date"]), every, unit, max(today, d(s["next_date"])), end, stop):
             items.append({"date": occ.isoformat(), "name": s["name"], "amount": s["amount"], "sub_id": s["id"], "account_id": s["account_id"],
                           "payer": s["payer"] or "me", "payer_name": s["payer_name"] or "", "category": s["category"] or "Subscriptions"})
     items.sort(key=lambda i: (i["date"], i["name"]))
@@ -220,6 +238,8 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
                 continue                                  # still inside the grace window
             if s.get("end_date") and exp > d(s["end_date"]):
                 continue
+            if s["source"] != "firefly" and s.get("created") and exp.isoformat() < min(str(s["created"])[:10], anchor.isoformat()):
+                break                                     # before it was added here and before its first payment date: nothing was expected yet
             if d(first["m"]) > exp - timedelta(days=3) or d(first["x"]) < exp + timedelta(days=grace):
                 break                                     # we do not have data covering that date, so we cannot call it missed
             # A hit is an outflow near the expected date that is EITHER (almost) exactly the bill's amount OR looks like the same payee at a
@@ -241,6 +261,34 @@ def late_payments(db, today: date, grace: int = 3, look_back: int = 3) -> list[d
 
 
 # ------------------------------------------------------------------ joint accounts
+def main_currency(db) -> str | None:
+    """The currency every total is in: Firefly III's primary currency, once it has been read."""
+    return cfg.get(db, "currency") or None
+
+
+def in_main(db, alias: str = "") -> tuple[str, tuple]:
+    """A WHERE clause: only rows in the main currency. Firefly III converts other currencies when its "convert to primary currency" is on;
+    with it off an account or transaction arrives in its own currency, and adding yen to dollars would be wrong. Rows kept in Coinpile only
+    (hand-kept accounts, CSV imports) are always in the main currency."""
+    cur = main_currency(db)
+    p = alias + "." if alias else ""
+    return (f"({p}source != 'firefly' OR {p}currency IS NULL OR {p}currency = ?)", (cur,)) if cur else ("1=1", ())
+
+
+def other_currencies(db) -> list[dict]:
+    """Accounts left out of the totals because Firefly III keeps them in another currency without converting."""
+    cur = main_currency(db)
+    if not cur:
+        return []
+    out = {}
+    for what, sql in (("accounts", "SELECT currency, COUNT(*) n FROM accounts WHERE source='firefly' AND currency IS NOT NULL AND currency != ? GROUP BY currency"),
+                      ("bills", "SELECT currency, COUNT(*) n FROM subscriptions WHERE source IN ('firefly','ff-recurring') AND currency IS NOT NULL AND currency != ? GROUP BY currency"),
+                      ("incomes", "SELECT currency, COUNT(*) n FROM incomes WHERE source='firefly' AND currency IS NOT NULL AND currency != ? GROUP BY currency")):
+        for r in db.all(sql, (cur,)):
+            out.setdefault(r["currency"], {"currency": r["currency"], "accounts": 0, "bills": 0, "incomes": 0})[what] = r["n"]
+    return sorted(out.values(), key=lambda x: x["currency"])
+
+
 def mine(a: dict, bal: float | None = None) -> float:
     """My part of an account's balance. A joint account is linked by both people, so each counts only their share (default all of it)."""
     b = a["balance"] if bal is None else bal
@@ -261,7 +309,7 @@ def savings_view(db, row: dict, today: date) -> dict:
         days = (d(row["maturity"]) - today).days
         out["days_to_maturity"] = days
         if days >= 0:
-            out["value_at_maturity"] = round(bal * (1 + apy / 100 / 365) ** days, 2)
+            out["value_at_maturity"] = grown(bal, apy, days)
     if row.get("goal"):
         out["goal_progress"] = round(min(1.0, bal / row["goal"]), 3) if row["goal"] else None
     return out
@@ -279,7 +327,8 @@ def savings_summary(db, today: date) -> dict:
 # ------------------------------------------------------------------ net worth, projection, alerts
 def net_worth(db, today: date | None = None) -> float:
     total = 0.0
-    for a in db.all("SELECT kind, balance, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0"):     # Firefly III's "include in net worth" off
+    w, wa = in_main(db)
+    for a in db.all(f"SELECT kind, balance, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0 AND {w}", wa):     # Firefly III's "include in net worth" off
         total += mine(a) * (-1 if a["kind"] in OUT_KINDS else 1)
     for s in db.all("SELECT * FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')"):
         total += s["balance"] or 0                       # savings linked to an account are already counted via that account
@@ -289,7 +338,8 @@ def net_worth(db, today: date | None = None) -> float:
 def project_balance(db, days: int, today: date, account_ids: list[str] | None = None, include_income: bool = True) -> dict:
     """Walk forward day by day: start from current cash balances, subtract upcoming bills, add detected steady income."""
     days = max(1, min(int(days), 3650))
-    accts = db.all("SELECT * FROM accounts WHERE kind='cash'" if not account_ids else f"SELECT * FROM accounts WHERE id IN ({','.join('?' * len(account_ids))})", account_ids or [])
+    w, wa = in_main(db)
+    accts = db.all(f"SELECT * FROM accounts WHERE kind='cash' AND coalesce(subtype,'') != 'owed to you' AND {w}" if not account_ids else f"SELECT * FROM accounts WHERE id IN ({','.join('?' * len(account_ids))})", account_ids or list(wa))
     ids = {a["id"] for a in accts}
     start = round(sum(mine(a) for a in accts), 2)
     events = []
@@ -406,6 +456,12 @@ def _alerts(db, today: date) -> list[dict]:
         out.append({"kind": "missed_payment", "severity": "critical" if m["misses"] >= 2 else "warning", "sub_id": m["sub_id"],
                     "title": f"Missing subscription: {m['name']} ({m['amount']:,.2f}) not seen in {m['account']}" + (f", {m['misses']} times in a row" if m["misses"] > 1 else ""),
                     "detail": "Expected " + ", ".join(m["missed_dates"]) + ". Paid another way, or cancelled? Update or pause it in Subscriptions."})
+    for oc in other_currencies(db):
+        out.append({"kind": "other_currency", "severity": "info", "key": f"other_currency:{oc['currency']}",
+                    "title": ", ".join(f"{oc[k]} {w}{'s' if oc[k] != 1 else ''}" for k, w in (("accounts", "account"), ("bills", "bill"), ("incomes", "income")) if oc[k])
+                             + f" in {oc['currency']}: not in your totals",
+                    "detail": f"Firefly III is not converting {oc['currency']} to {main_currency(db)}, so net worth, spending and forecasts leave it out. "
+                              "Switch on \"convert to primary currency\" in Firefly III (Preferences) to include it."})
     from coinpile import plan                       # imported here: plan builds on this module
     gv = plan.goals_view(db, today)
     if gv["overallocated"]:
@@ -414,7 +470,7 @@ def _alerts(db, today: date) -> list[dict]:
     elif gv["free"] >= 50 and any(g["status"] == "active" and g.get("shared_state") != "offered" and g["shortfall"] > 0 for g in gv["items"]):
         top = next(g for g in gv["items"] if g["status"] == "active" and g.get("shared_state") != "offered" and g["shortfall"] > 0)
         out.append({"kind": "free_savings", "severity": "info", "title": f"${gv['free']:,.2f} of your savings is free",
-                    "detail": f"{top['name']} still needs ${top['shortfall']:,.2f}"})
+                    "detail": f"{top['name']} is not fully funded yet" if top.get("shared_id") else f"{top['name']} still needs ${top['shortfall']:,.2f}"})
     try:
         warn_days = int(float(cfg.get(db, "alert_maturity_days") or 30))   # how early to warn; 0 turns it off
     except ValueError:
@@ -422,7 +478,7 @@ def _alerts(db, today: date) -> list[dict]:
     if warn_days > 0:
         for m in plan.maturity_outlook(db, today, warn_days):
             where = (" → " + ", then ".join(f"{x['goal']} {x['amount']:,.2f}" for x in m["suggestions"])) if m["suggestions"] else ""
-            out.append({"kind": "maturing", "severity": "warning" if m["days"] <= 7 else "info", "date": m["maturity"],
+            out.append({"kind": "maturing", "severity": "warning" if m["days"] <= 7 else "info", "date": m["maturity"], "key": f"maturing:{m.get('key') or m['name']}:{m['maturity']}",
                         "title": f"{m['name']} matures " + ("today" if m["days"] == 0 else f"in {m['days']} day{'s' if m['days'] != 1 else ''} ({m['maturity']})"),
                         "detail": f"Worth about {m['value_at_maturity']:,.2f}; {m['free_at_maturity']:,.2f} free{where}. {m['advice']}"})
     for m in plan.matured_idle(db, today):
@@ -452,7 +508,8 @@ def budget_status(db, month: str, today: date) -> list[dict]:
 
 
 def overview(db, days: int, today: date) -> dict:
-    accts = db.all("SELECT * FROM accounts")
+    w, wa = in_main(db)
+    accts = db.all(f"SELECT * FROM accounts WHERE {w}", wa)
     by_kind = {}
     from coinpile import investments
     for a in accts:
@@ -466,7 +523,7 @@ def overview(db, days: int, today: date) -> dict:
         by_kind["savings (manual)"] = round(unlinked, 2)
     up = upcoming(db, days, today)
     subs = db.all("SELECT * FROM subscriptions WHERE active=1")
-    monthly = sum(sub_view(s, today)["monthly"] for s in subs)
+    monthly = sum(sub_view(s, today, main_currency(db))["monthly"] for s in subs)
     return {"net_worth": net_worth(db), "currency": cfg.get(db, "currency") or "USD", "by_kind": by_kind, "accounts": accts, "subscriptions_monthly": round(monthly, 2), "upcoming": up,
             "events": db.all("SELECT * FROM events ORDER BY ts DESC LIMIT 10"), "alerts": alerts(db, today), "savings_total": gv["total"], "savings_free": gv["free"], "goals_needed": gv["needed"]}
 
@@ -497,10 +554,11 @@ def spending_forecast(db, today: date, months: int = 6) -> dict:
     hist = _months_back(today, months)
     this = today.strftime("%Y-%m")
     first, last_day = date(today.year, today.month, 1), (date(today.year + (today.month == 12), today.month % 12 + 1, 1) - timedelta(days=1))
-    rows = db.all("SELECT substr(t.date,1,7) m, t.category, ROUND(-SUM(t.amount),2) spent, COUNT(*) n FROM transactions t JOIN categories c ON c.name=t.category "
-                  "WHERE t.amount<0 AND c.kind='expense' AND t.date >= ? AND t.date <= ? GROUP BY m, t.category", (hist[0] + "-01", last_day.isoformat()))
+    cw, ca = in_main(db, "t")                                     # refunds come back out of their category; other currencies stay out
+    rows = db.all("SELECT substr(t.date,1,7) m, t.category, ROUND(-SUM(t.amount),2) spent, SUM(t.amount<0) n FROM transactions t JOIN categories c ON c.name=t.category "
+                  f"WHERE c.kind='expense' AND {cw} AND t.date >= ? AND t.date <= ? GROUP BY m, t.category HAVING -SUM(t.amount) > 0.004", (*ca, hist[0] + "-01", last_day.isoformat()))
     inc_rows = db.all("SELECT substr(t.date,1,7) m, ROUND(SUM(t.amount),2) income FROM transactions t JOIN categories c ON c.name=t.category "
-                      "WHERE t.amount>0 AND c.kind='income' AND t.date >= ? AND t.date <= ? GROUP BY m", (hist[0] + "-01", last_day.isoformat()))
+                      f"WHERE t.amount>0 AND c.kind='income' AND {cw} AND t.date >= ? AND t.date <= ? GROUP BY m", (*ca, hist[0] + "-01", last_day.isoformat()))
     any_tx = {r["m"] for r in db.all("SELECT DISTINCT substr(date,1,7) m FROM transactions WHERE date >= ?", (hist[0] + "-01",))}
     with_data = [m for m in hist if m in any_tx]                      # a month with no transactions at all is missing data, not a month of zero spending
     by = {}
@@ -557,7 +615,8 @@ def spending_forecast(db, today: date, months: int = 6) -> dict:
 def net_worth_history(store) -> list[dict]:
     """Daily net worth built from balance snapshots read from Firefly III (last known balance carried forward)."""
     # Only accounts that count today (as net worth does): a removed account, or one left out of net worth in Firefly III, must not be carried forward.
-    accts = {a["id"]: a for a in store.all("SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0")}
+    w, wa = in_main(store)
+    accts = {a["id"]: a for a in store.all(f"SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0 AND {w}", wa)}
     sign = {"credit": -1, "loan": -1}
     last, by_day = {}, {}
     for r in store.all("SELECT * FROM snapshots ORDER BY ts"):
@@ -573,14 +632,18 @@ def net_worth_history(store) -> list[dict]:
 
 
 def daily_totals(db, today: date, days: int = 31) -> list[dict]:
-    """Spent and income per day, newest first, for the last `days` days (today included). Totals only.
-    Spent is money out (a positive number), income is money in; transfers between your own accounts count as neither,
-    and pending transactions wait until they post (the same rules as the weekly brief)."""
+    """Spent, income and refunds per day, newest first, for the last `days` days (today included). Totals only.
+    Spent is money out (a positive number); income is money in under an income category; money coming back into a spending category
+    (a return) is a refund, not income. Transfers between your own accounts count as none of these, and pending transactions wait
+    until they post (the same rules as the weekly brief)."""
     days = max(1, min(int(days), 92))
     start = today - timedelta(days=days - 1)
-    rows = db.all("SELECT t.date d, ROUND(-SUM(CASE WHEN t.amount<0 THEN t.amount ELSE 0 END),2) spent, ROUND(SUM(CASE WHEN t.amount>0 THEN t.amount ELSE 0 END),2) income "
-                  "FROM transactions t LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN ? AND ? AND t.pending=0 AND coalesce(c.kind,'expense')!='transfer' GROUP BY t.date",
-                  (start.isoformat(), today.isoformat()))
+    cw, ca = in_main(db, "t")
+    rows = db.all("SELECT t.date d, ROUND(-SUM(CASE WHEN t.amount<0 THEN t.amount ELSE 0 END),2) spent, "
+                  "ROUND(SUM(CASE WHEN t.amount>0 AND coalesce(c.kind,'expense')='income' THEN t.amount ELSE 0 END),2) income, "
+                  "ROUND(SUM(CASE WHEN t.amount>0 AND coalesce(c.kind,'expense')!='income' THEN t.amount ELSE 0 END),2) refunds "
+                  f"FROM transactions t LEFT JOIN categories c ON c.name=t.category WHERE t.date BETWEEN ? AND ? AND t.pending=0 AND coalesce(c.kind,'expense')!='transfer' AND {cw} GROUP BY t.date",
+                  (start.isoformat(), today.isoformat(), *ca))
     by = {r["d"][:10]: r for r in rows}
-    return [{"date": d, "spent": (by[d]["spent"] or 0.0) if d in by else 0.0, "income": (by[d]["income"] or 0.0) if d in by else 0.0}
+    return [{"date": d, "spent": (by[d]["spent"] or 0.0) if d in by else 0.0, "income": (by[d]["income"] or 0.0) if d in by else 0.0, "refunds": (by[d]["refunds"] or 0.0) if d in by else 0.0}
             for d in ((today - timedelta(days=k)).isoformat() for k in range(days))]

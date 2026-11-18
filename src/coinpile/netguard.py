@@ -17,15 +17,22 @@ class Blocked(httpx.HTTPError):
     pass
 
 
-def bad_ip(ip: str) -> bool:
+METADATA = {ipaddress.ip_address(x) for x in ("100.100.100.200", "192.0.0.192", "168.63.129.16", "fd00:ec2::254")}     # cloud metadata services outside 169.254/16
+
+
+def bad_ip(ip: str, public_only: bool = False) -> bool:
+    """public_only is for addresses that came from the internet (a page a web search found, its redirects): those may only lead to the
+    public internet, never into the home network. Addresses a person typed may be on the home network."""
     try:
         a = ipaddress.ip_address(ip)
     except ValueError:
         return False
     if getattr(a, "ipv4_mapped", None):
         a = a.ipv4_mapped
+    if public_only:
+        return not a.is_global or a in METADATA
     loop = a.is_loopback or a.is_unspecified
-    return a.is_link_local or a.is_multicast or a.is_reserved or (loop and os.environ.get("ALLOW_LOOPBACK_URLS") != "1")
+    return a in METADATA or a.is_link_local or a.is_multicast or a.is_reserved or (loop and os.environ.get("ALLOW_LOOPBACK_URLS") != "1")
 
 
 def _resolve(host: str, port: int | None) -> list[str]:
@@ -33,13 +40,15 @@ def _resolve(host: str, port: int | None) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
 
 
-def check(url: str, resolve: bool = True) -> None:
+def check(url: str, resolve: bool = True, public_only: bool = False) -> None:
     host = (urlparse(url).hostname or "").strip("[]").lower()
     if not host:
         raise Blocked("that address has no host")
     if host in ("metadata.google.internal", "metadata") or ((host == "localhost" or host.endswith(".localhost")) and os.environ.get("ALLOW_LOOPBACK_URLS") != "1"):
         raise Blocked(f"{host} is not allowed here")
-    if bad_ip(host):
+    if public_only and (host == "localhost" or host.endswith((".localhost", ".local", ".lan", ".internal", ".home.arpa")) or "." not in host and not _is_ip(host)):
+        raise Blocked(f"{host} is not on the public internet")
+    if bad_ip(host, public_only):
         raise Blocked(f"{host} is not allowed here (the server itself or a link-local address)")
     if not resolve:
         return
@@ -48,7 +57,7 @@ def check(url: str, resolve: bool = True) -> None:
     except socket.gaierror:
         return                                    # not resolvable: the request fails by itself
     for ip in ips:
-        if bad_ip(ip):
+        if bad_ip(ip, public_only):
             raise Blocked(f"{host} points at the server itself or a link-local address")
 
 
@@ -59,6 +68,10 @@ class _CheckedBackend(httpcore.SyncBackend):
     second (DNS rebinding) would get through. httpcore still uses the hostname from the URL for the TLS server name (SNI) and certificate check,
     and httpx sends it in the Host header, so only the address that is dialled changes."""
 
+    def __init__(self, public_only: bool = False):
+        super().__init__()
+        self.public_only = public_only
+
     def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
         name = host.strip("[]")
         try:
@@ -66,8 +79,8 @@ class _CheckedBackend(httpcore.SyncBackend):
         except socket.gaierror as e:
             raise httpcore.ConnectError(f"could not resolve {name}: {e}")
         for ip in ips:
-            if bad_ip(ip):
-                raise Blocked(f"{name} points at the server itself or a link-local address")
+            if bad_ip(ip, self.public_only):
+                raise Blocked(f"{name} points at " + ("an address that is not on the public internet" if self.public_only else "the server itself or a link-local address"))
         last: Exception | None = None
         for ip in dict.fromkeys(ips):
             try:
@@ -85,14 +98,14 @@ def _is_ip(s: str) -> bool:
         return False
 
 
-def guarded_transport(**kw) -> httpx.HTTPTransport:
+def guarded_transport(public_only: bool = False, **kw) -> httpx.HTTPTransport:
     """httpx's own transport, dialling through _CheckedBackend. Note: it never uses HTTP(S)_PROXY from the environment (a proxy would do its own
     DNS lookup, which could not be checked)."""
     t = httpx.HTTPTransport(**kw)
     pool = t._pool
     if not hasattr(pool, "_network_backend"):                 # an httpcore that changed shape: refuse rather than silently go unguarded
         raise RuntimeError("this httpcore version cannot be guarded against DNS rebinding")
-    pool._network_backend = _CheckedBackend()
+    pool._network_backend = _CheckedBackend(public_only)
     return t
 
 
@@ -100,12 +113,16 @@ def _hook(request: httpx.Request) -> None:
     check(str(request.url), resolve=False)        # names and literal addresses; the DNS answer is checked when connecting (_CheckedBackend)
 
 
-def client(transport=None, **kw) -> httpx.Client:
+def _hook_public(request: httpx.Request) -> None:
+    check(str(request.url), resolve=False, public_only=True)
+
+
+def client(transport=None, public_only: bool = False, **kw) -> httpx.Client:
     """An httpx client for addresses a person typed. Every request (redirects too) is checked, and the connection goes to the very address that
     was checked. Tests with a stand-in transport skip both checks."""
     if transport is not None:
         return httpx.Client(transport=transport, **kw)
-    return httpx.Client(transport=guarded_transport(), event_hooks={"request": [_hook]}, **kw)
+    return httpx.Client(transport=guarded_transport(public_only), event_hooks={"request": [_hook_public if public_only else _hook]}, **kw)
 
 
 # ---------------------------------------------------------------- how many slow outbound calls one person may have at once

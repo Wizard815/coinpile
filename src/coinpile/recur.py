@@ -61,10 +61,26 @@ def occurrences(anchor: date, every: int, unit: str, start: date, end: date, sto
     out, k = [], first_k_on_or_after(anchor, every, unit, start)
     while True:
         d = shift(anchor, every, unit, k)
-        if d > end or (stop and d > stop):
-            return out
+        if d > end or (stop and d > stop) or d == date.max or len(out) >= MAX_DATES:
+            return out                                   # the last two: the calendar ran out (year 9999), or a range nobody can read anyway
         out.append(d)
         k += 1
+
+
+MAX_DATES = 5000
+
+
+def count_until(anchor: date, every: int, unit: str, start: date, stop: date) -> tuple[int, date | None]:
+    """How many occurrences fall in [start, stop] and the last occurrence on or before stop (None if the series starts after stop),
+    worked out from the interval instead of listing them: an end date in year 9999 costs nothing."""
+    if anchor > stop:
+        return 0, None
+    k0 = max(0, first_k_on_or_after(anchor, every, unit, start))          # the anchor is the next payment: nothing is due before it
+    k1 = first_k_on_or_after(anchor, every, unit, stop)
+    if shift(anchor, every, unit, k1) > stop:
+        k1 -= 1
+    last = shift(anchor, every, unit, k1) if k1 >= 0 else None
+    return max(0, k1 - k0 + 1), last
 
 
 def next_due(anchor: date, every: int, unit: str, today: date, stop: date | None = None) -> date | None:
@@ -112,6 +128,12 @@ def detect(txns: list[dict], today: date, loose: bool = False) -> list[dict]:
     found = []
     for (key, inflow), ts in groups.items():
         ts.sort(key=lambda t: t["date"])
+        if inflow:                                           # two deposits from one payer on one day into one account are one payday
+            merged = {}
+            for t in ts:
+                k = (t["date"], t.get("account_id"))
+                merged[k] = {**t, "amount": round(merged[k]["amount"] + t["amount"], 2)} if k in merged else dict(t)
+            ts = list(merged.values())
         dates = [date.fromisoformat(t["date"]) for t in ts]
         if len(dates) < 2:
             continue

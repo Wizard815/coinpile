@@ -8,6 +8,7 @@ it keeps none of them. If the other side is offline the message waits in an outb
 """
 import hashlib
 import json
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ from datetime import datetime, timezone
 NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 MAX_PENDING = 10
 MAX_NOTES = 200
+MAX_OFFERS = 20            # goals one person may have waiting for my answer
 
 
 class LinkError(ValueError):
@@ -89,19 +91,62 @@ def unlink(db, peer: str, notify: bool = True) -> None:
         c.execute("DELETE FROM shared_in WHERE peer=?", (peer,))
         c.execute("DELETE FROM joint_accounts WHERE peer=?", (peer,))
         c.execute("UPDATE accounts SET joint_with=NULL, my_share=NULL WHERE joint_with=?", (peer,))
-        for g in c.execute("SELECT id, members FROM goals WHERE shared_id IS NOT NULL").fetchall():
+        for g in c.execute("SELECT * FROM goals WHERE shared_id IS NOT NULL").fetchall():
+            g = dict(g)
             members = [m for m in json.loads(g["members"] or "[]") if m != peer]
             c.execute("DELETE FROM goal_partners WHERE goal_id=? AND peer=?", (g["id"], peer))
             if members:
-                c.execute("UPDATE goals SET members=? WHERE id=?", (json.dumps(members), g["id"]))
+                c.execute("UPDATE goals SET members=?, approved=? WHERE id=?", (json.dumps(members), json.dumps([m for m in _approved(g) if m != peer]), g["id"]))
             else:
-                _make_private(c, g["id"])
+                _gone_or_private(c, g)
     if notify:
         queue(db, peer, "unlink", {})
 
 
+def fin(x, lo: float = -1e12, hi: float = 1e12) -> float:
+    """A number someone else's Coinpile sent: a real, finite one in a range money can have, or ValueError."""
+    if isinstance(x, bool):
+        raise ValueError("not a number")
+    v = float(x)
+    if not math.isfinite(v) or not lo <= v <= hi:
+        raise ValueError("not a usable number")
+    return v
+
+
+def _iso_day(s) -> str | None:
+    """A date as text, or None: 9999-99-99 is not a date."""
+    if not isinstance(s, str):
+        return None
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _drop_goal(c, gid: int) -> None:
+    for t in ("allocations", "goal_partners", "goal_notes"):
+        c.execute(f"DELETE FROM {t} WHERE goal_id=?", (gid,))
+    c.execute("DELETE FROM goals WHERE id=?", (gid,))
+
+
+def _gone_or_private(c, g: dict) -> None:
+    """The last other member left (or the link ended). A goal I accepted stays as my own private goal; one that was only offered to me and
+    never answered was never mine, so it goes."""
+    if g["shared_state"] == "offered":
+        _drop_goal(c, g["id"])
+    else:
+        _make_private(c, g["id"])
+
+
+def _approved(g: dict) -> list[str]:
+    """The members I agreed to send my amount and notes to. Rows from before this was kept: everyone in a goal I take part in."""
+    if g.get("approved") is not None:
+        return json.loads(g["approved"] or "[]")
+    return json.loads(g["members"] or "[]") if g.get("shared_state") == "active" else []
+
+
 def _make_private(c, gid: int) -> None:
-    c.execute("UPDATE goals SET shared_id=NULL, members=NULL, shared_state=NULL, sent_sig=NULL WHERE id=?", (gid,))
+    c.execute("UPDATE goals SET shared_id=NULL, members=NULL, shared_state=NULL, sent_sig=NULL, approved=NULL WHERE id=?", (gid,))
     c.execute("DELETE FROM goal_partners WHERE goal_id=?", (gid,))
     c.execute("DELETE FROM goal_notes WHERE goal_id=?", (gid,))
 
@@ -126,9 +171,13 @@ def share_goal(db, me: str, gid: int, peers: list[str]) -> dict:
     for p in peers:
         if status(db, p) != "active":
             raise LinkError(f"you are not linked with {p} yet")
+    if g["shared_state"] == "offered":
+        raise LinkError("answer the offer first")
     members = sorted(set(json.loads(g["members"] or "[]")) | set(peers))
+    approved = sorted(set(_approved(g)) | set(peers))
     with db.tx() as c:
-        c.execute("UPDATE goals SET shared_id=COALESCE(shared_id,?), members=?, shared_state='active', rev=rev+1, edited_by=?, sent_sig=NULL WHERE id=?", (uuid.uuid4().hex, json.dumps(members), me, gid))
+        c.execute("UPDATE goals SET shared_id=COALESCE(shared_id,?), members=?, approved=?, shared_state='active', rev=rev+1, edited_by=?, sent_sig=NULL WHERE id=?",
+                  (uuid.uuid4().hex, json.dumps(members), json.dumps(approved), me, gid))
     push(db, me, gid)
     return {"id": gid, "members": members}
 
@@ -196,8 +245,9 @@ def push(db, me: str, gid: int | None = None) -> int:
         sig = _sig(msg)
         if sig == g["sent_sig"]:
             continue
+        ok = set(_approved(g))                               # someone another member brought in gets nothing of mine until I share it with them too
         for p in json.loads(g["members"] or "[]"):
-            if status(db, p) == "active":
+            if p in ok and status(db, p) == "active":
                 queue(db, p, "goal", msg, g["shared_id"])
         with db.tx() as c:
             c.execute("UPDATE goals SET sent_sig=? WHERE id=?", (sig, g["id"]))
@@ -218,8 +268,8 @@ def accept_goal(db, me: str, gid: int) -> None:
     g = _goal(db, gid)
     if g["shared_state"] != "offered":
         raise LinkError("nothing to accept")
-    with db.tx() as c:
-        c.execute("UPDATE goals SET shared_state='active', sent_sig=NULL WHERE id=?", (gid,))
+    with db.tx() as c:                                       # yes to the people in it now
+        c.execute("UPDATE goals SET shared_state='active', sent_sig=NULL, approved=? WHERE id=?", (g["members"] or "[]", gid))
     push(db, me, gid)
 
 
@@ -238,8 +288,18 @@ def decline_goal(db, me: str, gid: int) -> None:
 
 
 # ------------------------------------------------------------------ inbound
-def receive(db, me: str, sender: str, kind: str, p: dict) -> dict:
-    """One message from the gateway. `sender` is set by the gateway, never by the payload."""
+def receive(db, me: str, sender: str, kind: str, p: dict, today=None) -> dict:
+    """One message from the gateway. `sender` is set by the gateway, never by the payload. Whatever the payload holds, the answer is a
+    result: something malformed is ignored, it never raises and never leaves a row behind that breaks a page."""
+    try:
+        if not isinstance(p, dict) or not isinstance(kind, str):
+            return {"ignored": "malformed"}
+        return _receive(db, me, sender, kind, p, today)
+    except Exception:
+        return {"ignored": "malformed"}
+
+
+def _receive(db, me: str, sender: str, kind: str, p: dict, today=None) -> dict:
     st = status(db, sender)
     if kind == "invite":
         if st is None:
@@ -271,15 +331,15 @@ def receive(db, me: str, sender: str, kind: str, p: dict) -> dict:
             with db.tx() as c:
                 c.execute("DELETE FROM goal_partners WHERE goal_id=? AND peer=?", (g["id"], sender))
                 if members:
-                    c.execute("UPDATE goals SET members=? WHERE id=?", (json.dumps(members), g["id"]))
+                    c.execute("UPDATE goals SET members=?, approved=? WHERE id=?", (json.dumps(members), json.dumps([m for m in _approved(g) if m != sender]), g["id"]))
                 else:
-                    _make_private(c, g["id"])
+                    _gone_or_private(c, g)
         return {"ok": True}
     if kind == "goal":
         return _receive_goal(db, me, sender, p)
     if kind == "acct":
         try:
-            ref, name, bal = str(p["ref"])[:64], str(p["name"])[:80], round(float(p["balance"]), 2)
+            ref, name, bal = str(p["ref"])[:64], str(p["name"])[:80], round(fin(p["balance"]), 2)
         except (KeyError, TypeError, ValueError):
             return {"ignored": "malformed"}
         with db.tx() as c:
@@ -287,7 +347,7 @@ def receive(db, me: str, sender: str, kind: str, p: dict) -> dict:
                       (sender, "account", ref, name, str(p.get("institution", ""))[:80], str(p.get("kind", ""))[:20], bal, now()))
         return {"ok": True}
     if kind.startswith("joint_"):
-        return _receive_joint(db, sender, kind, p)
+        return _receive_joint(db, sender, kind, p, today)
     if kind == "unshare":
         with db.tx() as c:
             c.execute("DELETE FROM shared_in WHERE peer=? AND kind=? AND ref=?", (sender, str(p.get("kind", "")), str(p.get("ref", ""))))
@@ -299,24 +359,32 @@ def _receive_goal(db, me: str, sender: str, p: dict) -> dict:
     sid, members, goal = p.get("shared_id"), p.get("members"), p.get("goal")
     if not (isinstance(sid, str) and 8 <= len(sid) <= 64 and isinstance(members, list) and isinstance(goal, dict) and me in members and sender in members):
         return {"ignored": "malformed"}
+    if len(members) > 20 or not all(isinstance(m, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", m) for m in members):
+        return {"ignored": "malformed"}
     try:
-        rev, contrib = int(p.get("rev", 0)), round(float(p.get("contrib", 0)), 2)
-        name, target = str(goal["name"])[:120].strip(), round(float(goal["target"]), 2)
+        rev, contrib = int(p.get("rev", 0)), round(fin(p.get("contrib", 0)), 2)
+        name, target = str(goal["name"])[:120].strip(), round(fin(goal["target"]), 2)
         prio = goal.get("priority") if goal.get("priority") in (1, 2, 3) else 2
         status_ = goal.get("status") if goal.get("status") in ("active", "done", "dropped") else "active"
-        deadline = goal.get("deadline") if isinstance(goal.get("deadline"), str) and re.match(r"^\d{4}-\d{2}-\d{2}$", goal["deadline"]) else None
-        closed = goal.get("closed") if isinstance(goal.get("closed"), str) else None
-    except (KeyError, TypeError, ValueError):
+        deadline = _iso_day(goal.get("deadline"))
+        closed = _iso_day(goal.get("closed"))
+        edited_by = str(p.get("edited_by") or sender)[:32]
+    except (KeyError, TypeError, ValueError, OverflowError):
         return {"ignored": "malformed"}
+    if not 0 <= rev < 2 ** 53:
+        return {"ignored": "malformed"}
+    p = {**p, "edited_by": edited_by}
     if not name or not target > 0 or contrib < 0:
         return {"ignored": "malformed"}
     others = sorted(m for m in members if m != me)
     g = db.one("SELECT * FROM goals WHERE shared_id=?", (sid,))
     if g and sender not in json.loads(g["members"] or "[]"):
         return {"ignored": "not a member of that goal"}             # knowing a goal's shared_id is not enough to edit it
+    if not g and sum(1 for o in db.all("SELECT members FROM goals WHERE shared_state='offered'") if sender in json.loads(o["members"] or "[]")) >= MAX_OFFERS:
+        return {"ignored": "too many offers"}
     with db.tx() as c:
         if not g:
-            cur = c.execute("INSERT INTO goals(name,target,deadline,priority,monthly,note,status,created,closed,shared_id,members,shared_state,rev,edited_by) VALUES(?,?,?,?,0,'',?,?,?,?,?,'offered',?,?)",
+            cur = c.execute("INSERT INTO goals(name,target,deadline,priority,monthly,note,status,created,closed,shared_id,members,approved,shared_state,rev,edited_by) VALUES(?,?,?,?,0,'',?,?,?,?,?,'[]','offered',?,?)",
                             (name, target, deadline, prio, status_, now()[:10], closed, sid, json.dumps(others), rev, p.get("edited_by") or sender))
             gid = cur.lastrowid
         else:
@@ -345,6 +413,7 @@ def decorate(db, items: list[dict]) -> None:
             continue
         partners = [{"peer": r["peer"], "amount": r["amount"]} for r in db.all("SELECT peer, amount FROM goal_partners WHERE goal_id=? ORDER BY peer", (v["id"],))]
         v["members"] = json.loads(v.get("members") or "[]")
+        v["added_by_others"] = [m for m in v["members"] if m not in _approved({**v, "members": json.dumps(v["members"])})] if v.get("shared_state") == "active" else []
         v["partners"] = partners
         v["notes"] = [n for n in _notes(db, v["id"]) if not n["deleted"]]
 
@@ -375,7 +444,13 @@ def push_accounts(db) -> int:
     n = 0
     for g in db.all("SELECT * FROM link_shares WHERE kind='account'"):
         a = db.one("SELECT * FROM accounts WHERE id=?", (g["ref"],))
-        if not a or status(db, g["peer"]) != "active":
+        if not a:                                            # deleted here, or closed in Firefly III: the other side stops seeing it
+            if status(db, g["peer"]) == "active":
+                queue(db, g["peer"], "unshare", {"kind": "account", "ref": g["ref"]}, g["ref"])
+            with db.tx() as c:
+                c.execute("DELETE FROM link_shares WHERE peer=? AND kind='account' AND ref=?", (g["peer"], g["ref"]))
+            continue
+        if status(db, g["peer"]) != "active":
             continue
         msg = {"ref": a["id"], "name": a.get("nickname") or a["name"], "institution": a["institution"], "kind": a["kind"], "balance": round(ledger.mine(a), 2)}
         sig = hashlib.sha256(json.dumps(msg, sort_keys=True).encode()).hexdigest()
@@ -433,7 +508,7 @@ def _set_share(c, account_id: str | None, peer: str | None, share: float | None)
         c.execute("UPDATE accounts SET joint_with=?, my_share=? WHERE id=?", (peer, share, account_id))
 
 
-def joint_offer(db, me: str, peer: str, account_id: str, my_share: float = 50) -> dict:
+def joint_offer(db, me: str, peer: str, account_id: str, my_share: float = 50, today=None) -> dict:
     """Tell a linked person: this account of mine is joint with you, and I count my_share percent of it."""
     if status(db, peer) != "active":
         raise LinkError(f"link with {peer} first (Settings, Sharing)")
@@ -442,7 +517,11 @@ def joint_offer(db, me: str, peer: str, account_id: str, my_share: float = 50) -
         raise KeyError(account_id)
     if a["kind"] not in JOINT_KINDS:
         raise LinkError("only a bank account, card or loan can be joint")
-    if not 0 < my_share < 100:
+    try:
+        my_share = round(fin(my_share), 2)
+    except (TypeError, ValueError):
+        raise LinkError("your share is a percentage between 0 and 100")
+    if not 0.01 <= my_share <= 99.99:
         raise LinkError("your share is a percentage between 0 and 100")
     if db.one("SELECT 1 FROM joint_accounts WHERE account_id=? AND state='active'", (account_id,)):
         raise LinkError("that account is already linked as joint")
@@ -453,10 +532,10 @@ def joint_offer(db, me: str, peer: str, account_id: str, my_share: float = 50) -
         c.execute("DELETE FROM joint_accounts WHERE account_id=?", (account_id,))
         jid = c.execute("INSERT INTO joint_accounts(account_id,peer,my_share,state,created) VALUES(?,?,?,'offered',?)", (account_id, peer, my_share, now())).lastrowid
     queue(db, peer, "joint_offer", {**_acct_msg(a), "your_share": round(100 - my_share, 2)}, "joint:" + account_id)
-    return joint_view_one(db, jid)
+    return joint_view_one(db, jid, today)
 
 
-def joint_accept(db, me: str, jid: int, account_id: str) -> dict:
+def joint_accept(db, me: str, jid: int, account_id: str, today=None) -> dict:
     """Say yes to an offer: this account of mine is the same one. My share is what they left for me."""
     r = _joint(db, jid)
     if r["state"] != "pending":
@@ -472,8 +551,8 @@ def joint_accept(db, me: str, jid: int, account_id: str) -> dict:
         c.execute("UPDATE joint_accounts SET account_id=?, state='active' WHERE id=?", (account_id, jid))
         _set_share(c, account_id, r["peer"], r["my_share"])
     queue(db, r["peer"], "joint_accept", {**_acct_msg(a), "to": r["peer_account"], "share": r["my_share"]}, "joint:" + account_id)
-    push_joint(db)
-    return joint_view_one(db, jid)
+    push_joint(db, today)
+    return joint_view_one(db, jid, today)
 
 
 def joint_decline(db, jid: int) -> None:
@@ -484,14 +563,14 @@ def joint_decline(db, jid: int) -> None:
     queue(db, r["peer"], "joint_end", {"ref": r["account_id"] or "", "to": r["peer_account"] or ""}, "joint-end:" + str(r["peer_account"] or r["account_id"]))
 
 
-def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
+def _receive_joint(db, sender: str, kind: str, p: dict, today=None) -> dict:
     ref, to = str(p.get("ref") or "")[:64], str(p.get("to") or "")[:64]
     if kind == "joint_offer":
         try:
-            share = float(p.get("your_share"))
+            share = round(fin(p.get("your_share")), 2)
         except (TypeError, ValueError):
             return {"ignored": "malformed"}
-        if not ref or not 0 < share < 100:
+        if not ref or not 0.01 <= share <= 99.99:
             return {"ignored": "malformed"}
         if db.one("SELECT COUNT(*) n FROM joint_accounts WHERE state='pending' AND peer=? AND peer_account!=?", (sender, ref))["n"] >= 20:
             return {"ignored": "too many offers"}
@@ -508,7 +587,7 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
         if not r:
             return {"ignored": "no such offer"}
         try:
-            theirs = float(p["share"]) if p.get("share") is not None else 100 - r["my_share"]
+            theirs = fin(p["share"]) if p.get("share") is not None else 100 - r["my_share"]
         except (TypeError, ValueError):
             theirs = -1
         if abs(theirs + r["my_share"] - 100) > 0.01:          # they accepted a different split: end it on both sides, offer again
@@ -520,7 +599,7 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
             c.execute("UPDATE joint_accounts SET state='active', peer_account=?, peer_name=?, peer_mask=? WHERE id=?",
                       (ref, str(p.get("name") or "")[:80], str(p.get("mask") or "")[:8], r["id"]))
             _set_share(c, r["account_id"], sender, r["my_share"])
-        push_joint(db)
+        push_joint(db, today)
         return {"ok": True}
     if kind == "joint_end":
         rows = db.all("SELECT * FROM joint_accounts WHERE peer=? AND (account_id=? OR peer_account=?)", (sender, to, ref))
@@ -535,9 +614,9 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
         if not r:
             return {"ignored": "not a joint account here"}
         try:
-            stats = {"balance": round(float(p["balance"]), 2), "as_of": str(p.get("as_of") or "")[:32],
-                     "in_by_month": {str(k)[:7]: round(float(v), 2) for k, v in (p.get("in_by_month") or {}).items()}}
-        except (KeyError, TypeError, ValueError):
+            stats = {"balance": round(fin(p["balance"]), 2), "as_of": str(p.get("as_of") or "")[:32],
+                     "in_by_month": {str(k)[:7]: round(fin(v), 2) for k, v in list((p.get("in_by_month") or {}).items())[:60] if re.fullmatch(r"\d{4}-\d{2}", str(k))}}
+        except (KeyError, TypeError, ValueError, AttributeError):
             return {"ignored": "malformed"}
         with db.tx() as c:
             c.execute("UPDATE joint_accounts SET peer_stats=? WHERE id=?", (json.dumps(stats), r["id"]))
@@ -548,8 +627,9 @@ def _receive_joint(db, sender: str, kind: str, p: dict) -> dict:
 def contributions(db, account_id: str, months: int = 12, today=None) -> dict:
     """What I moved into this account from my own accounts, per month, from my Firefly III: Firefly III transfers whose other side is one of my
     own (not joint) bank accounts, and (as bank feeds bring them) a deposit here matched one to one by a withdrawal of the same amount from one of
-    my own bank accounts within 3 days. Money the other person moves in is in my Firefly III only as a deposit with no such withdrawal, so it is
-    never counted as mine; pending lines are left out until they settle."""
+    my own bank accounts within 3 days, when that withdrawal reads like a transfer (its category is a transfer, or its text says transfer,
+    Zelle, ACH and the like, or names the joint account) and the deposit does not name the other person. An ordinary payment of the same
+    amount that week (a bill) is not a match, so money the other person moves in is not counted as mine; pending lines wait until they settle."""
     from datetime import date as _d, timedelta
     today = today or _d.today()
     y, m = today.year, today.month - (months - 1)
@@ -558,20 +638,31 @@ def contributions(db, account_id: str, months: int = 12, today=None) -> dict:
     since = f"{y:04d}-{m:02d}-01"
     joint = {r["account_id"] for r in db.all("SELECT account_id FROM joint_accounts WHERE account_id IS NOT NULL")}
     own = {r["id"] for r in db.all("SELECT id FROM accounts WHERE kind='cash'")} - joint - {account_id}
-    deps = db.all("""SELECT id, date, amount FROM transactions WHERE account_id=? AND amount>0 AND COALESCE(pending,0)=0 AND date>=? AND date<=?
+    deps = db.all("""SELECT id, date, amount, name FROM transactions WHERE account_id=? AND amount>0 AND COALESCE(pending,0)=0 AND date>=? AND date<=?
                      ORDER BY date, id""", (account_id, since, today.isoformat()))
     if not own or not deps:
         return {}
     marks = ",".join("?" * len(own))
-    pool = db.all(f"""SELECT id, date, amount FROM transactions WHERE account_id IN ({marks}) AND amount<0 AND COALESCE(pending,0)=0
-                      AND id NOT LIKE '%:out' AND id NOT LIKE '%:in' AND date>=? ORDER BY date, id""",
-                  (*own, (_d.fromisoformat(since) - timedelta(days=3)).isoformat()))
+    joint_row = db.one("SELECT j.peer, a.name, a.institution, a.mask, a.nickname FROM accounts a LEFT JOIN joint_accounts j ON j.account_id=a.id WHERE a.id=?", (account_id,)) or {}
+    words = {w for w in re.findall(r"[a-z]{4,}", f"{joint_row.get('nickname') or ''} {joint_row.get('name') or ''} {joint_row.get('institution') or ''}".lower())
+             if w not in ("bank", "account", "checking", "savings", "credit", "union", "card")}
+    if joint_row.get("mask"):
+        words.add(str(joint_row["mask"]).lower())
+    moves = re.compile(r"transfer|xfer|\bach\b|zelle|venmo|cash ?app|paypal|\bwire\b|\bto (?:joint|checking|savings|share)", re.I)
+    peer = str(joint_row.get("peer") or "").lower()
+    pool = [w for w in db.all(f"""SELECT t.id, t.date, t.amount, t.name, c.kind ckind FROM transactions t LEFT JOIN categories c ON c.name=t.category
+                                  WHERE t.account_id IN ({marks}) AND t.amount<0 AND COALESCE(t.pending,0)=0
+                                  AND t.id NOT LIKE '%:out' AND t.id NOT LIKE '%:in' AND t.date>=? ORDER BY t.date, t.id""",
+                              (*own, (_d.fromisoformat(since) - timedelta(days=3)).isoformat()))
+            if w["ckind"] == "transfer" or moves.search(w["name"] or "") or any(x in (w["name"] or "").lower() for x in words)]
     used, out = set(), {}
     for d in deps:
         mine = False
         if d["id"].endswith(":in"):
             leg = db.one("SELECT account_id FROM transactions WHERE id=?", (d["id"][:-3] + ":out",))
             mine = bool(leg and leg["account_id"] in own)
+        elif peer and re.search(r"\b" + re.escape(peer) + r"\b", (d["name"] or "").lower()):
+            mine = False                                     # "Zelle from Bob": the deposit says whose it is
         else:
             dd = _d.fromisoformat(d["date"][:10])
             best = None
@@ -595,7 +686,10 @@ def push_joint(db, today=None) -> int:
     n = 0
     for r in db.all("SELECT * FROM joint_accounts WHERE state='active'"):
         a = db.one("SELECT balance, updated FROM accounts WHERE id=?", (r["account_id"],))
-        if not a or status(db, r["peer"]) != "active":
+        if not a:                                            # my copy of the joint account is gone: it ends on both sides
+            joint_decline(db, r["id"])
+            continue
+        if status(db, r["peer"]) != "active":
             continue
         msg = {"ref": r["account_id"], "to": r["peer_account"], "balance": round(a["balance"] or 0, 2), "as_of": a["updated"] or "", "in_by_month": contributions(db, r["account_id"], today=today)}
         sig = hashlib.sha256(json.dumps(msg, sort_keys=True).encode()).hexdigest()

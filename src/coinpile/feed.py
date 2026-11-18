@@ -14,6 +14,7 @@ def rrule(every: int, unit: str) -> str:
 
 def _esc(s: str) -> str:
     bs = chr(92)
+    s = "".join(ch for ch in s.replace("\r\n", "\n").replace("\r", "\n") if ch == "\n" or ord(ch) >= 32)       # a bare CR would start a new calendar line
     return s.replace(bs, bs * 2).replace(";", bs + ";").replace(",", bs + ",").replace("\n", bs + "n")
 
 

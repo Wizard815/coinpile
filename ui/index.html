@@ -262,6 +262,8 @@ function spark(points, w = 560, ht = 120, key = "net_worth", xkey = "date") {
   for (const [i, anchor] of [[0, "start"], [points.length - 1, "end"]]) { const t = mk("text", { x: X(i), y: ht - 3, "text-anchor": anchor }); t.textContent = String(points[i][xkey]).slice(5, 10); svg.append(t); }
   return svg;
 }
+// A cell for a CSV a spreadsheet will open: text that starts like a formula (= + - @, tab, return) gets a leading ' so it stays text. Numbers stay numbers.
+function csvCell(c) { let s = String(c ?? ""); if (typeof c !== "number" && /^[=+\-@\t\r]/.test(s)) s = "'" + s; return '"' + s.replace(/"/g, '""') + '"'; }
 function downloadText(name, text, type) { const a = h("a", { href: URL.createObjectURL(new Blob([text], { type })), download: name }); document.body.append(a); a.click(); a.remove(); }
 const sure = (btn, label, run) => (ev) => { if (ev.target.dataset.sure) run(); else { ev.target.dataset.sure = 1; ev.target.textContent = label; } };
 
@@ -341,7 +343,7 @@ async function txBrowser(root, fixed = {}, accounts = null) {
         spend.length && !fixed.account_id ? h("div", { style: "margin-top:14px" }, h("h3", {}, "Spending by category (these dates)"), barList(spend.slice(0, 8).map((x) => [x.category, x.spent]))) : null);
       fill(foot, h("span", { class: "muted small" }, r.total ? `${F.offset + 1}–${Math.min(F.offset + 50, r.total)} of ${r.total}` : ""),
         h("div", { class: "chips" }, h("button", { class: "btn sm", disabled: F.offset === 0, onclick: () => { F.offset = Math.max(0, F.offset - 50); load(); } }, "Previous"), h("button", { class: "btn sm", disabled: F.offset + 50 >= r.total, onclick: () => { F.offset += 50; load(); } }, "Next"),
-          h("button", { class: "btn sm", onclick: async () => { const all = await api("/api/transactions?" + qs({ ...F, limit: 500, offset: 0 })); downloadText("transactions.csv", "date,description,account,category,amount\n" + all.items.map((x) => [x.date, x.name, x.account_name || "", x.category, x.amount].map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(",")).join("\n"), "text/csv"); } }, "Export CSV")));
+          h("button", { class: "btn sm", onclick: async () => { const all = await api("/api/transactions?" + qs({ ...F, limit: 500, offset: 0 })); downloadText("transactions.csv", "date,description,account,category,amount\n" + all.items.map((x) => [x.date, x.name, x.account_name || "", x.category, x.amount].map(csvCell).join(",")).join("\n"), "text/csv"); } }, "Export CSV")));
     } catch (e) { list.replaceChildren(h("p", { class: "neg" }, e.message)); }
   }
   add(out, h("div", { class: "panel" },
@@ -483,7 +485,7 @@ async function viewSubs(root, rerender) {
     h("div", { class: "panel" }, h("h3", {}, e ? "Edit subscription" : "Add a subscription"), form()),
     h("div", { class: "panel scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Name", "Repeats", "Next", "Paid from", "Amount", "Per month", ""].map((x, i) => h("th", { class: i > 3 ? "r" : "" }, x)))),
       h("tbody", {}, running.map((s) => h("tr", { style: s.active ? "" : "opacity:.5" },
-        h("td", {}, s.name, " ", s.source === "plaid" ? h("span", { class: "pill t" }, "auto") : srcPill(s), s.active ? null : h("span", { class: "pill" }, "paused"), s.payer === "other" ? h("span", { class: "pill b" }, s.payer_name + " pays") : null, h("div", { class: "muted small" }, s.category)),
+        h("td", {}, s.name, " ", s.source === "plaid" ? h("span", { class: "pill t" }, "auto") : srcPill(s), s.other_currency ? h("span", { class: "pill", title: "Firefly III keeps this in " + s.other_currency + " without converting it, so it is not in your totals" }, s.other_currency + ", not in totals") : null, s.active ? null : h("span", { class: "pill" }, "paused"), s.payer === "other" ? h("span", { class: "pill b" }, s.payer_name + " pays") : null, h("div", { class: "muted small" }, s.category)),
         h("td", {}, s.label, plan(s) ? h("div", { class: "small" }, h("span", { class: "pill b" }, plan(s))) : null), h("td", { class: "mono" }, s.next_due || "ended"), h("td", { class: "small" }, s.account_name ? `${s.account_institution} · ${s.account_name}` : s.payment_method || h("span", { class: "muted" }, "not set")),
         h("td", { class: "num r" }, usd(s.amount)), h("td", { class: "num r" }, s.monthly ? usd(s.monthly) : "–"),
         h("td", { class: "r", style: "white-space:nowrap" }, h("button", { class: "btn sm", onclick: () => { S.edit = s; rerender(); window.scrollTo(0, 0); } }, "Edit"), " ",
@@ -526,6 +528,8 @@ const goalCard = (g, v, rerender, lk = { me: "", links: [] }) => {
     h("div", { style: "margin:8px 0" }, bar(g.pct, g.funded ? "var(--teal)" : "var(--brass)")),
     h("div", { class: "small" }, g.status !== "active" ? `Closed ${g.closed || ""}` : g.funded ? `Fully set aside (${usd(g.allocated)}).` : `${usd(g.allocated)} set aside, ${usd(g.shortfall)} still needed.`),
     shared ? h("div", { class: "small" }, `Together ${usd(g.team_allocated)} of ${usd(g.target)}: you ${usd(g.allocated)}`, (g.partners || []).map((x) => `, ${x.peer} ${usd(x.amount)}`).join("")) : null,
+    shared && (g.added_by_others || []).length ? h("div", { class: "small" }, `${g.added_by_others.join(", ")} was added by someone else and does not see your amount or notes. `,
+      h("button", { class: "btn sm", onclick: async () => { await api(`/api/goals/${g.id}/share`, send("POST", { peers: g.added_by_others })); rerender(); } }, "Share with them too")) : null,
     noteBox,
     g.status === "active" && !g.funded ? h("div", { class: "small muted" }, [g.deadline ? `Due ${g.deadline}: save ${usd(g.monthly_needed)} a month.` : "", g.ready_date ? ` At ${usd(g.monthly)} a month it is ready ${g.ready_date}.` : "", g.can_fund_now ? " Free savings cover the rest now." : ""].join("")) : null,
     g.note ? h("div", { class: "small muted" }, g.note) : null,
@@ -652,7 +656,7 @@ async function viewBudgets(root, rerender) {
       h("p", { class: "muted small" }, `Read from Firefly III for ${month}: the limit you set there and what was spent from it. Change them in Firefly III.`),
       h("div", { class: "grid" }, kpi("Budgeted", usd(fb.limit), `${fb.items.filter((b) => b.limit).length} budget${fb.items.filter((b) => b.limit).length === 1 ? "" : "s"} with a limit`), kpi("Spent", usd(fb.spent), "from those budgets"), kpi("Left", usd(fb.left), fb.left >= 0 ? "still to spend" : "over", fb.left < 0 ? "neg" : "pos")),
       h("div", { class: "scroll", style: "margin-top:12px" }, h("table", {}, h("thead", {}, h("tr", {}, ["Budget", "Limit", "Spent", "Left", ""].map((x, i) => h("th", { class: i > 0 && i < 4 ? "r" : "" }, x)))),
-        h("tbody", {}, fb.items.map((b) => h("tr", {}, h("td", {}, b.name, b.auto ? h("span", { class: "pill", title: "Firefly III sets this limit each period" }, "auto") : null), h("td", { class: "num r" }, b.limit ? usd(b.limit) : h("span", { class: "muted" }, "none")),
+        h("tbody", {}, fb.items.map((b) => h("tr", {}, h("td", {}, b.name, b.auto ? h("span", { class: "pill", title: "Firefly III sets this limit each period" }, "auto") : null, b.prorated ? h("span", { class: "pill", title: "The limit in Firefly III covers a longer or different period: this is the part of it that falls in this month" }, "part of a longer limit") : null), h("td", { class: "num r" }, b.limit ? usd(b.limit) : h("span", { class: "muted" }, "none")),
           h("td", { class: "num r" }, usd(b.spent)), h("td", { class: "num r " + (b.left < 0 ? "neg" : "") }, b.left == null ? "–" : usd(b.left)),
           h("td", { style: "min-width:90px" }, b.pct != null ? bar(b.pct, b.pct > 1 ? "var(--red)" : b.pct > 0.85 ? "var(--brass)" : "var(--teal)") : null))))))) : null,
     h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, fb && fb.items.length ? "Coinpile plan by category" : "Monthly plan"), h("input", { type: "month", id: "bm", value: month, class: "tiny", style: "width:auto", onchange: (e) => { S.month = e.target.value; rerender(); } })),
@@ -944,8 +948,10 @@ async function tabFirefly(root, rerender) {
         h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, f.has_password ? "Change password" : "Set password"),
           f.has_password ? h("button", { class: "btn danger", type: "button", onclick: async () => { if (!val("cp-cur")) return toast("Type the current password first"); try { await api("/api/password", send("DELETE", { current: val("cp-cur") })); toast("Password removed"); rerender(); } catch (err) { fail(err); } } }, "Remove password") : null))),
     h("div", { class: "panel" }, h("h3", {}, "Leave"),
-      h("p", { class: "muted small" }, "Sign out ends this browser's session. Forget me also stops reading your Firefly III and deletes everything Coinpile keeps for you (goals, notes, chats). Firefly III itself is not touched."),
+      h("p", { class: "muted small" }, "Sign out ends this browser's session. Sign out everywhere ends it in every browser and on every device (lost a phone, or used someone else's computer). Forget me also stops reading your Firefly III and deletes everything Coinpile keeps for you (goals, notes, chats). Firefly III itself is not touched."),
       h("div", { class: "chips" }, h("button", { class: "btn", onclick: async () => { await fetch("/auth/logout", { method: "POST", credentials: "same-origin" }); location.reload(); } }, "Sign out"),
+        h("button", { class: "btn", onclick: sure(null, "Sign out everywhere? Every browser and device is signed out, this one too.", async () => { await fetch("/auth/logout/everywhere", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_tokens: false }) }); location.reload(); }) }, "Sign out everywhere"),
+        h("button", { class: "btn", onclick: sure(null, "Sign out everywhere and end every API token? Home Assistant, the Pondering Orb and scripts stop working until you make new tokens.", async () => { await fetch("/auth/logout/everywhere", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ api_tokens: true }) }); location.reload(); }) }, "…and end API tokens"),
         h("button", { class: "btn danger", onclick: sure(null, "Sure? Deletes your goals, notes and chats in Coinpile. Firefly III is not touched.", async () => { await api("/api/forget", { method: "POST" }); location.reload(); }) }, "Forget me"))));
 }
 async function tabBanks(root, rerender) {

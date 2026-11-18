@@ -6,13 +6,14 @@ import ipaddress
 import json
 import operator
 import re
+import time
 from contextlib import nullcontext
 from datetime import date, timedelta
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException, Request
-from pydantic import BaseModel
+from coinpile.strict import BaseModel
 
 from coinpile import agent_actions, agent_skills, crypto, links, feed, netguard, ledger, plan, recur, settings as cfg, sync
 
@@ -37,16 +38,48 @@ def piggy_banks(store) -> list[dict]:
              "my_notes": notes.get(p["id"], [])} for p in plan._piggies(store)]
 
 
+_LOCAL_NAMES = ("localhost", "host.docker.internal", "host.containers.internal")
+_LOCAL_ENDS = (".local", ".lan", ".internal", ".home.arpa")
+_local_seen: dict = {}
+
+
+def _home_ip(ip) -> bool:
+    ip = getattr(ip, "ipv4_mapped", None) or ip
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local) and not ip.is_unspecified
+
+
 def is_local(base_url: str) -> bool:
-    """True when the endpoint is on this machine or your own network, so your data never leaves it."""
-    host = (urlparse(base_url).hostname or "").lower()
-    if host in ("localhost", "host.docker.internal", "host.containers.internal") or host.endswith((".local", ".lan", ".internal", ".home.arpa")):
-        return True
+    """True when the endpoint is on this machine or your own network, so your data never leaves it. Decided on where the name really leads,
+    not on how it is spelled: a number that is an address in disguise (http://134744072) or a look-alike dot is read the way the connection
+    will read it, and a name that looks local but resolves to a public address is not local."""
+    import socket
     try:
-        ip = ipaddress.ip_address(host)
-        return ip.is_private or ip.is_loopback or ip.is_link_local
+        host = (httpx.URL(base_url).host or "").lower().rstrip(".")
+    except Exception:
+        return False
+    if not host:
+        return False
+    try:
+        return _home_ip(ipaddress.ip_address(host.strip("[]")))
     except ValueError:
-        return "." not in host and bool(host)        # bare names are docker/LAN hosts, e.g. http://ollama:11434
+        pass
+    if re.fullmatch(r"[0-9a-fx.]+", host):                    # 134744072, 0x08080808, 010.1.1.1: the forms a resolver reads as an IPv4 address
+        try:
+            return _home_ip(ipaddress.ip_address(socket.inet_aton(host)))
+        except OSError:
+            return False
+    if not (host in _LOCAL_NAMES or host.endswith(_LOCAL_ENDS) or "." not in host):     # bare names are docker/LAN hosts, e.g. http://ollama:11434
+        return False
+    hit = _local_seen.get(host)
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        ips = {ipaddress.ip_address(x[4][0].split("%")[0]) for x in socket.getaddrinfo(host, None)}
+        ok = all(_home_ip(ip) for ip in ips)
+    except (OSError, ValueError):
+        ok = True                                            # it does not resolve from here: nothing can be sent to it either
+    _local_seen[host] = (time.time() + 60, ok)
+    return ok
 
 
 # ------------------------------------------------------------------ safe calculator
@@ -54,9 +87,10 @@ _OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, as
         ast.Mod: operator.mod, ast.Pow: operator.pow, ast.USub: operator.neg, ast.UAdd: operator.pos}
 def _pmt(rate, nper, pv, fv=0.0):
     """Payment per period for a loan/annuity (rate per period). Positive pv = amount borrowed; the result is the payment (positive)."""
+    rate, nper, pv, fv = float(rate), float(nper), float(pv), float(fv)
     if nper <= 0:
         raise ValueError("nper must be > 0")
-    if rate == 0:
+    if abs(rate) < 1e-12:
         return (pv + fv) / nper
     g = (1 + rate) ** nper
     return (pv * g + fv) * rate / (g - 1)
@@ -64,7 +98,8 @@ def _pmt(rate, nper, pv, fv=0.0):
 
 def _fv(rate, nper, pmt, pv=0.0):
     """Future value after nper periods of paying in pmt each period on top of pv (savings: positive numbers)."""
-    if rate == 0:
+    rate, nper, pmt, pv = float(rate), float(nper), float(pmt), float(pv)
+    if abs(rate) < 1e-12:
         return pv + pmt * nper
     g = (1 + rate) ** nper
     return pv * g + pmt * (g - 1) / rate
@@ -73,9 +108,10 @@ def _fv(rate, nper, pmt, pv=0.0):
 def _nper(rate, pmt, pv):
     """Periods to pay off pv with payment pmt each period."""
     import math
+    rate, pmt, pv = float(rate), float(pmt), float(pv)
     if pmt <= 0:
         raise ValueError("payment must be > 0")
-    if rate == 0:
+    if abs(rate) < 1e-12:
         return pv / pmt
     if pmt <= pv * rate:
         raise ValueError("the payment does not cover the interest: it never pays off")
@@ -84,7 +120,7 @@ def _nper(rate, pmt, pv):
 
 def _compound(principal, apr_pct, years, per_year=12):
     """Value of principal after years at apr_pct %, compounded per_year times a year."""
-    return principal * (1 + apr_pct / 100 / per_year) ** (per_year * years)
+    return float(principal) * (1 + float(apr_pct) / 100 / float(per_year)) ** (float(per_year) * float(years))
 
 
 def _pct(part, whole):
@@ -99,41 +135,89 @@ def _math():
 
 _FUNCS = {"round": round, "min": min, "max": max, "abs": abs, "sum": sum, "pmt": _pmt, "fv": _fv, "nper": _nper, "compound": _compound, "pct": _pct, **_math()}
 CALC_HELP = ("Functions: round(x, n), min, max, abs, sum([..]), sqrt, ln, log10, exp, floor, ceil, pct(part, whole), "
-             "pmt(rate_per_period, periods, amount, fv=0), fv(rate_per_period, periods, payment, start=0), nper(rate_per_period, payment, amount), "
-             "compound(principal, apr_percent, years, times_per_year=12). Rates per period: 24% a year monthly = 0.24/12.")
+             "pmt(rate_per_period, periods, amount_borrowed, balloon_still_owed_at_the_end=0), fv(rate_per_period, periods, payment, start=0), nper(rate_per_period, payment, amount), "
+             "compound(principal, apr_percent, years, times_per_year=12). Rates per period: 24% a year monthly = 0.24/12. "
+             "Inside a function or a list write numbers without thousands separators and put a space after each comma: sum([1200, 300]). % after a number is a percentage (5% = 0.05); a % b is the remainder.")
+
+
+_BIG = 1e15
+
+
+def _plain_numbers(expr: str) -> str:
+    """Thousands separators out of money written the usual way (1,200.50), but never a comma that could separate two arguments: inside a
+    function call or a list a comma between digits is ambiguous (max(1,200)), so that is refused with a hint instead of guessed."""
+    out, stack, i = [], [], 0
+    while i < len(expr):
+        ch = expr[i]
+        if ch == "(":
+            stack.append(bool(re.search(r"[A-Za-z_]\w*\s*$", expr[:i])))
+        elif ch == "[":
+            stack.append(True)
+        elif ch in ")]" and stack:
+            stack.pop()
+        elif ch == "," and i and expr[i - 1].isdigit() and re.match(r"\d{3}(?!\d)", expr[i + 1:]):
+            if any(stack):
+                raise ValueError("a comma between digits inside a function or list is ambiguous: write numbers without thousands separators "
+                                 "and put a space after the comma between arguments, e.g. sum([1200, 300])")
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
 def calculate(expr: str) -> float:
     """Arithmetic and the finance functions above. No names, no attributes, no imports."""
+    import math
     if len(expr) > 400:
         raise ValueError("expression too long")
+
+    def num(v):
+        if isinstance(v, complex):
+            raise ValueError("that has no real answer (a root of a negative number?)")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError("not a number")
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("the result is not a number")
+        if abs(v) > _BIG:
+            raise ValueError("the number is too large")
+        return v
 
     def ev(n):
         if isinstance(n, ast.Expression):
             return ev(n.body)
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
-            return n.value
+            return num(n.value)
         if isinstance(n, ast.BinOp) and type(n.op) in _OPS:
             a, b = ev(n.left), ev(n.right)
-            if isinstance(n.op, ast.Pow) and (abs(b) > 1000 or abs(a) > 1e9):
-                raise ValueError("exponent too large")
-            return _OPS[type(n.op)](a, b)
+            if isinstance(n.op, ast.Pow):
+                if abs(b) > 1000:
+                    raise ValueError("exponent too large")
+                a = float(a)                              # whole numbers to a power would build integers of any size
+            return num(_OPS[type(n.op)](a, b))
         if isinstance(n, ast.UnaryOp) and type(n.op) in _OPS:
-            return _OPS[type(n.op)](ev(n.operand))
+            return num(_OPS[type(n.op)](ev(n.operand)))
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in _FUNCS and not n.keywords:
-            return _FUNCS[n.func.id](*[ev(a) for a in n.args])
+            v = _FUNCS[n.func.id](*[ev(a) for a in n.args])
+            return [num(x) for x in v] if isinstance(v, list) else num(v)
         if isinstance(n, (ast.List, ast.Tuple)):
+            if len(n.elts) > 200:
+                raise ValueError("too many numbers in one list")
             return [ev(x) for x in n.elts]
         raise ValueError("only arithmetic and the listed functions are allowed. " + CALC_HELP)
     try:
-        cleaned = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", expr.replace("$", ""))      # 1,200 -> 1200, but keep commas between arguments
-        cleaned = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", cleaned)              # 5% -> (5/100)
+        cleaned = _plain_numbers(expr.replace("$", ""))
+        cleaned = re.sub(r"(\d+(?:\.\d+)?)\s*%(?!\s*[\w(.])", r"(\1/100)", cleaned)       # 5% -> (5/100); "10 % 3" stays the remainder
         v = ev(ast.parse(cleaned.strip(), mode="eval"))
     except SyntaxError:
         raise ValueError("could not parse the expression. " + CALC_HELP)
-    if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
-        raise ValueError("the result is not a number")
-    return v
+    except (OverflowError, RecursionError, MemoryError):
+        raise ValueError("the number is too large")
+    except ZeroDivisionError:
+        raise ValueError("division by zero")
+    if isinstance(v, list):
+        raise ValueError("the result is a list, not a number: wrap it in sum(...), min(...) or max(...)")
+    return num(v)
 
 
 # ------------------------------------------------------------------ tools
@@ -154,7 +238,13 @@ def paycheck_plan(store, today_: date, income: str | None = None) -> dict:
         inc = [i for i in inc if str(income).lower() in i["name"].lower()] or inc
     pay = min(inc, key=lambda i: i["next_due"])
     first = date.fromisoformat(pay["next_due"])
-    nxt = recur.shift(first, pay["every"], pay["unit"], 1)
+    try:
+        anchor = date.fromisoformat(str(pay.get("next_date") or pay["next_due"])[:10])
+    except ValueError:
+        anchor = first
+    nxt = recur.shift(anchor, pay["every"], pay["unit"], recur.first_k_on_or_after(anchor, pay["every"], pay["unit"], first) + 1)
+    if nxt <= first:
+        nxt = recur.shift(first, pay["every"], pay["unit"], 1)
     window = (nxt - first).days
     due = [b for b in ledger.upcoming(store, (nxt - today_).days, today_)["items"] if first.isoformat() <= b["date"] < nxt.isoformat() and b["payer"] == "me"]
     per_month = 30.4375 / window if window else 1
@@ -187,11 +277,50 @@ def week_changes(store, today_: date) -> dict:
 
 
 PEER_FIELDS = ("partners", "team_allocated", "notes", "members")       # on a shared goal: the other people's amounts and notes
+MAX_WAITING = 20          # requests that may wait for a yes or no at once
+PEER_TOOLS = ("shared_with_me", "shared_expenses", "list_goals", "savings_summary")     # with a local model these can hold other people's numbers
+LEFT_OUT = "(an earlier answer is left out here: a model on the user's own machine wrote it and it may hold what other people share with them)"
 WITHHELD = ("withheld: what other people share with you is given to the agent only when its model runs on your own machine "
             "(they agreed to share it with you, not with a cloud service or another app)")
 
 
-def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
+class SeenUrls:
+    """The pages a web search returned, which are the only ones read_webpage may fetch. They stay readable for ten minutes."""
+    KEEP, MOST = 600, 300
+
+    def __init__(self):
+        self.at = {}
+
+    def update(self, urls) -> None:
+        now = time.time()
+        self.at = {u: t for u, t in self.at.items() if now - t < self.KEEP}
+        for u in urls:
+            self.at[u] = now
+        for u in sorted(self.at, key=self.at.get)[:-self.MOST]:
+            del self.at[u]
+
+    def __contains__(self, u) -> bool:
+        return time.time() - self.at.get(u, 0) < self.KEEP
+
+
+_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+
+
+def private_in_query(store, q: str) -> str | None:
+    """What in a web search query looks like the person's own details (queries leave the house). None when it is fine."""
+    if _EMAIL.search(q):
+        return "an email address"
+    if re.search(r"\d{9,}", re.sub(r"[\s-]", "", q)):
+        return "what looks like an account or card number"
+    amounts = {round(abs(v), 2) for _, v in figures(q) if round(v % 1, 2)}
+    if amounts:
+        for a in store.all("SELECT balance FROM accounts WHERE balance IS NOT NULL"):
+            if round(abs(a["balance"]), 2) in amounts:
+                return "one of your exact balances"
+    return None
+
+
+def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_urls: SeenUrls | None = None):
     """peer_data: may the agent see what linked people share with this person (their account balances, their side of a joint account,
     their amounts and notes on a shared goal)? Only for a model on the person's own machine, never for a cloud model or an MCP client."""
     store, today = ctx.store, ctx.today
@@ -302,10 +431,14 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
                 interest += i
                 b = b + i - p
                 months += 1
-            return months, round(interest, 2)
+            return (months, round(interest, 2)) if b <= 0.005 else "long"
+        if bal <= 0 or apr < 0 or pay <= 0 or extra < 0:
+            return {"error": "balance and payment must be above 0, apr and extra_payment 0 or more"}
         base = run(pay)
         if not base:
             return {"error": f"a payment of {pay:,.2f} does not cover the monthly interest ({bal * apr / 1200:,.2f}); the balance never goes down"}
+        if base == "long":
+            return {"error": f"a payment of {pay:,.2f} barely covers the monthly interest ({bal * apr / 1200:,.2f}): it is not paid off within 100 years"}
         out = {"months": base[0], "total_interest": base[1], "payoff_date": (today() + timedelta(days=round(base[0] * 30.4375))).isoformat()}
         if extra > 0:
             faster = run(pay + extra)
@@ -433,11 +566,14 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
         return f()
 
     # ---- the web, through the person's own SearXNG
-    seen_urls = set()
+    seen_urls = seen_urls if seen_urls is not None else SeenUrls()
 
     def t_search_web(a):
         from coinpile import websearch
         url = ctx.searx_url() if getattr(ctx, "searx_url", None) else ""
+        private = private_in_query(store, str(a.get("query", "")))
+        if private:
+            return {"error": f"not searched: the query holds {private}. Search for the general question without personal details."}
         try:
             rows = websearch.search(url, str(a.get("query", "")), getattr(ctx, "search_transport", None), time_range=a.get("time_range"))
         except websearch.SearchError as e:
@@ -464,6 +600,12 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
                 clean, summary, target = prepare(ctx, a)
             except (agent_actions.Refused, ValueError, KeyError, TypeError) as e:
                 return {"error": f"not asked: {e}"}
+            same = store.one("SELECT id, summary FROM agent_actions WHERE tool=? AND args=? AND status='asked'", (name, json.dumps(clean)))
+            if same:
+                return {"status": "already waiting for the user's yes or no", "action_id": same["id"], "what": same["summary"],
+                        "note": "This exact request was asked before and has not been answered. It is not asked twice."}
+            if store.one("SELECT COUNT(*) n FROM agent_actions WHERE status='asked'")["n"] >= MAX_WAITING:
+                return {"error": f"not asked: {MAX_WAITING} requests are already waiting for the user's answer. Ask them to answer those first."}
             with store.tx() as c:
                 aid = c.execute("INSERT INTO agent_actions(chat_id,tool,args,summary,target,status,created) VALUES(?,?,?,?,?,'asked',?)",
                                 (chat_id, name, json.dumps(clean), summary, target, sync.now())).lastrowid
@@ -484,17 +626,17 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False):
         return ledger.suggestions(store, today())
 
     def t_savings(a):
-        gv, sv = plan.goals_view(store, today()), ledger.savings_summary(store, today())
+        gv, sv = plan.goals_view(store, today(), own_only=not peer_data), ledger.savings_summary(store, today())
         return {"places": gv["places"], "total_savings": gv["total"], "earmarked_for_goals": gv["allocated"], "free_savings": gv["free"], "overallocated": gv["overallocated"],
                 "weighted_apy": sv["weighted_apy"], "yearly_interest": sv["yearly_interest"], "maturing_soon": sv["maturing_soon"],
-                "goals": [{k: g[k] for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "priority", "monthly", "status") if k in g} for g in gv["items"]],
+                "goals": [{k: g[k] for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "priority", "monthly", "status") if k in g} for g in gv["items"] if g.get("shared_state") != "offered"],
                 "piggy_banks": [{k: p[k] for k in ("piggy_id", "name", "saved", "target", "still_needed", "target_date")} for p in piggy_banks(store)]}
 
     def t_goals(a):
-        gv = plan.goals_view(store, today())
+        gv = plan.goals_view(store, today(), own_only=not peer_data)
         return {"free_savings": gv["free"], "total_savings": gv["total"], "set_aside": gv["allocated"], "still_needed_for_goals": gv["needed"],
                 "goals_are_piggy_banks": piggy_banks(store),
-                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations" and (peer_data or k not in PEER_FIELDS)} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active"]}
+                "older_coinpile_goals": [{k: v for k, v in g.items() if k != "allocations" and (peer_data or k not in PEER_FIELDS)} | {"earmarks": g["allocations"]} for g in gv["items"] if g["status"] == "active" and g.get("shared_state") != "offered"]}
 
     def t_add_goal(a):
         try:
@@ -669,6 +811,17 @@ def system_prompt(name: str, today: date) -> str:
             "Before you answer, Coinpile checks every figure in your answer against the tool results; figures you worked out yourself are sent back. Be concise.")
 
 
+class ModelError(Exception):
+    """The model server answered, but not with something a chat can continue from."""
+
+
+def _text(content) -> str:
+    """A reply's text: plain, or (some servers) a list of parts."""
+    if isinstance(content, list):
+        return "".join(str(p.get("text") or "") for p in content if isinstance(p, dict))
+    return content if isinstance(content, str) else ""
+
+
 def _call_openai(http, prov, key, system, messages, tools):
     msgs = [{"role": "system", "content": system}]
     for m in messages:
@@ -683,15 +836,19 @@ def _call_openai(http, prov, key, system, messages, tools):
         body["tools"] = [{"type": "function", "function": {"name": n, "description": d, "parameters": s}} for n, d, s, _ in tools]
     r = http.post(prov["base_url"].rstrip("/") + "/chat/completions", json=body, headers={"Authorization": f"Bearer {key}"} if key else {})
     r.raise_for_status()
-    m = r.json()["choices"][0]["message"]
-    calls = []
-    for t in m.get("tool_calls") or []:
-        try:
-            args = json.loads(t["function"].get("arguments") or "{}")
-        except ValueError:
-            args = {}
-        calls.append({"id": t.get("id") or t["function"]["name"], "name": t["function"]["name"], "args": args if isinstance(args, dict) else {}})
-    return {"content": m.get("content") or "", "tool_calls": calls}
+    try:
+        m = r.json()["choices"][0]["message"]
+        calls = []
+        for t in m.get("tool_calls") or []:
+            raw = t["function"].get("arguments")
+            try:
+                args = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            except (ValueError, TypeError, RecursionError):
+                args = {}
+            calls.append({"id": str(t.get("id") or t["function"]["name"]), "name": str(t["function"]["name"]), "args": args if isinstance(args, dict) else {}})
+        return {"content": _text(m.get("content")), "tool_calls": calls}
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        raise ModelError("the model server answered something that is not a chat reply")
 
 
 def _call_anthropic(http, prov, key, system, messages, tools):
@@ -714,9 +871,12 @@ def _call_anthropic(http, prov, key, system, messages, tools):
         body["tools"] = [{"name": n, "description": d, "input_schema": s} for n, d, s, _ in tools]
     r = http.post(prov["base_url"].rstrip("/") + "/v1/messages", json=body, headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
     r.raise_for_status()
-    blocks = r.json().get("content", [])
-    return {"content": "".join(b.get("text", "") for b in blocks if b["type"] == "text"),
-            "tool_calls": [{"id": b["id"], "name": b["name"], "args": b.get("input") or {}} for b in blocks if b["type"] == "tool_use"]}
+    try:
+        blocks = r.json().get("content", [])
+        return {"content": "".join(b.get("text", "") for b in blocks if b["type"] == "text"),
+                "tool_calls": [{"id": str(b["id"]), "name": str(b["name"]), "args": b.get("input") if isinstance(b.get("input"), dict) else {}} for b in blocks if b["type"] == "tool_use"]}
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        raise ModelError("the model server answered something that is not a chat reply")
 
 
 WRITE_TOOLS = {"propose_subscription", *agent_actions.ACTIONS}
@@ -762,13 +922,21 @@ def check_args(schema: dict, args) -> str | None:
         want = _TYPES.get(spec.get("type"))
         if v is None or not want:
             continue
-        if spec.get("type") == "number" and isinstance(v, str):
+        if spec.get("type") in ("number", "integer") and isinstance(v, str):        # "$5,000" from a model: made a number here, so the tool gets one
             try:
-                float(v.replace(",", "").replace("$", ""))
-                continue
+                v = float(v.replace(",", "").replace("$", "").strip())
             except ValueError:
-                pass
+                return f"{k} must be a {spec['type']}"
+            if v != v or v in (float("inf"), float("-inf")):
+                return f"{k} must be an ordinary number"
+            args[k] = v = int(v) if spec.get("type") == "integer" and v.is_integer() else v
+        if isinstance(v, float) and (v != v or v in (float("inf"), float("-inf"))):
+            args[k] = None                                # never carried on into a trace or a request
+            return f"{k} must be an ordinary number"
+        if spec.get("type") in ("number", "integer") and not isinstance(v, bool) and isinstance(v, (int, float)) and abs(v) > 1e15:
+            return f"{k} is too large"
         if spec.get("type") == "integer" and isinstance(v, float) and v.is_integer():
+            args[k] = int(v)
             continue
         if isinstance(v, bool) and spec.get("type") in ("number", "integer"):
             return f"{k} must be a {spec['type']}"
@@ -779,34 +947,57 @@ def check_args(schema: dict, args) -> str | None:
     return None
 
 
-_NUM = re.compile(r"(?<![\w.])-?\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?\s*(%|k\b)?")
-_DATEISH = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
+_NUM = re.compile(r"(?<![A-Za-z0-9.])-?\$?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(?:[eE](\d{1,2}))?\s*(%|[kK]\b|M\b|thousand\b|million\b|billion\b)?")
+_DATEISH = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b|(?<![$\d])\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b|\b\d{1,2}\.\d{1,2}\.\d{2,4}\b")
+_NAMES = re.compile(r"(?<![$\d.,])\b(?:401\s?\(?k\)?|403\s?\(?b\)?|457\s?\(?b\)?|529(?=\s+(?:plan|account|college|savings))|(?:form\s+)?(?:1040|1099|1098|1095)(?:-[A-Z]{1,4})?|W-?[249])(?![\d,.]*\d)", re.I)   # tax forms and account types, not amounts
+_CURRENCY = re.compile(r"\b(?:USD|EUR|GBP|CAD|AUD|CHF)\s?(?=\d)")
+_MONEY_WORD = re.compile(r"\s*(?:dollars?|bucks|usd|euros?|eur|pounds?|gbp)\b", re.I)
+_SCALE = {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6, "billion": 1e9}
 
 
 def figures(text: str) -> list[tuple[str, float]]:
-    """The money-like figures in a text: amounts, decimals, percentages, anything 10 or more. Dates, years and small counts are left out."""
+    """The money-like figures in a text: amounts, decimals, percentages, anything 10 or more. Dates, years, small counts and the names of
+    tax forms and account types (401k, 1099) are left out."""
     out = []
-    for m in _NUM.finditer(_DATEISH.sub(" ", text or "")):
+    text = _CURRENCY.sub("$", _NAMES.sub(" ", _DATEISH.sub(" ", (text or "").replace("_", " ").replace("*", " "))))
+    for m in _NUM.finditer(text):
         raw = m.group(0).strip()
         v = float((m.group(1) + (m.group(2) or "")).replace(",", ""))
-        if m.group(3) == "k":
-            v *= 1000
-        small_count = v < 10 and not m.group(2) and m.group(3) != "%" and "$" not in raw
-        year = 1900 <= v <= 2100 and not m.group(2) and "$" not in raw and "," not in raw
+        if m.group(3):
+            v *= 10 ** int(m.group(3))
+        unit = (m.group(4) or "").lower()
+        v *= _SCALE.get(unit, 1)
+        money = "$" in raw or bool(_MONEY_WORD.match(text, m.end()))
+        small_count = v < 10 and not m.group(2) and unit != "%" and not money
+        year = 1900 <= v <= 2100 and not m.group(2) and not unit and "," not in raw and not money
         if not (small_count or year):
             out.append((raw, v))
     return out
 
 
 def known_numbers(*sources) -> list[float]:
-    """Every number that appears in the given tool results and messages (strings included), with the usual variants."""
+    """Every number that appears in the given tool results and messages (strings included), with their rounded forms. A percentage in an
+    answer may also be a fraction from a tool times 100 (0.013 -> 1.3%): those are kept apart as negative entries' twins in known_percent."""
+    return _known(sources)[0]
+
+
+def known_percent(*sources) -> list[float]:
+    return _known(sources)[1]
+
+
+def _known(sources) -> tuple[list[float], list[float]]:
     seen = []
 
     def walk(x):
         if isinstance(x, bool):
             return
         if isinstance(x, (int, float)):
-            seen.append(float(x))
+            try:
+                f = float(x)
+            except OverflowError:
+                return
+            if f == f and abs(f) < 1e18:
+                seen.append(f)
         elif isinstance(x, dict):
             for v in x.values():
                 walk(v)
@@ -818,22 +1009,38 @@ def known_numbers(*sources) -> list[float]:
                 seen.append(v)
     for s in sources:
         walk(s)
-    out = set()
+    out, pct = set(), set()
     for v in seen:
-        for w in (v, abs(v), abs(v) * 100, abs(v) / 100):
+        for w in (v, abs(v)):
             out.update({round(w, 2), round(w, 1), round(w), round(w, 4)})
-    return sorted(out)
+        if abs(v) <= 1:                                   # a share such as 0.013, said as 1.3%
+            w = abs(v) * 100
+            pct.update({round(w, 2), round(w, 1), round(w)})
+    return sorted(out), sorted(pct)
 
 
-def unverified(reply: str, known: list[float]) -> list[str]:
+def unverified(reply: str, known: list[float], percent: list[float] = (), plain: list[float] = ()) -> list[str]:
+    """Figures in the reply that match nothing known. percent: extra values a figure written with % may match. plain: values that only a bare
+    whole number may match (the day of the month, not "$17" or "17%")."""
     import bisect
+
+    def has(pool, v):
+        tol = max(0.006, abs(v) * 0.0005)
+        i = bisect.bisect_left(pool, v - tol)
+        return i < len(pool) and pool[i] <= v + tol
     bad = []
     for raw, v in figures(reply):
-        tol = max(0.006, abs(v) * 0.0005)
-        i = bisect.bisect_left(known, v - tol)
-        if not (i < len(known) and known[i] <= v + tol):
-            bad.append(raw)
+        if has(known, v) or (raw.endswith("%") and has(percent, v)) or (re.fullmatch(r"\d+", raw) and v in plain):
+            continue
+        bad.append(raw)
     return list(dict.fromkeys(bad))
+
+
+def checked_reply(reply: str, results, history, extra: str, today_: date) -> list[str]:
+    """What in the reply did not come from a tool, the user's own messages or the items linked to the chat. Not a source: the model's own
+    earlier text (a compacted summary included), and tool errors that only repeat what the model sent."""
+    src = (results, [m.get("content") or "" for m in history if m["role"] == "user"], extra)
+    return unverified(reply, known_numbers(*src), known_percent(*src), plain=[float(today_.day), float(today_.month), float(today_.year)])
 
 
 def asked(trace) -> list[int]:
@@ -861,10 +1068,10 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
             out = call(http, prov, key, system, msgs, tools if use_tools else None)
             if not out["tool_calls"]:
                 reply = out["content"].strip()
-                if not use_tools:
-                    return {"reply": reply, "trace": trace, "steps": step + 1, "actions": asked(trace)}
-                known = known_numbers(results, [m.get("content") or "" for m in history if m["role"] == "user"], extra, summary, ctx.today().isoformat())     # never its own check message
-                bad = unverified(reply, known)
+                if not use_tools:                   # no tools to send it back to: the figures are still held against the snapshot it was given
+                    return {"reply": reply, "trace": trace, "steps": step + 1, "actions": asked(trace),
+                            "checked": {"figures": len(figures(reply)), "unverified": checked_reply(reply, [snap], history, extra, ctx.today())}}
+                bad = checked_reply(reply, results, history, extra, ctx.today())          # never its own check message
                 if bad and not repaired and step + 1 < max_steps:          # one chance to put the figures through a tool
                     repaired = True
                     trace.append({"tool": "(figure check)", "args": {"not_from_a_tool": bad}, "ok": False, "preview": "sent back to compute them with tools"})
@@ -877,21 +1084,26 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
             msgs.append({"role": "assistant", "content": out["content"], "tool_calls": out["tool_calls"]})
             for t_ in out["tool_calls"]:
                 fn = by_name.get(t_["name"])
-                key_ = t_["name"] + json.dumps(t_["args"], sort_keys=True, default=str)
                 problem = check_args(schemas[t_["name"]], t_["args"]) if fn else None
+                key_ = t_["name"] + json.dumps(t_["args"], sort_keys=True, default=str)
+                echo = True                                     # an error that only repeats what the model sent is not a source of figures
                 if not fn:
-                    res = {"error": f"unknown tool {t_['name']}; use one of the listed tools"}
+                    res = {"error": f"unknown tool {str(t_['name'])[:60]}; use one of the listed tools"}
                 elif problem:
                     res = {"error": f"bad arguments: {problem}. Fix them and call again."}
-                elif key_ in done_calls and t_["name"] not in WRITE_TOOLS:
-                    res = {"repeat": True, "note": "You already called this with the same arguments; the result is above. Use it instead of calling again."}
+                elif key_ in done_calls:
+                    res = {"repeat": True, "note": "You already called this with the same arguments; the result is above. Use it instead of calling again."
+                           + (" The user has already been asked: wait for their answer." if t_["name"] in WRITE_TOOLS else "")}
                 else:
                     try:
                         res = fn(t_["args"])
+                        text = json.dumps(res, default=str)
+                        echo = False
                     except Exception as e:                      # a bad argument from the model must not crash the chat
-                        res = {"error": f"{type(e).__name__}: {e}"}
+                        res = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
                     done_calls[key_] = True
-                results.append(res)
+                if not echo:
+                    results.append(res)
                 text = json.dumps(res, default=str)
                 if len(text) > 12000:
                     text = text[:12000] + '..."(truncated)"'
@@ -927,7 +1139,7 @@ def list_models(kind: str, base_url: str, key: str, transport=None) -> list[dict
             out = [{"id": m.get("id") or m.get("name"), "context": m.get("context_length") or m.get("max_context_length") or m.get("max_model_len") or m.get("context_window")} for m in rows if isinstance(m, dict) and (m.get("id") or m.get("name"))]
             if out:
                 return out
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError, KeyError):       # a server that answers something else simply cannot say
             pass
         r = http.get(_origin(base_url) + "/api/tags")                  # Ollama's native listing
         r.raise_for_status()
@@ -952,7 +1164,7 @@ def model_context(base_url: str, model: str, transport=None) -> dict:
             mx = next((v for k, v in (body.get("model_info") or {}).items() if k.endswith(".context_length") and isinstance(v, int)), None)
             if mx:
                 return {"context_tokens": min(mx, 32768), "model_max": mx, "preset": False, "source": "the model's maximum (Ollama only uses this much when num_ctx is set, so capped at 32768)"}
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError, KeyError):       # a server that answers something else simply cannot say
             pass
         try:                                                    # LM Studio's native listing knows what is loaded
             r = http.get(origin + "/api/v0/models")
@@ -962,7 +1174,7 @@ def model_context(base_url: str, model: str, transport=None) -> dict:
                 loaded = row.get("loaded_context_length")
                 return {"context_tokens": int(loaded or row["max_context_length"]), "preset": bool(loaded), "model_max": row.get("max_context_length"),
                         "source": "the context LM Studio has loaded" if loaded else "the model's maximum (LM Studio)"}
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError, KeyError):       # a server that answers something else simply cannot say
             pass
         try:                                                    # llama.cpp's server reports the context it was started with
             r = http.get(origin + "/props")
@@ -971,7 +1183,7 @@ def model_context(base_url: str, model: str, transport=None) -> dict:
             n = (j.get("default_generation_settings") or {}).get("n_ctx") or j.get("n_ctx")
             if n:
                 return {"context_tokens": int(n), "preset": True, "source": "the server's own context size (llama.cpp n_ctx)"}
-        except (httpx.HTTPError, ValueError, AttributeError):
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError, KeyError):       # a server that answers something else simply cannot say
             pass
     return {"context_tokens": None}
 
@@ -1090,7 +1302,9 @@ def register(app, ctx):
             raise HTTPException(502, f"the server answered {e.response.status_code} when asked for its models" + (" (check the API key)" if e.response.status_code in (401, 403) else ""))
         except httpx.HTTPError as e:
             raise HTTPException(502, f"could not reach {b.base_url} ({type(e).__name__}). Is it running?")
-        return {"models": sorted(found, key=lambda m: m["id"]), "local": is_local(b.base_url)}
+        except (ValueError, AttributeError, TypeError, KeyError):
+            raise HTTPException(502, "the server answered, but not with a list of models. Check the address and server type.")
+        return {"models": sorted(found, key=lambda m: str(m["id"])), "local": is_local(b.base_url)}
 
     @app.post("/api/agent/model-info")
     def model_info(request: Request, b: Discover):
@@ -1123,6 +1337,8 @@ def register(app, ctx):
             raise HTTPException(502, f"model server answered {e.response.status_code}")
         except httpx.HTTPError as e:
             raise HTTPException(502, f"could not reach the model at {row['base_url']} ({type(e).__name__}). Is it running?")
+        except ModelError as e:
+            raise HTTPException(502, f"{e}. Check the model's address and that it speaks the {row['kind']} chat format.")
 
     def key_of(row):
         return crypto.decrypt(row["key_enc"]) if row["key_enc"] else ""
@@ -1131,13 +1347,13 @@ def register(app, ctx):
     def live(chat_id):
         return store.all("SELECT * FROM chat_messages WHERE chat_id=? AND compacted=0 ORDER BY id", (chat_id,))
 
-    def link_context(chat_id) -> tuple[str, list[dict]]:
+    def link_context(chat_id, peer_data: bool = False) -> tuple[str, list[dict]]:
         """Resolve linked goals/notes to (text for the model, display rows for the UI). Deleted items just drop out."""
         links, text = [], []
         gv = None
         for l in store.all("SELECT * FROM chat_links WHERE chat_id=? ORDER BY rowid", (chat_id,)):
             if l["kind"] == "goal":
-                gv = gv or plan.goals_view(store, ctx.today())
+                gv = gv or plan.goals_view(store, ctx.today(), own_only=not peer_data)
                 g = next((x for x in gv["items"] if x["id"] == l["ref_id"]), None)
                 if g:
                     links.append({"kind": "goal", "ref_id": g["id"], "title": g["name"]})
@@ -1229,14 +1445,22 @@ def register(app, ctx):
         usage = context_usage(ctx, prov, chat["summary"], [m for m in msgs if not m["compacted"]], bool(prov["tools"]), link_context(chat_id)[0]) if prov else None
         return {"chat": chat, "messages": msgs, "usage": usage, "links": link_context(chat_id)[1], "actions": actions_of(chat_id)}
 
+    def for_model(rows, local: bool) -> list[dict]:
+        """The chat as this model may see it: answers a local model wrote with other people's numbers in reach are left out for a cloud model."""
+        return [{"role": m["role"], "content": m["content"] if local or not m.get("peer") else LEFT_OUT} for m in rows]
+
+    def summary_for(chat, local: bool) -> str:
+        return chat["summary"] if local or not chat.get("summary_peer") else ""
+
     def compact(chat, prov, key, keep=4) -> bool:
         rows = live(chat["id"])
         if len(rows) <= keep:
             return False
-        old = rows[:-keep]
-        text = "\n".join(f"{r['role'].upper()}: {r['content']}" for r in old)
+        old, local = rows[:-keep], is_local(prov.get("base_url") or "")
+        earlier = summary_for(chat, local)
+        text = "\n".join(f"{r['role'].upper()}: {r['content']}" for r in for_model(old, local))
         prompt = ("Summarize this conversation so you can continue it later. Keep every number, name, decision and open question. Under 250 words.\n\n"
-                  + (f"Earlier summary:\n{chat['summary']}\n\n" if chat["summary"] else "") + text)
+                  + (f"Earlier summary:\n{earlier}\n\n" if earlier else "") + text)
         call = _call_anthropic if prov["kind"] == "anthropic" else _call_openai
         with netguard.client(ctx.llm_transport, timeout=CHAT_TIMEOUT) as http:
             out = call(http, prov, key, "You write concise, faithful conversation summaries.", [{"role": "user", "content": prompt}], None)
@@ -1244,7 +1468,7 @@ def register(app, ctx):
         if not summary:
             return False
         with store.tx() as c:
-            c.execute("UPDATE chats SET summary=? WHERE id=?", (summary[:6000], chat["id"]))
+            c.execute("UPDATE chats SET summary=?, summary_peer=? WHERE id=?", (summary[:6000], int(local and (bool(chat.get("summary_peer")) or any(r.get("peer") for r in old))), chat["id"]))
             c.execute(f"UPDATE chat_messages SET compacted=1 WHERE id IN ({','.join('?' * len(old))})", [r["id"] for r in old])
         return True
 
@@ -1345,19 +1569,23 @@ def register(app, ctx):
         compacted = False
         try:
             msgs = live(cid)
-            extra = link_context(cid)[0]
+            extra = link_context(cid, local)[0]
             if context_usage(ctx, row, chat["summary"], msgs, use_tools, extra)["pct"] > 0.75 and len(msgs) > 5:       # make room before the model runs out
                 compacted = model_errors(row, lambda: compact(chat, row, key))
                 chat = store.one("SELECT * FROM chats WHERE id=?", (cid,))
-            hist = [{"role": m["role"], "content": m["content"]} for m in live(cid)]
-            out = model_errors(row, lambda: run_chat(ctx, row, key, hist[-40:], summary=chat["summary"], use_tools=use_tools, extra=extra, chat_id=cid))
+            sent = live(cid)[-40:]
+            while len(sent) > 1 and sent[0]["role"] != "user":          # a conversation starts with the user (some model APIs refuse anything else)
+                sent = sent[1:]
+            out = model_errors(row, lambda: run_chat(ctx, row, key, for_model(sent, local), summary=summary_for(chat, local), use_tools=use_tools, extra=extra, chat_id=cid))
+            peer = int(local and bool(links.active_peers(store)) and (not use_tools or bool(extra) or any(m.get("peer") for m in sent) or bool(chat.get("summary_peer"))
+                                                                      or any(t.get("tool") in PEER_TOOLS for t in out["trace"])))
         except Exception:
             with store.tx() as c:                      # a failed turn leaves no half-saved question behind
                 c.execute("DELETE FROM chat_messages WHERE id=?", (mid,))
             raise
         with store.tx() as c:
             trace = out["trace"] + ([{"tool": "(figures)", "args": out["checked"], "ok": not out["checked"]["unverified"], "preview": ""}] if out.get("checked") else [])
-            c.execute("INSERT INTO chat_messages(chat_id,role,content,trace,created) VALUES(?,?,?,?,?)", (cid, "assistant", out["reply"] or "(no answer)", json.dumps(trace, default=str), sync.now()))
+            c.execute("INSERT INTO chat_messages(chat_id,role,content,trace,peer,created) VALUES(?,?,?,?,?,?)", (cid, "assistant", out["reply"] or "(no answer)", json.dumps(trace, default=str), peer, sync.now()))
             c.execute("UPDATE chats SET updated=?, provider_id=?, title=CASE WHEN title='New chat' THEN ? ELSE title END WHERE id=?", (sync.now(), row["id"], text[:60], cid))
         view = chat_view(cid)
         return {**view, "compacted": compacted, "provider": {"id": row["id"], "name": row["name"], "model": row["model"], "local": local}, "tools_used": use_tools}
@@ -1380,13 +1608,11 @@ def register(app, ctx):
         hist = [{"role": m["role"], "content": str(m.get("content", ""))} for m in body.messages if m.get("role") in ("user", "assistant") and m.get("content")]
         if not hist or hist[-1]["role"] != "user":
             raise HTTPException(422, "last message must be from the user")
-        try:
-            with outbound(ctx):
-                out = run_chat(ctx, row, crypto.decrypt(row["key_enc"]) if row["key_enc"] else "", hist[-30:])
-        except httpx.HTTPStatusError as e:
-            raise HTTPException(502, f"model server answered {e.response.status_code}")
-        except httpx.HTTPError as e:
-            raise HTTPException(502, f"could not reach the model at {row['base_url']} ({type(e).__name__}). Is it running?")
+        hist = hist[-30:]
+        while len(hist) > 1 and hist[0]["role"] != "user":
+            hist = hist[1:]
+        with outbound(ctx):
+            out = model_errors(row, lambda: run_chat(ctx, row, crypto.decrypt(row["key_enc"]) if row["key_enc"] else "", hist))
         out["actions"] = [action_view(r) for r in (store.one("SELECT * FROM agent_actions WHERE id=?", (i,)) for i in out.get("actions", [])) if r]
         return {**out, "provider": {"id": row["id"], "name": row["name"], "model": row["model"], "local": local}}
 
@@ -1395,7 +1621,10 @@ def register(app, ctx):
 MCP_PROTOCOL = "2025-06-18"
 
 
-def mcp_handle(ctx, msg: dict) -> dict | None:
+MCP_NEEDS = {"refresh_from_firefly": "refresh"}       # tools that need a second scope on the token, the same one the plain API asks for
+
+
+def mcp_handle(ctx, msg: dict, scopes: set | None = None) -> dict | None:
     """One JSON-RPC message from an MCP client. Read tools run; change tools only ask (the request waits for a Yes on Coinpile's Agent page);
     the skills are offered as prompts. Every call is checked against the tool's schema first, as in Coinpile's own chat."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
@@ -1403,9 +1632,13 @@ def mcp_handle(ctx, msg: dict) -> dict | None:
     mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
     if mid is None:                                   # a notification (initialized, cancelled ...): nothing to answer
         return None
+    if not isinstance(params, dict):
+        return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "params must be an object"}}
     ok = lambda r: {"jsonrpc": "2.0", "id": mid, "result": r}                                         # noqa: E731
     err = lambda code, m: {"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": m}}       # noqa: E731
-    tools = [x for x in build_tools(ctx) if x[0] != "use_skill"]
+    if not hasattr(ctx, "mcp_seen_urls"):
+        ctx.mcp_seen_urls = SeenUrls()                 # each call builds the tools anew: what a search returned stays readable for the next calls
+    tools = [x for x in build_tools(ctx, seen_urls=ctx.mcp_seen_urls) if x[0] != "use_skill"]
     if method == "initialize":
         return ok({"protocolVersion": params.get("protocolVersion") or MCP_PROTOCOL, "capabilities": {"tools": {}, "prompts": {}},
                    "serverInfo": {"name": "coinpile", "version": "1"},
@@ -1419,14 +1652,17 @@ def mcp_handle(ctx, msg: dict) -> dict | None:
         name, args = params.get("name"), params.get("arguments") or {}
         found = next((x for x in tools if x[0] == name), None)
         if not found:
-            return err(-32602, f"unknown tool {name}")
+            return err(-32602, f"unknown tool {str(name)[:60]}")
+        if name in MCP_NEEDS and MCP_NEEDS[name] not in (scopes or ()):
+            return ok({"content": [{"type": "text", "text": f"this token may not do that: it needs the {MCP_NEEDS[name]} scope as well"}], "isError": True})
         problem = check_args(found[2], args)
         if problem:
             return ok({"content": [{"type": "text", "text": f"bad arguments: {problem}"}], "isError": True})
         try:
             res = found[3](args)
+            json.dumps(res, default=str)
         except Exception as e:
-            res = {"error": f"{type(e).__name__}: {e}"}
+            res = {"error": f"{type(e).__name__}: {str(e)[:300]}"}
         if isinstance(res, dict) and res.get("action_id"):
             res["note"] = "Nothing has changed yet: the user answers Yes or No on Coinpile's Agent page."
         text = json.dumps(res, default=str)

@@ -45,7 +45,7 @@ def places(db, today: date) -> list[dict]:
         days = (d(a["maturity"]) - today).days if a.get("maturity") else None
         out.append({"key": f"a:{a['id']}", "id": a["id"], "name": a["name"], "institution": a["institution"], "kind": a.get("sv_kind") or (a.get("subtype") or "savings").replace(" ", "_"),
                     "balance": bal, "apy": apy, "maturity": a.get("maturity"), "opened": a.get("opened"), "term_months": a.get("term_months"), "days_to_maturity": days,
-                    "value_at_maturity": round(bal * (1 + (apy or 0) / 100 / 365) ** days, 2) if days is not None and days >= 0 else None, "origin": "account", "account_id": a["id"]})
+                    "value_at_maturity": ledger.grown(bal, apy, days) if days is not None and days >= 0 else None, "origin": "account", "account_id": a["id"]})
     return out
 
 
@@ -77,7 +77,9 @@ def piggy_goals(db, today: date) -> list[dict]:
     return out
 
 
-def goals_view(db, today: date) -> dict:
+def goals_view(db, today: date, own_only: bool = False) -> dict:
+    """own_only: count only what this person set aside toward a shared goal. For anything that leaves Coinpile (a cloud model, another app
+    over MCP or an API token, the Pondering Orb): what is still needed would otherwise give away what the other people put in."""
     pl = places(db, today)
     total = round(sum(p["balance"] for p in pl), 2)
     allocs = _allocs(db)
@@ -87,11 +89,11 @@ def goals_view(db, today: date) -> dict:
         if a["place"]:
             pinned[a["place"]] = pinned.get(a["place"], 0) + a["amount"]
     piggies = _piggies(db)                     # Firefly III piggy banks: money already set aside inside an account, so it is not free either
-    keys = {p["key"] for p in pl}
+    by_acct = {(p.get("account_id") or (p["key"][2:] if p["key"].startswith("a:") else None)): p["key"] for p in pl}   # a followed account shows as its savings item
     for pg in piggies:
         for x in pg["accounts"]:
-            k = "a:" + x["account_id"]
-            if k in keys and x["amount"] > 0:
+            k = by_acct.get(x["account_id"])
+            if k and x["amount"] > 0:
                 pinned[k] = pinned.get(k, 0) + x["amount"]
                 pg["counted"] = round(pg.get("counted", 0) + x["amount"], 2)
     in_piggies = round(sum(pg.get("counted", 0) for pg in piggies), 2)
@@ -101,8 +103,10 @@ def goals_view(db, today: date) -> dict:
         p["earmarked"] = round(pinned.get(p["key"], 0), 2)
         p["free"] = round(p["balance"] - p["earmarked"], 2)
     items = []
-    team_extra = {r["goal_id"]: r["n"] for r in db.all("SELECT p.goal_id, SUM(p.amount) n FROM goal_partners p JOIN goals g ON g.id=p.goal_id WHERE g.shared_state='active' GROUP BY p.goal_id")}   # what the others on a shared goal have set aside
+    team_extra = {} if own_only else {r["goal_id"]: r["n"] for r in db.all("SELECT p.goal_id, SUM(p.amount) n FROM goal_partners p JOIN goals g ON g.id=p.goal_id WHERE g.shared_state='active' GROUP BY p.goal_id")}   # what the others on a shared goal have set aside
     for g in db.all("SELECT * FROM goals ORDER BY status='done', priority, deadline IS NULL, deadline, id"):
+        if own_only and g.get("shared_state") == "offered":
+            continue                                         # an offer I have not answered is not mine: nothing outside Coinpile hears of it
         got = round(sum(a["amount"] for a in by_goal.get(g["id"], [])), 2)
         team = round(got + team_extra.get(g["id"], 0), 2)
         short = round(max(0.0, g["target"] - team), 2)
@@ -246,6 +250,11 @@ def move(db, src: int, dst: int, amount: float, today: date) -> dict:
     have = db.one("SELECT COALESCE(SUM(amount),0) s FROM allocations WHERE goal_id=?", (src,))["s"]
     if amount > have + 0.005:
         raise PlanError(f"that goal only has ${have:,.2f} earmarked")
+    to = db.one("SELECT status, shared_state FROM goals WHERE id=?", (dst,))
+    if not to:
+        raise KeyError(dst)
+    if to["status"] != "active" or to["shared_state"] == "offered":
+        raise PlanError("that goal is closed" if to["status"] != "active" else "answer the offer for that goal first")
     left = amount
     for a in db.all("SELECT * FROM allocations WHERE goal_id=? ORDER BY place=''", (src,)):    # pinned money first
         take = min(left, a["amount"])
@@ -344,7 +353,7 @@ def monthly_plan(db, month: str, today: date) -> dict:
                 break
     if income_month and left < 0:
         warnings.append(f"The plan spends ${-left:,.2f} more than your expected income.")
-    got = db.one("SELECT COALESCE(SUM(t.amount),0) s FROM transactions t JOIN categories c ON c.name=t.category WHERE t.amount>0 AND c.kind='income' AND t.date BETWEEN ? AND ?", (start, end))["s"]
+    got = db.one("SELECT COALESCE(SUM(t.amount),0) s FROM transactions t JOIN categories c ON c.name=t.category WHERE t.amount>0 AND c.kind='income' AND " + ledger.in_main(db, "t")[0] + " AND t.date BETWEEN ? AND ?", (*ledger.in_main(db, "t")[1], start, end))["s"]
     other_spent = round(sum(v for k, v in spent.items() if k not in {r["category"] for r in rows}), 2)
     return {"month": month, "income_month": income_month, "income_smoothed": income_smooth, "left_smoothed": left_smooth, "extra_paycheck_month": any(i["extra_paycheck"] for i in inc), "extra_income": extra, "extra_for_goal": extra_goal, "incomes": inc, "outflow_planned": outflow, "goals_month": goals_month, "left": left, "rows": rows, "warnings": warnings,
             "actual": {"income": round(got, 2), "spent": round(sum(spent.values()), 2), "unbudgeted_spent": other_spent},
@@ -428,7 +437,7 @@ def matured_idle(db, today: date, within_days: int = 60) -> list[dict]:
     out = []
     for p in sorted((p for p in v["places"] if p.get("maturity")), key=lambda p: p["maturity"]):
         ago = (today - d(p["maturity"])).days
-        if ago < 0 or ago > within_days or p["balance"] <= 0.005:
+        if ago < 1 or ago > within_days or p["balance"] <= 0.005:          # the day itself is "matures today", not "idle"
             continue
         pinned = pin.get(p["key"], [])
         free = round(max(0.0, p["balance"] - sum(x["amount"] for x in pinned)), 2)

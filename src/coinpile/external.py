@@ -75,10 +75,10 @@ def data(db, resource: str, today, params: dict) -> dict:
     if resource == "alerts":
         return {"alerts": ledger.alerts(db, today)}
     if resource == "savings":
-        gv = plan.goals_view(db, today)
+        gv = plan.goals_view(db, today, own_only=True)
         return {"total": gv["total"], "earmarked": gv["allocated"], "free": gv["free"], "places": [{k: p[k] for k in ("name", "institution", "kind", "balance", "apy", "maturity", "earmarked", "free")} for p in gv["places"]]}
     if resource == "goals":
-        gv = plan.goals_view(db, today)
+        gv = plan.goals_view(db, today, own_only=True)
         return {"free_savings": gv["free"], "still_needed": gv["needed"], "goals": [{k: g.get(k) for k in ("id", "name", "target", "allocated", "shortfall", "pct", "deadline", "monthly_needed", "ready_date", "status")} for g in gv["items"]]}
     if resource == "budgets":
         return plan.monthly_plan(db, params.get("month") or today.strftime("%Y-%m"), today)
@@ -90,7 +90,7 @@ def data(db, resource: str, today, params: dict) -> dict:
 
 
 def summary(db, today) -> dict:
-    gv = plan.goals_view(db, today)
+    gv = plan.goals_view(db, today, own_only=True)
     nxt = ledger.upcoming(db, 60, today)
     mine = [i for i in nxt["items"] if i["payer"] == "me"]
     al = ledger.alerts(db, today)
