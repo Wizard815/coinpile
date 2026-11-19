@@ -24,7 +24,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from coinpile.strict import BaseModel
 
-from coinpile import aicat, agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync
+from coinpile import aicat, agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync, trading
 from coinpile.db import DB, Closed
 from coinpile.oplog import log
 from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
@@ -293,7 +293,7 @@ def same_origin(scope, public_url: str = "") -> bool:
 
 def create_app(firefly_url: str | None = None, data_dir: str | None = None, firefly_transport=None, connector_transport=None, llm_transport=None,
                caldav_transport=None, notify_transport=None, today=None, background: bool = False, client_id: str | None = None,
-               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None, search_transport=None):
+               public_firefly_url: str | None = None, public_url: str | None = None, robinhood_transport=None, webhook_transport=None, mcp_transport=None, search_transport=None, trader_transport=None, trading_clock=None):
     ff_url = (firefly_url or os.environ.get("FIREFLY_URL", "")).rstrip("/")
     ff_public = (public_firefly_url or os.environ.get("FIREFLY_PUBLIC_URL", "") or ff_url).rstrip("/")
     client_id = client_id or os.environ.get("FIREFLY_CLIENT_ID", "")
@@ -362,6 +362,28 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                     raise Forgotten(uid)
                 dbs[uid] = DB(os.path.join(data_dir, "people", f"{safe_id(uid)}.db"))
             return dbs[uid]
+
+    engines: dict[str, trading.Engine] = {}
+
+    def engine_for(uid: str) -> trading.Engine:
+        """The auto wallet and trading advice (trading.py). Only the Robinhood owner (RH_OWNER) can use it; for anyone else it does nothing."""
+        with made:
+            if uid not in engines:
+                db = person_db(uid)
+
+                def tell(text: str) -> None:
+                    url = cfg.get(db, "notify_url")
+                    if url:
+                        notify.post(url, {"text": text[:3500], "username": "Coinpile trading", "icon_emoji": ":chart_with_upwards_trend:"}, notify_transport)
+                engines[uid] = trading.Engine(db, (users.get(uid) or {}).get("email", ""), trading.Trader(transport=trader_transport), mcp_transport, tell, trading_clock)
+            return engines[uid]
+
+    def trading_tick(uid: str) -> None:
+        """Start a trading session in the background when one is due (it can take a while: the model reads and argues per stock)."""
+        e = engine_for(uid)
+        slot = e.due_slot() if e.allowed else None
+        if slot and not e.lock.locked():
+            threading.Thread(target=lambda: e.run_session(slot), daemon=True, name="coinpile-trading").start()
 
     # ---------------- Firefly III tokens
     renewing: dict[str, threading.Lock] = {}
@@ -509,6 +531,10 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
                 refresh(u["id"])                          # also sends webhooks
             else:
                 send_hooks(u["id"])                       # CSV imports, goals, retries
+        except Exception:
+            pass
+        try:
+            trading_tick(u["id"])
         except Exception:
             pass
         finally:
@@ -701,6 +727,124 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             with db.tx() as c:
                 c.execute("DELETE FROM accounts WHERE id='rh:agent'")
             return {"connected": False}
+
+        # ---------------- trading: the auto wallet (paper or your Robinhood Agentic account) and advice for your own account
+        def eng() -> trading.Engine:
+            e = engine_for(uid)
+            if not e.allowed:
+                raise HTTPException(403, "trading is only for the Robinhood owner (set RH_OWNER to your Firefly III email)")
+            return e
+
+        @app.get("/api/trading")
+        def trading_view():
+            return eng().status()
+
+        @app.put("/api/trading/config")
+        def trading_config(body: dict):
+            e = eng()
+            body = dict(body or {})
+            if body.get("wallet") == "live" and trading.config(db)["wallet"] != "live":
+                if body.pop("confirm", None) != "LIVE":
+                    raise HTTPException(422, "to trade real money, send confirm: LIVE with wallet: live")
+                if not cfg.get(db, "rh_trade_token"):
+                    raise HTTPException(409, "connect Robinhood for trading first")
+                if not trading.config(db)["order_tool"] and not body.get("order_tool"):
+                    raise HTTPException(409, "choose Robinhood's order tool first (Live wallet, Check)")
+            body.pop("confirm", None)
+            try:
+                return {"config": trading.save_config(e.db, body)}
+            except ValueError as x:
+                raise HTTPException(422, str(x))
+
+        @app.post("/api/trading/run")
+        def trading_run():
+            e = eng()
+            if e.lock.locked():
+                raise HTTPException(409, "a session is already running")
+            threading.Thread(target=lambda: e.run_session("now"), daemon=True, name="coinpile-trading").start()
+            return {"started": True}
+
+        @app.post("/api/trading/orders/{oid}/{choice}")
+        def trading_decide(oid: int, choice: str):
+            if choice not in ("approve", "reject"):
+                raise HTTPException(404, "approve or reject")
+            try:
+                return {"order": eng().decide(oid, choice == "approve")}
+            except LookupError as x:
+                raise HTTPException(409, str(x))
+            except (RuntimeError, mcp.MCPError) as x:
+                raise HTTPException(502, str(x))
+
+        @app.post("/api/trading/paper/reset")
+        def trading_reset():
+            e = eng()
+            if e.lock.locked():
+                raise HTTPException(409, "a session is running")
+            trading.PaperWallet(db, trading.config(db)["paper_cash"]).reset(trading.config(db)["paper_cash"])
+            with db.tx() as c:
+                c.execute("DELETE FROM trade_days")
+                c.execute("UPDATE trade_orders SET status='rejected', reason='paper wallet reset' WHERE status='asked' AND wallet='paper'")
+            return {"reset": True}
+
+        @app.post("/api/trading/connect")
+        async def trading_connect(request: Request):
+            """Sign in to Robinhood for trading (a separate sign-in from the read-only one). Robinhood limits it to your Agentic account."""
+            eng()
+            url = cfg.get(db, "rh_mcp_url") or robinhood.MCP_URL
+            back = (my_url or str(request.base_url).rstrip("/")) + "/auth/robinhood/trade-callback"
+
+            def work():
+                with outbound.hold():
+                    meta = mcp.discover(url, mcp_transport)
+                    return meta, mcp.register(meta, back, mcp_transport, "Coinpile (auto wallet)")
+            try:
+                meta, client = await run_in_threadpool(work)
+            except (mcp.MCPError, netguard.Blocked) as x:
+                raise HTTPException(502, str(x))
+            meta = {**meta, "redirect": back, "url": url, "trading": True}
+            verifier, challenge = mcp.pkce()
+            state = secrets.token_urlsafe(24)
+            with oauth_lock:
+                for k in [k for k, v in rh_pending.items() if time.time() - v[2] > 900]:
+                    del rh_pending[k]
+                if len(rh_pending) >= 1000:
+                    raise HTTPException(429, "too many sign-ins in progress; try again in a few minutes")
+                rh_pending[state] = (uid, verifier, time.time(), meta, client)
+            return {"url": mcp.authorize_url(meta, client, back, state, challenge, trading=True)}
+
+        @app.post("/api/trading/disconnect")
+        def trading_disconnect():
+            eng()
+            trading.forget_tokens(db)
+            if trading.config(db)["wallet"] == "live":
+                trading.save_config(db, {"wallet": "paper"})
+            return {"connected": False}
+
+        @app.post("/api/trading/live/check")
+        def trading_live_check():
+            """The order tools Robinhood offers, the one Coinpile would use, and exactly what it would send for 1 share of SPY. Nothing is sent."""
+            e = eng()
+            c = trading.config(db)
+            w = trading.LiveWallet(db, mcp_transport, c["order_tool"])
+            try:
+                with outbound.hold():
+                    tools = w.client().tool_list()
+                    cash, pos = w.holdings()
+            except (mcp.MCPError, RuntimeError) as x:
+                raise HTTPException(502, str(x))
+            chosen = c["order_tool"] or trading.guess_order_tool(tools)
+            out = {"tools": [t["name"] for t in tools], "order_tools": [t["name"] for t in tools if "order" in t["name"].lower()], "chosen": chosen,
+                   "cash": cash, "positions": len(pos)}
+            t = next((t for t in tools if t["name"] == chosen), None)
+            if t:
+                try:
+                    out["would_send"] = trading.order_args(t, "buy", "SPY", 1)
+                except ValueError as x:
+                    out["problem"] = str(x)
+                out["schema"] = t.get("inputSchema")
+            if chosen and not c["order_tool"] and "would_send" in out:
+                trading.save_config(e.db, {"order_tool": chosen})
+            return out
 
         @app.get("/api/investments")
         def investments_view():
@@ -1438,6 +1582,20 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         if "holdings" in share:               # the last known positions (Robinhood: activity CSV, MCP or connector), one row per symbol per account
             out["holdings"] = [{"symbol": h["symbol"], "quantity": h["quantity"], "net_cost": h["net_cost"], "equity": h["value"], "account": h["account_id"], "as_of": h["updated"]}
                                for h in db.all("SELECT * FROM holdings WHERE quantity IS NOT NULL AND quantity != 0 ORDER BY account_id, symbol LIMIT 300")]
+        if "trading" in share and trading.owner_ok((users.get(uid) or {}).get("email", "")):   # the auto wallet and its ideas, read only
+            try:
+                st = engine_for(uid).status()
+                snap = st.get("snapshot") or {}
+                last = next((x for x in st["sessions"] if x["status"] != "running"), None)
+                out["trading"] = {"enabled": st["config"]["enabled"], "wallet": st["config"]["wallet"], "value": snap.get("value"), "cash": snap.get("cash"),
+                                  "start_of_day": st["today"]["start_value"], "stopped": st["today"]["stopped"], "next_session": st["next_session"],
+                                  "running": st["running"], "waiting": len(st["waiting"]),
+                                  "positions": [{k: p.get(k) for k in ("symbol", "quantity", "price", "value")} for p in snap.get("positions") or []],
+                                  "last_session": {k: last[k] for k in ("day", "slot", "mode", "status", "summary", "finished")} if last else None,
+                                  "orders": [{k: o[k] for k in ("ts", "symbol", "side", "quantity", "price", "status", "reason", "rating")} for o in st["orders"][:15]],
+                                  "ideas": [{k: i[k] for k in ("account", "symbol", "rating", "action", "summary", "ts")} for i in st["ideas"] if not i["error"]][:30]}
+            except Exception:
+                out["trading"] = None
         if "daily" in share:                  # per-day totals for the last 31 days, never the transactions behind them
             out["daily"] = [{k: x[k] for k in ("date", "spent", "income")} for x in ledger.daily_totals(db, t, 31)]      # the shape the Orb reads
         return out
@@ -1677,7 +1835,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         with oauth_lock:
             got = rh_pending.pop(state, None) if state else None
         uid = users.session_user(request.cookies.get(COOKIE))
-        if error or not got or got[0] != uid:
+        if error or not got or got[0] != uid or got[3].get("trading"):
             return RedirectResponse("/?robinhood=failed#settings", 302)
         try:
             db = person_db(uid)
@@ -1694,6 +1852,29 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         robinhood.Robinhood(db, "", None, "", mcp_transport).save_tokens(d)
         refresh_soon(uid)
         return RedirectResponse("/?robinhood=connected#investments", 302)
+
+    @front.get("/auth/robinhood/trade-callback")
+    async def rh_trade_callback(request: Request, code: str = "", state: str = "", error: str = ""):
+        """Back from Robinhood's sign-in for the auto wallet. Only the browser (and person) that started it can finish it."""
+        with oauth_lock:
+            got = rh_pending.pop(state, None) if state else None
+        uid = users.session_user(request.cookies.get(COOKIE))
+        if error or not got or got[0] != uid or not got[3].get("trading"):
+            return RedirectResponse("/?trading=failed#trading", 302)
+        try:
+            db = person_db(uid)
+        except KeyError:
+            return RedirectResponse("/?trading=failed#trading", 302)
+        _, verifier, _, meta, client = got
+        try:
+            d = await run_in_threadpool(mcp.exchange, meta, client,
+                                        {"grant_type": "authorization_code", "code": code, "redirect_uri": meta["redirect"], "code_verifier": verifier}, mcp_transport)
+        except (mcp.MCPError, ValueError, KeyError):
+            return RedirectResponse("/?trading=refused#trading", 302)
+        cfg.set_value(db, "rh_trade_client", client)
+        cfg.set_value(db, "rh_trade_meta", json.dumps(meta))
+        trading.save_tokens(db, d)
+        return RedirectResponse("/?trading=connected#trading", 302)
 
     @front.get("/auth/firefly")
     def auth_firefly(request: Request):

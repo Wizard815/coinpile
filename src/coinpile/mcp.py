@@ -1,8 +1,8 @@
 """A small, read-only MCP client (Model Context Protocol, streamable HTTP) with the MCP sign-in flow (OAuth 2.1 with PKCE and dynamic client
 registration), used for Robinhood's official MCP server (Agentic Trading, https://agent.robinhood.com/mcp/trading).
 
-Read-only by construction: `call()` refuses any tool that is not on the caller's allowlist, and Coinpile's Robinhood allowlist holds only get_* reads.
-Nothing in Coinpile can place, cancel or change an order."""
+`call()` refuses any tool that is not on the caller's allowlist. The Robinhood read sign-in's allowlist holds only get_* reads. The trading
+sign-in (trading.py) is separate: its own token, asked for Robinhood's trading scope, and its allowlist adds the one order tool you choose."""
 import base64
 import hashlib
 import json
@@ -102,6 +102,12 @@ class Client:
             self.start()
         return [t.get("name") for t in self._post("tools/list").get("tools", [])]
 
+    def tool_list(self) -> list[dict]:
+        """Every tool with its description and input schema (to see what an order tool expects)."""
+        if not self.session:
+            self.start()
+        return [t for t in self._post("tools/list").get("tools", []) if isinstance(t, dict) and isinstance(t.get("name"), str)]
+
     def call(self, name: str, args: dict | None = None):
         """Call one READ tool. Anything not on the allowlist is refused here, before a request is made."""
         if name not in self.allow:
@@ -169,13 +175,13 @@ def discover(url: str, transport=None) -> dict:
     raise MCPError("could not find where to sign in to this MCP server")
 
 
-def register(meta: dict, redirect_uri: str, transport=None) -> str:
+def register(meta: dict, redirect_uri: str, transport=None, name: str = "Coinpile (read-only)") -> str:
     """Dynamic client registration: Coinpile introduces itself and gets a client id (no secret: a public client using PKCE)."""
     if not meta.get("registration_endpoint"):
         raise MCPError("this MCP server does not let apps register themselves; paste a token instead")
     try:
         r = netguard.client(transport, timeout=20).post(_https(meta["registration_endpoint"], "registration"), json={
-        "client_name": "Coinpile (read-only)", "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
+        "client_name": name, "redirect_uris": [redirect_uri], "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"], "token_endpoint_auth_method": "none"})
     except httpx.HTTPError as e:
         raise MCPError(f"could not reach the MCP server's registration ({type(e).__name__})")
@@ -189,10 +195,12 @@ def pkce() -> tuple[str, str]:
     return verifier, base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
 
 
-def authorize_url(meta: dict, client_id: str, redirect_uri: str, state: str, challenge: str) -> str:
+def authorize_url(meta: dict, client_id: str, redirect_uri: str, state: str, challenge: str, trading: bool = False) -> str:
+    """trading=False asks only for read scopes. trading=True (the auto wallet's own sign-in) asks for everything the server offers;
+    Robinhood itself limits an external agent's orders to the Agentic account."""
     q = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "state": state, "code_challenge": challenge,
          "code_challenge_method": "S256", "resource": meta["resource"]}
-    q["scope"] = " ".join(read_scopes(meta.get("scopes") or [])) or None
+    q["scope"] = " ".join(meta.get("scopes") or [] if trading else read_scopes(meta.get("scopes") or [])) or None
     if not q["scope"]:
         del q["scope"]
     return meta["authorization_endpoint"] + ("&" if "?" in meta["authorization_endpoint"] else "?") + urlencode(q)

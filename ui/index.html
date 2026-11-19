@@ -901,6 +901,79 @@ async function viewRobinhood(root) {
   add(root, h("div", { class: "two" }, portfolio("Main account", "read-only", m), portfolio("Agent account", "read-only", a)), h("p", { class: "muted small" }, "Choose where the main account's data comes from under Settings > Robinhood. Nothing on this page can place a trade."));
 }
 
+/* ================================ TRADING ================================ */
+const TR_ACTION = { Buy: "t", Overweight: "t", Hold: "", Underweight: "r", Sell: "r" };
+async function viewTrading(root, rerender) {
+  let st;
+  try { st = await api("/api/trading"); } catch (e) { return add(root, h("div", { class: "panel" }, h("h3", {}, "Trading"), h("p", { class: "muted" }, e.message))); }
+  const c = st.config, snap = st.snapshot, put = async (body, msg) => { try { await api("/api/trading/config", send("PUT", body)); toast(msg || "Saved"); rerender(); } catch (e) { fail(e); } };
+  const post = async (path, msg) => { try { const r = await api(path, { method: "POST" }); toast(msg || "Done"); rerender(); return r; } catch (e) { fail(e); } };
+  const start = st.today.start_value, change = snap && snap.value != null && start ? snap.value - start : null;
+  const next = st.next_session ? new Date(st.next_session).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" }) : "none";
+  add(root,
+    h("div", { class: "grid" },
+      kpi(c.wallet === "live" ? "Auto wallet (live)" : "Auto wallet (paper)", snap ? usd(snap.value) : "–", snap ? `cash ${usd(snap.cash)}` : (st.snapshot_error || "")),
+      kpi("Today", change == null ? "–" : usd(change, true), st.today.stopped ? "stopped: daily loss" : start ? `started at ${usd(start)}` : "no session yet today", change != null && change < 0 ? "neg" : ""),
+      kpi("Next session", next, st.running ? "a session is running now" : c.enabled ? `${c.mode === "ask" ? "asks before each order" : "trades on its own"}` : "auto wallet off (advice only)"),
+      kpi("Trader", st.trader || "–", st.trader === "up" ? "TradingAgents on your model" : "start the trader container")),
+    st.waiting.length ? h("div", { class: "panel wide" }, h("h3", {}, "Waiting for you"),
+      h("table", {}, h("tbody", {}, st.waiting.map((o) => h("tr", {}, h("td", { class: "mono" }, `${o.side} ${o.quantity} ${o.symbol}`), h("td", { class: "small muted" }, o.rating ? `rated ${o.rating}. ` : "", o.reason),
+        h("td", { class: "r" }, h("button", { class: "btn sm primary", onclick: () => post(`/api/trading/orders/${o.id}/approve`, "Order sent") }, "Approve"), " ", h("button", { class: "btn sm", onclick: () => post(`/api/trading/orders/${o.id}/reject`, "Rejected") }, "Reject"))))))) : null,
+    h("div", { class: "panel" }, h("h3", {}, "Next session"),
+      h("p", { class: "muted small" }, "Only for the next session, then it goes back to normal. Your standing guidance is under Settings below."),
+      h("form", { style: "display:grid;gap:8px", onsubmit: (e) => { e.preventDefault();
+        let plan = [];
+        try { plan = (val("tr-plan") || "").split(/\n|;/).map((l) => l.trim()).filter(Boolean).map((l) => { const m = l.match(/^(buy|sell)\s+(all|[\d.]+)\s+([A-Za-z.\-]+)$/i); if (!m) throw new Error(`"${l}": write it like "buy 2 NVDA" or "sell all TSLA"`); return { side: m[1].toLowerCase(), quantity: m[2].toLowerCase() === "all" ? "all" : Number(m[2]), symbol: m[3].toUpperCase() }; }); } catch (x) { return toast(x.message); }
+        put({ next: { mode: val("tr-nmode"), guidance: val("tr-nguide") || "", plan } }, "Next session set"); } },
+        select("tr-nmode", "How", [["", `As usual (${c.mode === "ask" ? "ask me" : "auto"})`], ["auto", "Trade on its own"], ["ask", "Ask me before each order"], ["manual", "My plan only (below)"], ["skip", "Skip it"]], c.next.mode),
+        h("label", {}, "Guidance (the agents weigh it)", h("textarea", { id: "tr-nguide", rows: 2, placeholder: "e.g. take profit on NVDA; avoid banks this week" }, c.next.guidance || "")),
+        h("label", {}, "My plan (one order a line; checked against the rules)", h("textarea", { id: "tr-plan", rows: 2, placeholder: "buy 2 NVDA\nsell all TSLA" }, (c.next.plan || []).map((p) => `${p.side} ${p.quantity} ${p.symbol}`).join("\n"))),
+        h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Set"), " ", h("button", { class: "btn", type: "button", disabled: st.running, onclick: () => post("/api/trading/run", "Session started; it takes a few minutes") }, "Run a session now")))),
+    h("div", { class: "panel scroll" }, h("h3", {}, "Ideas"),
+      st.ideas.length ? h("table", { class: "small" }, h("thead", {}, h("tr", {}, h("th", {}, "For"), h("th", {}, "Stock"), h("th", {}, "Rating"), h("th", {}, "Idea"))),
+        h("tbody", {}, st.ideas.map((i) => h("tr", {}, h("td", {}, i.account === "main" ? "you" : "wallet"), h("td", { class: "mono" }, i.symbol),
+          h("td", {}, i.error ? h("span", { class: "pill r", title: i.error }, "failed") : h("span", { class: "pill " + (TR_ACTION[i.rating] || "") }, i.rating || "?")),
+          h("td", {}, h("b", {}, i.action || ""), i.summary || i.decision ? h("details", {}, h("summary", { class: "muted" }, ago(i.ts)), h("div", { style: "white-space:pre-wrap;max-height:320px;overflow:auto" }, i.summary || "", i.decision ? "\n\n" + i.decision : "")) : null))))) : h("p", { class: "muted" }, "No ideas yet: they come with each session.")),
+    snap && snap.positions.length ? h("div", { class: "panel" }, h("h3", {}, "Wallet holdings"), h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Stock"), h("th", { class: "r" }, "Shares"), h("th", { class: "r" }, "Price"), h("th", { class: "r" }, "Value"))),
+      h("tbody", {}, snap.positions.map((p) => h("tr", {}, h("td", { class: "mono" }, p.symbol), h("td", { class: "r num" }, String(+Number(p.quantity).toFixed(4))), h("td", { class: "r num" }, usd(p.price)), h("td", { class: "r num" }, usd(p.value))))))) : null,
+    h("div", { class: "panel scroll wide" }, h("h3", {}, "Sessions and orders"),
+      st.sessions.length ? h("table", { class: "small" }, h("tbody", {}, st.sessions.map((x) => h("tr", {}, h("td", { class: "mono" }, `${x.day} ${x.slot}`), h("td", {}, h("span", { class: "pill " + (x.status === "failed" ? "r" : "") }, x.status), " ", x.mode, " · ", x.wallet), h("td", {}, x.summary,
+        h("div", { class: "muted" }, st.orders.filter((o) => o.session_id === x.id).map((o) => `${o.side} ${+Number(o.quantity).toFixed(4)} ${o.symbol}${o.price ? " @ " + o.price : ""}: ${o.status}${o.reason ? " (" + o.reason + ")" : ""}`).join(" · "))))))) : h("p", { class: "muted" }, "No sessions yet.")),
+    h("div", { class: "panel wide" }, h("h3", {}, "Settings"),
+      h("form", { style: "display:grid;gap:8px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))", onsubmit: (e) => { e.preventDefault(); const on = (id) => $("#" + id).checked;
+        put({ enabled: on("tr-on"), advice: on("tr-adv"), mode: val("tr-mode"), sessions: val("tr-times").split(/[,\s]+/).filter(Boolean), watchlist: val("tr-watch"), per_session: Number(val("tr-per")), advice_per_session: Number(val("tr-aper")),
+              buy_pct: Number(val("tr-buy")), daily_loss_pct: Number(val("tr-loss")), pdt_guard: on("tr-pdt"), fractional: on("tr-frac"), paper_cash: Number(val("tr-cash")), guidance: val("tr-guide") || "" }); } },
+        h("label", { class: "row" }, h("input", { type: "checkbox", id: "tr-on", checked: c.enabled }), " Auto wallet trades"),
+        h("label", { class: "row" }, h("input", { type: "checkbox", id: "tr-adv", checked: c.advice }), " Ideas for my account"),
+        select("tr-mode", "Every session", [["auto", "Trade on its own"], ["ask", "Ask me before each order"]], c.mode),
+        field("tr-times", "Session times (New York, weekdays)", c.sessions.join(", ")),
+        field("tr-watch", "Watchlist", c.watchlist.join(", ")),
+        field("tr-per", "Watchlist stocks per session", c.per_session, { type: "number", min: 0, max: 20 }),
+        field("tr-aper", "My stocks per session", c.advice_per_session, { type: "number", min: 0, max: 20 }),
+        field("tr-buy", "A Buy aims for (% of wallet)", c.buy_pct, { type: "number", step: "0.5", min: 0.5, max: 100 }),
+        field("tr-loss", "Daily loss stop (%; 0 = off)", c.daily_loss_pct, { type: "number", step: "0.5", min: 0, max: 100 }),
+        h("label", { class: "row" }, h("input", { type: "checkbox", id: "tr-pdt", checked: c.pdt_guard }), " Day-trade guard (no same-day sell)"),
+        h("label", { class: "row" }, h("input", { type: "checkbox", id: "tr-frac", checked: c.fractional }), " Fractional shares"),
+        field("tr-cash", "Paper wallet starting cash", c.paper_cash, { type: "number", min: 1 }),
+        h("label", { style: "grid-column:1/-1" }, "Standing guidance (every session)", h("textarea", { id: "tr-guide", rows: 2, placeholder: "e.g. long-term; I like semiconductors and index funds" }, c.guidance || "")),
+        h("div", { class: "formbtns", style: "grid-column:1/-1" }, h("button", { class: "btn primary", type: "submit" }, "Save")))),
+    h("div", { class: "panel wide" }, h("h3", {}, "Your rules"),
+      h("p", { class: "muted small" }, "Checked by AgentRisk before every order, after the daily loss stop and the day-trade guard. Each order is also sized to stay under the cap per trade. YAML; a mistake is refused, not saved."),
+      h("textarea", { id: "tr-policy", rows: 16, spellcheck: "false", style: "font-family:var(--mono);font-size:.85rem" }, c.policy),
+      h("div", { class: "formbtns" }, h("button", { class: "btn primary", onclick: () => put({ policy: $("#tr-policy").value }, "Rules saved") }, "Save rules"))),
+    h("div", { class: "panel wide" }, h("h3", {}, "Wallet: paper or live"),
+      c.wallet === "paper" ? h("p", { class: "small" }, "Paper: simulated with real prices, starting from your paper cash. ", h("button", { class: "btn sm", onclick: () => confirm("Start the paper wallet over?") && post("/api/trading/paper/reset", "Paper wallet reset") }, "Start over"))
+        : h("p", { class: "small neg" }, "Live: orders go to your Robinhood Agentic account. ", h("button", { class: "btn sm", onclick: () => put({ wallet: "paper" }, "Back to paper") }, "Back to paper")),
+      h("p", { class: "muted small" }, "Live uses a separate Robinhood sign-in that can trade; Robinhood only lets it trade your Agentic account. Your main account is never traded: it only gets ideas."),
+      h("div", { class: "chips" },
+        st.live_connected ? h("button", { class: "btn", onclick: () => post("/api/trading/disconnect", "Disconnected") }, "Disconnect trading sign-in")
+          : h("button", { class: "btn primary", onclick: async () => { try { const r = await api("/api/trading/connect", { method: "POST" }); location.href = r.url; } catch (e) { fail(e); } } }, "Connect Robinhood for trading"),
+        st.live_connected ? h("button", { class: "btn", onclick: async () => { const b = $("#tr-check"); b.textContent = "Checking…"; try { const r = await api("/api/trading/live/check", { method: "POST" }); b.textContent = JSON.stringify({ order_tool: r.chosen, would_send_for_1_SPY: r.would_send, problem: r.problem, cash: r.cash, positions: r.positions, order_tools: r.order_tools }, null, 2); } catch (e) { b.textContent = e.message; } } }, "Check (sends nothing)") : null,
+        st.live_connected && c.wallet === "paper" ? h("button", { class: "btn", onclick: () => { if (prompt('Trade real money in your Agentic account? Type LIVE') === "LIVE") put({ wallet: "live", confirm: "LIVE" }, "Live"); } }, "Switch to live") : null),
+      h("pre", { id: "tr-check", class: "small", style: "white-space:pre-wrap" }, c.order_tool ? `Order tool: ${c.order_tool}` : "")),
+  );
+}
+
 /* ================================ SETTINGS (tabs) ================================ */
 const STABS = [["general", "General"], ["firefly", "Firefly III"], ["banks", "Banks"], ["links", "Sharing"], ["models", "Agent models"], ["api", "Home Assistant & API"], ["webhooks", "Webhooks"], ["robinhood", "Robinhood"], ["alerts", "Alerts"], ["categories", "Categories"], ["calendar", "Calendar"]];
 async function viewSettings(root, rerender) {
@@ -1220,7 +1293,7 @@ async function tabAlerts(root, rerender) {
     h("p", { class: "muted small", style: "margin-top:12px" }, "Alerts show on the Overview and the Subscriptions page, and reach the Pondering Orb (with their date) when you share the alert list. Phone notifications are not set up yet.")));
 }
 /* ---------- Sharing: the Pondering Orb, and API tokens for Home Assistant and scripts ---------- */
-const SHARE_LABELS = { net_worth: "Net worth", subscriptions: "Monthly subscription total", bills: "Bills due: totals for 7 and 30 days, and the next one", bill_list: "Bill list: each upcoming bill with its date, name and amount", alerts: "Alert counts", alert_list: "Alert list: the alert titles (these can name your accounts)", savings: "Savings: total, free, set aside", goals: "Goals (piggy banks): names and progress", budgets: "Firefly III budgets this month: limit, spent, left", paycheck: "Next paycheck: date, amount, bills before the next one, what is left", week: "This week: money in and out against last week, the 3 biggest payments, net worth change", spending: "Spending: this month so far, projected, average income", robinhood_main: "Robinhood main balance", robinhood_agent: "Robinhood agent balance", holdings: "Holdings: the stocks you hold (symbol, shares, cost, value) from Robinhood", daily: "Daily totals: spent and income per day for the last 31 days (no transactions)" };
+const SHARE_LABELS = { net_worth: "Net worth", subscriptions: "Monthly subscription total", bills: "Bills due: totals for 7 and 30 days, and the next one", bill_list: "Bill list: each upcoming bill with its date, name and amount", alerts: "Alert counts", alert_list: "Alert list: the alert titles (these can name your accounts)", savings: "Savings: total, free, set aside", goals: "Goals (piggy banks): names and progress", budgets: "Firefly III budgets this month: limit, spent, left", paycheck: "Next paycheck: date, amount, bills before the next one, what is left", week: "This week: money in and out against last week, the 3 biggest payments, net worth change", spending: "Spending: this month so far, projected, average income", robinhood_main: "Robinhood main balance", robinhood_agent: "Robinhood agent balance", holdings: "Holdings: the stocks you hold (symbol, shares, cost, value) from Robinhood", daily: "Daily totals: spent and income per day for the last 31 days (no transactions)", trading: "Trading: the auto wallet (value, holdings, orders, last session) and its ideas for your stocks" };
 const haYaml = (url, tok) => `rest_command:\n  coinpile_refresh:\n    url: "${url}/api/v1/me/ha?refresh=1"\n    method: GET\n    headers:\n      Authorization: "Bearer ${tok}"\n\nrest:\n  - resource: ${url}/api/v1/me/ha\n    scan_interval: 900\n    headers:\n      Authorization: Bearer ${tok}\n    sensor:\n      - name: "Coinpile net worth"\n        value_template: "{{ value_json.net_worth }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile bills next 7 days"\n        value_template: "{{ value_json.bills_7d }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile free savings"\n        value_template: "{{ value_json.savings_free }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile alerts"\n        value_template: "{{ value_json.alerts_total }}"\n      - name: "Coinpile next bill"\n        value_template: "{{ value_json.next_bill_name }} {{ value_json.next_bill_date }}"\n`;
 async function tabWebhooks(root, rerender) {
   const d = await api("/api/webhooks"), fresh = S.newHook;
@@ -1271,7 +1344,7 @@ async function tabSharing(root, rerender) {
 }
 
 /* ================================ SHELL ================================ */
-const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["piggy", "Piggy banks", viewPiggy], ["budgets", "Budgets", viewBudgets], ["notes", "Notes", viewNotes], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["settings", "Settings", viewSettings]];
+const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["piggy", "Piggy banks", viewPiggy], ["budgets", "Budgets", viewBudgets], ["notes", "Notes", viewNotes], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["trading", "Trading", viewTrading], ["settings", "Settings", viewSettings]];
 /* ---------- movable panels: order is remembered per tab in this browser ---------- */
 function layoutKey() { return "gb_layout_" + S.tab + (S.tab === "settings" ? ":" + S.settingsTab : "") + (S.acct ? ":acct" : ""); }
 function blocksOf(main) {

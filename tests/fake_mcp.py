@@ -12,6 +12,7 @@ MCP = "https://agent.example.com/mcp/trading"
 class FakeRobinhood:
     def __init__(self):
         self.calls, self.challenges, self.codes, self.tokens, self.refresh = [], {}, {}, set(), {}
+        self.orders, self.scopes = [], []
         self.n = 0
 
     def approve(self, authorize_url: str) -> str:
@@ -21,6 +22,7 @@ class FakeRobinhood:
         self.n += 1
         code = f"code{self.n}"
         self.codes[code] = q["code_challenge"]
+        self.scopes.append(q.get("scope", ""))
         return f"{q['redirect_uri']}?code={code}&state={q['state']}"
 
     def transport(self):
@@ -38,8 +40,14 @@ class FakeRobinhood:
                     return httpx.Response(202)
                 if m["method"] == "tools/list":
                     names = ["get_accounts", "get_portfolio", "get_equity_positions", "get_crypto_positions", "place_equity_order", "cancel_equity_order"]
-                    return httpx.Response(200, json={"jsonrpc": "2.0", "id": m["id"], "result": {"tools": [{"name": n} for n in names]}})
+                    order_schema = {"type": "object", "required": ["symbol", "side", "quantity", "type"],
+                                    "properties": {"symbol": {"type": "string"}, "side": {"type": "string", "enum": ["buy", "sell"]}, "quantity": {"type": "number"},
+                                                   "type": {"type": "string", "enum": ["market", "limit"]}, "time_in_force": {"type": "string", "enum": ["gfd", "gtc"]}}}
+                    return httpx.Response(200, json={"jsonrpc": "2.0", "id": m["id"], "result": {"tools": [{"name": n, **({"inputSchema": order_schema} if n == "place_equity_order" else {})} for n in names]}})
                 name = m["params"]["name"]
+                if name == "place_equity_order":
+                    self.orders.append(m["params"]["arguments"])
+                    return httpx.Response(200, json={"jsonrpc": "2.0", "id": m["id"], "result": {"content": [{"type": "text", "text": json.dumps({"order": {"id": f"ord-{len(self.orders)}", "state": "queued"}})}]}})
                 data = {"get_portfolio": {"portfolio": {"market_value": "7340.25", "buying_power": "412.10"}},
                         "get_equity_positions": {"results": [{"symbol": "NVDA", "quantity": "10", "average_buy_price": "120", "market_value": "1450"},
                                                              {"symbol": "VTI", "quantity": "20", "average_buy_price": "250", "market_value": "5890.25"}]},
