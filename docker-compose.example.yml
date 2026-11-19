@@ -14,3 +14,18 @@ services:
       TZ: America/New_York
     volumes:
       - ./data:/data
+      # TRADER_URL: http://trader:8100                 # the Trading tab (see below); also set RH_OWNER and CONNECTOR_SECRET
+
+  # Optional: the trader for the Trading tab. TradingAgents on your own model; it never places orders (Coinpile does, after your rules).
+  # trader:
+  #   build: ./trader
+  #   restart: unless-stopped
+  #   environment:
+  #     CONNECTOR_SECRET: change-me-to-a-long-random-string    # the same value as Coinpile's
+  #     TRADINGAGENTS_LLM_BACKEND_URL: http://192.168.1.50:8080/v1   # an OpenAI-compatible server (Argos, Ollama, llama.cpp)
+  #     TRADINGAGENTS_DEEP_THINK_LLM: your-model-name
+  #     TRADINGAGENTS_QUICK_THINK_LLM: your-model-name
+  #     # FRED_API_KEY: ...                              # optional macro data
+  #     TZ: America/New_York
+  #   volumes:
+  #     - ./trader-data:/data                            # its memory of past calls (how it learns)
