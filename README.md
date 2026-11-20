@@ -334,7 +334,9 @@ Three sessions a day (09:45, 12:30, 15:30 New York time on weekdays, changeable)
 record looks right: **Connect Robinhood for trading** (a sign-in separate from the read-only one, asking Robinhood for trading;
 Robinhood only lets an outside agent trade your Agentic account), **Check** (shows Robinhood's order tool and exactly what Coinpile
 would send for 1 share of SPY; sends nothing), then **Switch to live** and type LIVE. Robinhood's order tool isn't documented
-publicly, so Coinpile reads its input format when you connect and refuses an order it can't fill in; check before going live.
+publicly, so Coinpile reads its input format when you connect and refuses an order it can't fill in; check before going live. While the
+live wallet is on, Pondering Orb places no Picks orders in the Agentic account (when **Trading** is shared with it): one account,
+one trader, so the day-trade guard and daily loss stop see every order. Put a buy you want in Next session's plan instead.
 
 **The trader container** does the analysis and never places orders or holds a Robinhood sign-in; Coinpile does. Add it next to
 Coinpile (see `docker-compose.example.yml`) with `TRADER_URL`, the same `CONNECTOR_SECRET`, and your model:
