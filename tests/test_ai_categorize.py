@@ -134,7 +134,7 @@ def test_a_cloud_model_is_used_only_with_allow_cloud(tmp_path):
 def test_many_go_in_batches_of_forty(tmp_path):
     ff = world()
     for i in range(90):
-        ff.tx("1", 200 + i, "withdrawal", 5 + i, f"STORE NUMBER {i}", 1, 97, "2026-09-15")
+        ff.tx("1", 200 + i, "withdrawal", 5 + i, "STORE " + chr(65 + i // 26) + chr(65 + i % 26), 1, 97, "2026-09-15")      # 90 different shops
     c, ff, log = rig(tmp_path, ff)
     c.put("/api/settings", json={"ai_categorize": "on"})
     r = c.post("/api/categories/recategorize").json()
@@ -153,3 +153,31 @@ def test_a_model_that_is_down_does_not_break_the_rules_or_a_refresh(tmp_path):
     c.post("/api/refresh")
     ff.tx("1", 70, "withdrawal", 3.0, "WALMART", 1, 96, "2026-10-22")
     assert c.post("/api/refresh").status_code == 200
+
+
+def test_the_same_merchant_is_asked_once_and_every_one_of_its_payments_gets_that_answer(tmp_path):
+    ff = world()
+    ff.tx("1", 300, "withdrawal", 12.50, "WALMART SUPERCENTER #12", 1, 98, "2026-09-01")          # other store numbers and amounts: same merchant
+    ff.tx("1", 301, "withdrawal", 7.25, "Walmart  Supercenter #4471", 1, 98, "2026-09-02")
+    ff.tx("1", 302, "deposit", 7.25, "WALMART SUPERCENTER #12", 98, 1, "2026-09-03")             # a refund: money in, asked on its own line
+    c, ff, log = rig(tmp_path, ff)
+    c.put("/api/settings", json={"ai_categorize": "on"})
+    r = c.post("/api/categories/recategorize").json()
+    lines = prompt_lines(log[0])
+    assert len(log) == 1 and sum("walmart" in ln.lower() for ln in lines) == 2
+    walmarts = [t for t in c.get("/api/transactions", params={"q": "walmart", "limit": 50}).json()["items"] if t["amount"] < 0]
+    assert len(walmarts) == 3 and {t["category"] for t in walmarts} == {"Groceries"}
+    assert r["ai"]["asked"] == len(log[0]["messages"][-1]["content"].splitlines()) + 2        # 3 out-going Walmart rows went as 1 line
+
+
+def test_a_merchant_placed_before_gets_the_same_category_without_asking_again(tmp_path):
+    c, ff, log = rig(tmp_path)
+    c.put("/api/settings", json={"ai_categorize": "on", "ai_categorize_auto": "on"})
+    c.post("/api/refresh")                                                 # switching auto on: history is marked, not sent
+    c.post("/api/categories/recategorize")                                 # the manual run places WALMART SUPERCENTER #12
+    n = len(log)
+    ff.tx("1", 62, "withdrawal", 44.0, "WALMART SUPERCENTER #12", 1, 96, "2026-10-23")
+    out = c.post("/api/refresh").json()
+    assert len(log) == n and out["ai_categorize"]["calls"] == 0           # no model call
+    assert out["ai_categorize"]["set"] == 1
+    assert [t["category"] for t in c.get("/api/transactions", params={"q": "walmart supercenter", "limit": 50}).json()["items"]] == ["Groceries", "Groceries"]
