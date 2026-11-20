@@ -18,7 +18,7 @@ services:
 
   # Optional: the trader for the Trading tab. TradingAgents on your own model; it never places orders (Coinpile does, after your rules).
   # trader:
-  #   build: ./trader
+  #   image: ghcr.io/wizard815/coinpile-trader:latest   # published from main (amd64); or build it: build: ./trader
   #   restart: unless-stopped
   #   environment:
   #     CONNECTOR_SECRET: change-me-to-a-long-random-string    # the same value as Coinpile's
