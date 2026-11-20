@@ -1,6 +1,7 @@
 """The auto wallet and trading advice.
 
-Three sessions a day (morning, midday, afternoon; New York time, weekdays). Each session:
+Three sessions a day (morning, midday, afternoon; New York time) on days the US stock market is open: no sessions at weekends or on
+market holidays, and none after 1 pm on early-close days (markethours.py). Each session:
   - Auto wallet: TradingAgents (the trader container, your own model) analyses the wallet's stocks and some of your watchlist,
     each decision becomes an order sized by your settings, every order passes traderules.check (daily loss stop, day-trade guard,
     your AgentRisk policy), and the order is filled in the paper wallet or placed in your Robinhood Agentic account.
@@ -23,7 +24,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from coinpile import mcp, robinhood, settings as cfg, traderules
+from coinpile import markethours, mcp, robinhood, settings as cfg, traderules
 
 NY = ZoneInfo("America/New_York")
 RATINGS = ("Buy", "Overweight", "Hold", "Underweight", "Sell")
@@ -63,6 +64,7 @@ DEFAULTS = {
     "pdt_guard": True,
     "policy": traderules.DEFAULT_POLICY,
     "order_tool": "",                 # live: the Robinhood MCP tool that places an order (found on connect; you can change it)
+    "extra_closed": [],               # one-off market closures the holiday rules can't know (YYYY-MM-DD)
 }
 TOKEN_KEYS = ("rh_trade_token", "rh_trade_refresh", "rh_trade_expires", "rh_trade_client", "rh_trade_meta")
 
@@ -165,6 +167,11 @@ def save_config(db, patch: dict) -> dict:
                 raise ValueError("order_tool must be a tool name")
             if v and (not re.search(r"order", v, re.I) or re.search(r"cancel|transfer|withdraw|deposit|option|crypto|stake|lend", v, re.I)):
                 raise ValueError("order_tool must be Robinhood's stock order tool (its name has 'order' in it; never a transfer, cancel, options or crypto tool)")
+        elif k == "extra_closed":
+            items = v if isinstance(v, list) else [x for x in re.split(r"[,\s]+", str(v or "")) if x]
+            if any(not re.match(r"^\d{4}-\d{2}-\d{2}$", str(x)) for x in items):
+                raise ValueError("extra closed days are dates like 2027-01-09")
+            v = sorted(set(map(str, items)))[-50:]
         elif k == "next":
             n = v or {}
             if n.get("mode", "") not in NEXT_MODES:
@@ -406,28 +413,40 @@ class Engine:
         if not self.allowed or not (c["enabled"] or c["advice"]):
             return None
         now = self.clock()
-        if now.weekday() >= 5:
-            return None
+        shut = markethours.close_time(now.date(), c["extra_closed"])
+        if not shut:
+            return None                                   # weekend or market holiday
         day = now.date().isoformat()
         done = {r["slot"] for r in self.db.all("SELECT slot FROM trade_sessions WHERE day=?", (day,))}
         for slot in c["sessions"]:
             h, m = map(int, slot.split(":"))
             at = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if at.time() >= shut:
+                continue                                  # after an early close
             if at <= now < at + LATE and slot not in done:
                 return slot
         return None
 
+    def market(self, c: dict | None = None) -> dict:
+        """Today's market: open or not (and why), and when it closes."""
+        c = c or config(self.db)
+        now = self.clock()
+        why, shut = markethours.closed(now.date(), c["extra_closed"]), markethours.close_time(now.date(), c["extra_closed"])
+        return {"day": now.date().isoformat(), "open_today": not why, "closed_because": why, "closes": shut.strftime("%H:%M") if shut else None,
+                "early_close": shut == markethours.EARLY_CLOSE, "open_now": bool(shut) and markethours.OPEN <= now.time() < shut}
+
     def next_session(self) -> str | None:
         c = config(self.db)
         now = self.clock()
-        for d in range(0, 8):
+        for d in range(0, 15):
             day = (now + timedelta(days=d))
-            if day.weekday() >= 5:
+            shut = markethours.close_time(day.date(), c["extra_closed"])
+            if not shut:
                 continue
             for slot in c["sessions"]:
                 h, m = map(int, slot.split(":"))
                 at = day.replace(hour=h, minute=m, second=0, microsecond=0)
-                if at > now:
+                if at > now and at.time() < shut:
                     return at.isoformat(timespec="minutes")
         return None
 
@@ -516,6 +535,10 @@ class Engine:
         return [items[(start + i) % len(items)] for i in range(min(n, len(items)))]
 
     def _auto(self, sid: int, c: dict, mode: str, guidance: str, plan: list, day: str, cache: dict, notes: list) -> list[dict]:
+        mk = self.market(c)
+        if not mk["open_now"]:
+            notes.append(f"The market is closed ({mk['closed_because'] or 'outside trading hours'}): no orders.")
+            return []
         wallet = self.wallet(c)
         snap = self.snapshot(wallet)
         start = self._day_start(day, snap["value"])
@@ -626,6 +649,9 @@ class Engine:
                 return {**o, "status": "rejected"}
             if o["wallet"] != c["wallet"]:
                 raise LookupError("this order was for the other wallet")
+            mk = self.market(c)
+            if not mk["open_now"]:
+                raise LookupError(f"the market is closed ({mk['closed_because'] or 'outside trading hours'}); approve it when it's open")
             wallet = self.wallet(c)
             day = self.clock().date().isoformat()
             _, held = wallet.holdings()
@@ -677,7 +703,7 @@ class Engine:
     def status(self, prices: bool = True) -> dict:
         c = config(self.db)
         out = {"allowed": self.allowed, "config": c, "trader": self.trader.up() if prices else None, "next_session": self.next_session(),
-               "live_connected": bool(cfg.get(self.db, "rh_trade_token")), "running": self.lock.locked()}
+               "live_connected": bool(cfg.get(self.db, "rh_trade_token")), "running": self.lock.locked(), "market": self.market(c)}
         try:
             out["snapshot"] = self.snapshot() if prices else None
         except Exception as e:

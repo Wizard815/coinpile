@@ -343,7 +343,12 @@ names in `TRADINGAGENTS_DEEP_THINK_LLM` / `TRADINGAGENTS_QUICK_THINK_LLM`. Marke
 `FRED_API_KEY` adds macro data. A session takes a few minutes per stock on a local model, so keep the per-session counts small.
 Results go to your chat webhook (Settings, Alerts) and, with **Trading** ticked under Sharing, to the Orb (read only).
 
-US market holidays aren't known: a session on a holiday sees no new prices, and live orders are refused by Robinhood.
+Sessions follow the US stock market's days: none at weekends or on market holidays (New Year's Day, Martin Luther King Jr. Day,
+Washington's Birthday, Good Friday, Memorial Day, Juneteenth, Independence Day, Labor Day, Thanksgiving, Christmas; a Saturday holiday
+moves to Friday, a Sunday one to Monday), and none after 1 pm on early-close days (the day before Independence Day, the day after
+Thanksgiving, Christmas Eve). These are worked out from the exchanges' rules, so nothing needs updating each year. One-off closures
+(a national day of mourning) go in **Extra market closures**. A session you run by hand while the market is closed gives ideas but
+places no orders, and orders waiting for you can only be approved while it's open.
 
 ## Settings
 

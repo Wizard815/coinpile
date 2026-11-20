@@ -224,3 +224,45 @@ def test_live_wallet_through_robinhoods_mcp(tmp_path, monkeypatch):
     assert next(o for o in st["orders"] if o["symbol"] == "VTI")["broker_ref"] == "ord-1"
     assert c.post("/api/trading/disconnect").json() == {"connected": False}
     assert c.get("/api/trading").json()["config"]["wallet"] == "paper", "no sign-in, back to paper"
+
+# ---------------------------------------------------------------- US market days
+def test_market_holidays_match_the_exchange_calendar():
+    from datetime import date
+    from coinpile import markethours as m
+    assert sorted(d.isoformat() for d in m.holidays(2026)) == ["2026-01-01", "2026-01-19", "2026-02-16", "2026-04-03", "2026-05-25", "2026-06-19",
+                                                                "2026-07-03", "2026-09-07", "2026-11-26", "2026-12-25"], "July 4 on a Saturday: the Friday"
+    h27 = {d.isoformat() for d in m.holidays(2027)}
+    assert "2027-12-24" in h27 and "2027-07-05" in h27 and "2027-03-26" in h27 and "2027-06-18" in h27
+    assert "2027-12-31" not in h27 and "2028-12-29" not in {d.isoformat() for d in m.holidays(2028)}, "New Year's Day on a Saturday isn't made up"
+    assert m.closed(date(2026, 11, 26)) == "Thanksgiving Day" and m.closed(date(2026, 11, 28)) == "the weekend" and m.closed(date(2026, 11, 25)) is None
+    assert m.close_time(date(2026, 11, 27)) == m.EARLY_CLOSE and m.close_time(date(2026, 12, 24)) == m.EARLY_CLOSE and m.close_time(date(2026, 12, 23)) == m.CLOSE
+    assert m.close_time(date(2025, 7, 3)) == m.EARLY_CLOSE and m.close_time(date(2026, 7, 3)) is None, "the day before July 4, unless it's the holiday itself"
+    assert m.closed(date(2021, 6, 18)) is None, "Juneteenth only from 2022"
+    assert m.closed(date(2027, 1, 11), ["2027-01-11"]) == "a closure you added"
+
+
+def test_no_sessions_or_orders_when_the_market_is_closed(tmp_path, monkeypatch):
+    a, tr, clock = make(tmp_path, monkeypatch)
+    c = signed_in(a)
+    c.put("/api/trading/config", json={"enabled": True, "watchlist": ["NVDA"], "per_session": 1})
+    import glob
+    from coinpile.db import DB
+    e = trading.Engine(DB(glob.glob(str(tmp_path / "people" / "*.db"))[0]), "alice@example.com", trading.Trader("http://trader:8100", "s3cret", tr.transport()), clock=clock)
+    clock.t = datetime(2026, 11, 26, 9, 50, tzinfo=trading.NY)                     # Thanksgiving
+    assert e.due_slot() is None and e.market()["closed_because"] == "Thanksgiving Day"
+    assert e.next_session().startswith("2026-11-27T09:45")
+    clock.t = datetime(2026, 11, 27, 12, 31, tzinfo=trading.NY)                    # the day after: closes at 1 pm
+    assert e.due_slot() == "12:30" and e.market()["early_close"]
+    clock.t = datetime(2026, 11, 27, 15, 31, tzinfo=trading.NY)
+    assert e.due_slot() is None, "the 15:30 session is after the early close"
+    assert e.next_session().startswith("2026-11-30T09:45")
+    # run by hand on the holiday: ideas, but no orders
+    clock.t = datetime(2026, 11, 26, 10, 0, tzinfo=trading.NY)
+    st = run(c)
+    assert not st["orders"] and "market is closed (Thanksgiving Day)" in st["sessions"][0]["summary"]
+    assert st["market"]["open_today"] is False
+    # a closure you add
+    assert c.put("/api/trading/config", json={"extra_closed": "2026-12-01"}).json()["config"]["extra_closed"] == ["2026-12-01"]
+    clock.t = datetime(2026, 12, 1, 9, 50, tzinfo=trading.NY)
+    assert e.due_slot() is None
+    assert c.put("/api/trading/config", json={"extra_closed": ["Dec 1"]}).status_code == 422
