@@ -195,12 +195,34 @@ applyPrefs();
 const S = { chatId: null, tools: null, badge: 0, authed: false, demo: false, name: "", token: "", tab: "overview", settingsTab: "general", arrange: false, acct: null, edit: null, days: +store.get("gb_days") || 30, chat: [], provider: null };
 let DEMO = null;
 const CAT_COLORS = ["#17766b", "#a8741a", "#4a6fa5", "#b3372f", "#7a5c99", "#5d8a3c", "#c46a2d", "#2f8f9d", "#8a6d3b", "#6b7a8f"];
+/* The answer as the model writes it: one JSON object per line (text pieces, the tool it is using, keep-alive pings), then the full reply. */
+async function streamChat(path, body, live, log) {
+  const r = await fetch(path, { ...send("POST", body), credentials: "same-origin" });
+  if (r.status === 401) { if (S.authed) location.reload(); throw new Error("Sign in first"); }
+  if (!r.ok || !r.body) { const b = await r.json().catch(() => ({})); throw new Error(typeof b.detail === "string" ? b.detail : "HTTP " + r.status + (r.status === 504 ? ": a proxy in front of Coinpile gave up waiting" : "")); }
+  const rd = r.body.getReader(), dec = new TextDecoder(); let buf = "", text = "";
+  const show = (t, muted) => { live.textContent = t; live.classList.toggle("muted", !!muted); const near = log.scrollHeight - log.scrollTop - log.clientHeight < 80; if (near) log.scrollTop = log.scrollHeight; };
+  for (;;) {
+    const { value, done } = await rd.read(); if (done) break;
+    buf += dec.decode(value, { stream: true }); let i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1); if (!line) continue;
+      let ev; try { ev = JSON.parse(line); } catch { continue; }
+      if (ev.type === "text") { text += ev.text; show(text); }
+      else if (ev.type === "tool") { text = ""; show(`Looking it up (${ev.name.replace(/_/g, " ")})…`, true); }
+      else if (ev.type === "redo") { text = ""; show("Checking the figures against your data…", true); }
+      else if (ev.type === "done") return ev.data;
+      else if (ev.type === "error") throw new Error(typeof ev.detail === "string" ? ev.detail : "HTTP " + ev.status);
+    }
+  }
+  throw new Error("the connection closed before the answer finished");
+}
 async function api(path, opts = {}) {
   if (S.demo) return demoApi(path, opts);
   const r = await fetch(path, { ...opts, credentials: "same-origin", headers: { ...(opts.headers || {}) } });
   if (r.status === 401) { if (S.authed) location.reload(); throw new Error("Sign in first"); }
   const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : Array.isArray(body.detail) ? body.detail.map((d) => d.msg).join("; ") : "HTTP " + r.status);
+  if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : Array.isArray(body.detail) ? body.detail.map((d) => d.msg).join("; ") : "HTTP " + r.status + (r.status === 504 ? ": a proxy in front of Coinpile gave up waiting" : ""));
   return body;
 }
 function demoChats(p, m, opts) {
@@ -804,9 +826,11 @@ async function viewAgent(root, rerender) {
     const q = (text || input.value).trim(); if (!q) return;
     let id = S.chatId;
     try { if (!id) { id = S.chatId = (await api("/api/chats", { method: "POST" })).chat.id; } } catch (e) { return fail(e); }
-    input.value = ""; add(log, h("div", { class: "bubble me" }, q), h("div", { class: "bubble agent muted" }, "Thinking…")); log.scrollTop = log.scrollHeight;
-    try { const r = await api(`/api/chats/${id}/messages`, send("POST", { content: q, provider_id: S.provider, tools: S.tools == null ? null : S.tools })); if (r.compacted) toast("Older messages were summarized to fit the model's context"); rerender(); }
-    catch (e) { log.lastChild.replaceWith(h("div", { class: "bubble agent err" }, e.message)); input.value = q; }
+    const live = h("div", { class: "bubble agent muted", style: "white-space:pre-wrap" }, "Thinking…");
+    input.value = ""; add(log, h("div", { class: "bubble me" }, q), live); log.scrollTop = log.scrollHeight;
+    const body = { content: q, provider_id: S.provider, tools: S.tools == null ? null : S.tools };
+    try { const r = S.demo ? await api(`/api/chats/${id}/messages`, send("POST", body)) : await streamChat(`/api/chats/${id}/messages?stream=1`, body, live, log); if (r.compacted) toast("Older messages were summarized to fit the model's context"); rerender(); }
+    catch (e) { live.replaceWith(h("div", { class: "bubble agent err" }, e.message)); input.value = q; }
   }
   const sidebar = h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Chats"), h("button", { class: "btn sm primary", onclick: async () => { try { S.chatId = (await api("/api/chats", { method: "POST" })).chat.id; rerender(); } catch (e) { fail(e); } } }, "New")),
     list.length ? list.map((c) => h("div", { class: "ev note" + (c.id === S.chatId ? " on" : ""), style: "grid-template-columns:1fr auto", tabindex: 0, onclick: () => { S.chatId = c.id; rerender(); } },

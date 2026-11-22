@@ -299,9 +299,15 @@ public internet: a page (or a redirect) that leads into your home network or to 
 
 **Which models count as local.** A model is local when its address leads to this machine or your home network. That is decided on where
 the address really goes: a number that is a public address in disguise, a look-alike dot, or a local-looking name that resolves to a
-public address is not local, so it needs "allow cloud" and gets other people's numbers withheld. If you switch a chat from a local model
+public address is not local, so it needs "allow cloud" and gets other people's numbers withheld. A full domain name on your own server
+(`https://ai.example.com` with its own certificate, split DNS) is local when every address it resolves to from Coinpile is on your home
+network. A certificate from your own certificate authority is trusted by pointing `SSL_CERT_FILE` at that authority's certificate (a bundle
+that also holds the public ones). If you switch a chat from a local model
 to a cloud one, earlier answers (and a summary) that may hold what other people share with you are left out of what the cloud model sees.
-A model without tool calling gets a summary of the same data instead. "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
+A model without tool calling gets a summary of the same data instead.
+The answer shows as it is written, and the tools it uses while it works. A keep-alive line every few seconds keeps a reverse proxy in
+front of Coinpile from giving up on a long answer (an "HTTP 504"); a proxy that buffers whole responses needs buffering off for
+`/api/chats/*/messages` (Coinpile sends `X-Accel-Buffering: no`, which nginx follows). "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
 
 ## Trading (auto wallet and advice)
 
