@@ -52,6 +52,7 @@ class AccountIn(BaseModel):
     nickname: str | None = None            # your own label for any account ("" clears it)
     category: str | None = None            # what the account is for ("" clears it): Checking, Bills, Savings, Emergency fund...
     pinned: bool | None = None             # show its balance on the Overview
+    in_totals: bool | None = None          # false: keep showing it, but leave it out of net worth and the totals (e.g. an account that is the sum of others)
     joint_with: str | None = None          # "" clears; the other person who also links this account
     my_share: float | None = None          # percent of its balance that is mine (joint accounts); -1 clears
     coinpile_only: bool = False            # with "send accounts to Firefly III" on: keep this new one in Coinpile anyway
@@ -254,6 +255,8 @@ def register(app, ctx):
                 c.execute("UPDATE accounts SET term_months=? WHERE id=?", (a.term_months if a.term_months > 0 else None, aid))
             if a.min_balance is not None:
                 c.execute("UPDATE accounts SET min_balance=? WHERE id=?", (a.min_balance if a.min_balance >= 0 else None, aid))
+            if a.in_totals is not None:
+                c.execute("UPDATE accounts SET in_totals=? WHERE id=?", (int(a.in_totals), aid))
             if a.nickname is not None:
                 c.execute("UPDATE accounts SET nickname=? WHERE id=?", (a.nickname.strip()[:60] or None, aid))
             if a.joint_with is not None or a.my_share is not None:

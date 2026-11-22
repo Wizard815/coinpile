@@ -5,7 +5,9 @@ import ast
 import ipaddress
 import json
 import operator
+import queue
 import re
+import threading
 import time
 from contextlib import nullcontext
 from datetime import date, timedelta
@@ -13,6 +15,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException, Request
+from fastapi.responses import StreamingResponse
 from coinpile.strict import BaseModel
 
 from coinpile import agent_actions, agent_skills, crypto, links, feed, netguard, ledger, plan, recur, settings as cfg, sync
@@ -51,7 +54,8 @@ def _home_ip(ip) -> bool:
 def is_local(base_url: str) -> bool:
     """True when the endpoint is on this machine or your own network, so your data never leaves it. Decided on where the name really leads,
     not on how it is spelled: a number that is an address in disguise (http://134744072) or a look-alike dot is read the way the connection
-    will read it, and a name that looks local but resolves to a public address is not local."""
+    will read it, and a name that looks local but resolves to a public address is not local. A full domain name (https://ai.example.com with
+    a certificate for it) is local when every address it resolves to from here is on your own network, e.g. a home server with split DNS."""
     import socket
     try:
         host = (httpx.URL(base_url).host or "").lower().rstrip(".")
@@ -68,16 +72,15 @@ def is_local(base_url: str) -> bool:
             return _home_ip(ipaddress.ip_address(socket.inet_aton(host)))
         except OSError:
             return False
-    if not (host in _LOCAL_NAMES or host.endswith(_LOCAL_ENDS) or "." not in host):     # bare names are docker/LAN hosts, e.g. http://ollama:11434
-        return False
+    looks_local = host in _LOCAL_NAMES or host.endswith(_LOCAL_ENDS) or "." not in host      # bare names are docker/LAN hosts, e.g. http://ollama:11434
     hit = _local_seen.get(host)
     if hit and hit[0] > time.time():
         return hit[1]
     try:
         ips = {ipaddress.ip_address(x[4][0].split("%")[0]) for x in socket.getaddrinfo(host, None)}
-        ok = all(_home_ip(ip) for ip in ips)
+        ok = bool(ips) and all(_home_ip(ip) for ip in ips)
     except (OSError, ValueError):
-        ok = True                                            # it does not resolve from here: nothing can be sent to it either
+        ok = looks_local                                     # a local name that does not resolve: nothing can be sent to it either. A public one: cloud
     _local_seen[host] = (time.time() + 60, ok)
     return ok
 
@@ -839,7 +842,23 @@ def _text(content) -> str:
     return content if isinstance(content, str) else ""
 
 
-def _call_openai(http, prov, key, system, messages, tools):
+def _sse(r):
+    """The JSON events of a streamed reply ("data: {...}" lines); stops at [DONE]."""
+    for line in r.iter_lines():
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            return
+        try:
+            ev = json.loads(data)
+        except ValueError:
+            continue
+        if isinstance(ev, dict):
+            yield ev
+
+
+def _call_openai(http, prov, key, system, messages, tools, on_text=None):
     msgs = [{"role": "system", "content": system}]
     for m in messages:
         if m["role"] == "assistant" and m.get("tool_calls"):
@@ -851,10 +870,21 @@ def _call_openai(http, prov, key, system, messages, tools):
     body = {"model": prov["model"], "messages": msgs, "temperature": 0.2}
     if tools:
         body["tools"] = [{"type": "function", "function": {"name": n, "description": d, "parameters": s}} for n, d, s, _ in tools]
-    r = http.post(prov["base_url"].rstrip("/") + "/chat/completions", json=body, headers={"Authorization": f"Bearer {key}"} if key else {})
-    r.raise_for_status()
+    url, hdr = prov["base_url"].rstrip("/") + "/chat/completions", ({"Authorization": f"Bearer {key}"} if key else {})
+    if on_text:
+        with http.stream("POST", url, json={**body, "stream": True}, headers=hdr) as r:
+            if r.status_code >= 400:
+                r.read()
+            r.raise_for_status()
+            if "event-stream" in r.headers.get("content-type", ""):
+                return _openai_stream(r, on_text)
+            r.read()                                            # a server that does not stream answers the whole reply at once
+            m = _openai_message(r)
+    else:
+        r = http.post(url, json=body, headers=hdr)
+        r.raise_for_status()
+        m = _openai_message(r)
     try:
-        m = r.json()["choices"][0]["message"]
         calls = []
         for t in m.get("tool_calls") or []:
             raw = t["function"].get("arguments")
@@ -868,7 +898,46 @@ def _call_openai(http, prov, key, system, messages, tools):
         raise ModelError("the model server answered something that is not a chat reply")
 
 
-def _call_anthropic(http, prov, key, system, messages, tools):
+def _openai_message(r) -> dict:
+    try:
+        return r.json()["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError, ValueError, AttributeError):
+        raise ModelError("the model server answered something that is not a chat reply")
+
+
+def _openai_stream(r, on_text) -> dict:
+    """Put a streamed OpenAI-style reply back together: text as it comes (passed to on_text), tool calls from their pieces."""
+    text, parts, got = [], {}, False
+    for ev in _sse(r):
+        if ev.get("error"):
+            raise ModelError(f"the model server stopped with an error: {str(ev['error'])[:200]}")
+        for ch in ev.get("choices") or []:
+            got = True
+            d = ch.get("delta") or ch.get("message") or {}
+            if isinstance(d.get("content"), str) and d["content"]:
+                text.append(d["content"])
+                on_text(d["content"])
+            for t in d.get("tool_calls") or []:
+                p = parts.setdefault(t.get("index", len(parts)), {"id": None, "name": "", "args": ""})
+                p["id"] = t.get("id") or p["id"]
+                f = t.get("function") or {}
+                p["name"] += f.get("name") or ""
+                a = f.get("arguments")
+                p["args"] += a if isinstance(a, str) else (json.dumps(a) if a else "")
+    if not got:
+        raise ModelError("the model server answered something that is not a chat reply")
+    calls = []
+    for i in sorted(parts):
+        p = parts[i]
+        try:
+            args = json.loads(p["args"] or "{}")
+        except (ValueError, RecursionError):
+            args = {}
+        calls.append({"id": str(p["id"] or p["name"]), "name": p["name"], "args": args if isinstance(args, dict) else {}})
+    return {"content": "".join(text), "tool_calls": calls}
+
+
+def _call_anthropic(http, prov, key, system, messages, tools, on_text=None):
     msgs, pending = [], []
     for m in messages:
         if m["role"] == "tool":
@@ -886,10 +955,41 @@ def _call_anthropic(http, prov, key, system, messages, tools):
     body = {"model": prov["model"], "max_tokens": 2048, "system": system, "messages": msgs}
     if tools:
         body["tools"] = [{"name": n, "description": d, "input_schema": s} for n, d, s, _ in tools]
-    r = http.post(prov["base_url"].rstrip("/") + "/v1/messages", json=body, headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
-    r.raise_for_status()
+    url, hdr = prov["base_url"].rstrip("/") + "/v1/messages", {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    if on_text:
+        with http.stream("POST", url, json={**body, "stream": True}, headers=hdr) as r:
+            if r.status_code >= 400:
+                r.read()
+            r.raise_for_status()
+            blocks, cur = [], None
+            for ev in _sse(r):
+                k = ev.get("type")
+                if k == "error":
+                    raise ModelError(f"the model server stopped with an error: {str(ev.get('error'))[:200]}")
+                if k == "content_block_start":
+                    cur = dict(ev.get("content_block") or {})
+                    cur["_json"] = ""
+                    blocks.append(cur)
+                elif k == "content_block_delta" and cur is not None:
+                    d = ev.get("delta") or {}
+                    if d.get("type") == "text_delta":
+                        cur["text"] = cur.get("text", "") + d.get("text", "")
+                        on_text(d.get("text", ""))
+                    elif d.get("type") == "input_json_delta":
+                        cur["_json"] += d.get("partial_json", "")
+            for b in blocks:
+                if b.get("type") == "tool_use" and b["_json"]:
+                    try:
+                        b["input"] = json.loads(b["_json"])
+                    except (ValueError, RecursionError):
+                        b["input"] = {}
+    else:
+        r = http.post(url, json=body, headers=hdr)
+        r.raise_for_status()
+        blocks = None
     try:
-        blocks = r.json().get("content", [])
+        if blocks is None:
+            blocks = r.json().get("content", [])
         return {"content": "".join(b.get("text", "") for b in blocks if b["type"] == "text"),
                 "tool_calls": [{"id": str(b["id"]), "name": str(b["name"]), "args": b.get("input") if isinstance(b.get("input"), dict) else {}} for b in blocks if b["type"] == "tool_use"]}
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
@@ -911,6 +1011,7 @@ def context_usage(ctx, prov: dict, summary: str, msgs: list[dict], use_tools: bo
     return {"used": used, "limit": limit, "pct": round(used / limit, 3)}
 
 
+PING_EVERY = 5               # seconds between keep-alive lines on a streamed answer
 CHAT_TIMEOUT = 120          # seconds a model may take for one answer (each call also holds one of the person's outbound slots meanwhile)
 
 
@@ -1064,7 +1165,10 @@ def asked(trace) -> list[int]:
     return [t["result"]["action_id"] for t in trace if isinstance(t.get("result"), dict) and t["result"].get("action_id")]
 
 
-def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8, summary: str = "", use_tools: bool | None = None, extra: str = "", chat_id: int | None = None) -> dict:
+def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8, summary: str = "", use_tools: bool | None = None, extra: str = "", chat_id: int | None = None,
+             on_event=None) -> dict:
+    """on_event, when given, hears the answer as it is written: {"type": "text", "text": piece}, {"type": "tool", "name": ...} when the text so far
+    was the model working towards a tool call (not the answer), and {"type": "redo"} when the answer is sent back to have its figures checked."""
     tools = build_tools(ctx, chat_id, peer_data=is_local(prov.get("base_url") or ""))
     by_name = {n: f for n, _, _, f in tools}
     system = system_prompt(ctx.name, ctx.today())
@@ -1082,7 +1186,7 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
     results, done_calls, repaired = [], {}, False
     with netguard.client(ctx.llm_transport, timeout=CHAT_TIMEOUT) as http:
         for step in range(max_steps):
-            out = call(http, prov, key, system, msgs, tools if use_tools else None)
+            out = call(http, prov, key, system, msgs, tools if use_tools else None, (lambda t: on_event({"type": "text", "text": t})) if on_event else None)
             if not out["tool_calls"]:
                 reply = out["content"].strip()
                 if not use_tools:                   # no tools to send it back to: the figures are still held against the snapshot it was given
@@ -1091,6 +1195,8 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
                 bad = checked_reply(reply, results, history, extra, ctx.today())          # never its own check message
                 if bad and not repaired and step + 1 < max_steps:          # one chance to put the figures through a tool
                     repaired = True
+                    if on_event:
+                        on_event({"type": "redo"})
                     trace.append({"tool": "(figure check)", "args": {"not_from_a_tool": bad}, "ok": False, "preview": "sent back to compute them with tools"})
                     msgs.append({"role": "assistant", "content": reply})
                     msgs.append({"role": "user", "content": "[Coinpile check] These figures in your answer did not come from any tool result: " + ", ".join(bad)
@@ -1100,6 +1206,8 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
                 return {"reply": reply, "trace": trace, "steps": step + 1, "actions": asked(trace), "checked": {"figures": len(figures(reply)), "unverified": bad}}
             msgs.append({"role": "assistant", "content": out["content"], "tool_calls": out["tool_calls"]})
             for t_ in out["tool_calls"]:
+                if on_event:
+                    on_event({"type": "tool", "name": str(t_["name"])[:60]})
                 fn = by_name.get(t_["name"])
                 problem = check_args(schemas[t_["name"]], t_["args"]) if fn else None
                 key_ = t_["name"] + json.dumps(t_["args"], sort_keys=True, default=str)
@@ -1576,10 +1684,40 @@ def register(app, ctx):
             raise HTTPException(422, "message is empty")
         row, local = pick_provider(b.provider_id or chat["provider_id"])
         key, use_tools = key_of(row), (bool(row["tools"]) if b.tools is None else b.tools)
-        with outbound(ctx):
-            return say(cid, chat, text, row, local, key, use_tools)
+        if request.query_params.get("stream") not in ("1", "true"):
+            with outbound(ctx):
+                return say(cid, chat, text, row, local, key, use_tools)
+        return StreamingResponse(streamed(lambda ev: say(cid, chat, text, row, local, key, use_tools, ev)), media_type="application/x-ndjson",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    def say(cid, chat, text, row, local, key, use_tools):
+    def streamed(work):
+        """The answer as it is written, one JSON object per line: {"type": "text"|"tool"|"redo"|"ping"}, then {"type": "done", "data": the same
+        reply as without streaming} or {"type": "error", "status", "detail"}. A ping every few seconds while the model thinks keeps a proxy in
+        front of Coinpile from giving up on a long answer (its 504)."""
+        q: queue.Queue = queue.Queue()
+
+        def run():
+            try:
+                with outbound(ctx):
+                    q.put({"type": "done", "data": work(q.put)})
+            except HTTPException as e:
+                q.put({"type": "error", "status": e.status_code, "detail": e.detail})
+            except netguard.Busy:
+                q.put({"type": "error", "status": 429, "detail": "too many requests to outside servers at once; try again in a moment"})
+            except Exception as e:                              # never a silent hang: the page hears that it failed
+                q.put({"type": "error", "status": 500, "detail": f"{type(e).__name__}"})
+
+        threading.Thread(target=run, daemon=True).start()
+        while True:
+            try:
+                ev = q.get(timeout=PING_EVERY)
+            except queue.Empty:
+                ev = {"type": "ping"}
+            yield json.dumps(ev, default=str) + "\n"
+            if ev["type"] in ("done", "error"):
+                return
+
+    def say(cid, chat, text, row, local, key, use_tools, on_event=None):
         ts = sync.now()
         with store.tx() as c:
             mid = c.execute("INSERT INTO chat_messages(chat_id,role,content,created) VALUES(?,?,?,?)", (cid, "user", text, ts)).lastrowid
@@ -1593,7 +1731,7 @@ def register(app, ctx):
             sent = live(cid)[-40:]
             while len(sent) > 1 and sent[0]["role"] != "user":          # a conversation starts with the user (some model APIs refuse anything else)
                 sent = sent[1:]
-            out = model_errors(row, lambda: run_chat(ctx, row, key, for_model(sent, local), summary=summary_for(chat, local), use_tools=use_tools, extra=extra, chat_id=cid))
+            out = model_errors(row, lambda: run_chat(ctx, row, key, for_model(sent, local), summary=summary_for(chat, local), use_tools=use_tools, extra=extra, chat_id=cid, on_event=on_event))
             peer = int(local and bool(links.active_peers(store)) and (not use_tools or bool(extra) or any(m.get("peer") for m in sent) or bool(chat.get("summary_peer"))
                                                                       or any(t.get("tool") in PEER_TOOLS for t in out["trace"])))
         except Exception:

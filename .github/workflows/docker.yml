@@ -44,3 +44,19 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      # The trader for the Trading tab (TradingAgents on your own model). amd64 only: its data-science dependencies are slow to emulate.
+      - id: trader
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/wizard815/coinpile-trader
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=tag
+            type=sha,format=short
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./trader
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.trader.outputs.tags }}
+          labels: ${{ steps.trader.outputs.labels }}

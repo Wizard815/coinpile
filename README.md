@@ -299,9 +299,64 @@ public internet: a page (or a redirect) that leads into your home network or to 
 
 **Which models count as local.** A model is local when its address leads to this machine or your home network. That is decided on where
 the address really goes: a number that is a public address in disguise, a look-alike dot, or a local-looking name that resolves to a
-public address is not local, so it needs "allow cloud" and gets other people's numbers withheld. If you switch a chat from a local model
+public address is not local, so it needs "allow cloud" and gets other people's numbers withheld. A full domain name on your own server
+(`https://ai.example.com` with its own certificate, split DNS) is local when every address it resolves to from Coinpile is on your home
+network. A certificate from your own certificate authority is trusted by pointing `SSL_CERT_FILE` at that authority's certificate (a bundle
+that also holds the public ones). If you switch a chat from a local model
 to a cloud one, earlier answers (and a summary) that may hold what other people share with you are left out of what the cloud model sees.
-A model without tool calling gets a summary of the same data instead. "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
+A model without tool calling gets a summary of the same data instead.
+The answer shows as it is written, and the tools it uses while it works. A keep-alive line every few seconds keeps a reverse proxy in
+front of Coinpile from giving up on a long answer (an "HTTP 504"); a proxy that buffers whole responses needs buffering off for
+`/api/chats/*/messages` (Coinpile sends `X-Accel-Buffering: no`, which nginx follows). "Discuss with agent" on a piggy bank or a note starts a chat with it attached.
+
+## Trading (auto wallet and advice)
+
+The Trading tab (only for the Robinhood owner, `RH_OWNER`) runs an agent that manages its own wallet and gives you ideas on yours.
+Three sessions a day (09:45, 12:30, 15:30 New York time on weekdays, changeable). In each:
+
+- **Auto wallet:** [TradingAgents](https://github.com/TauricResearch/TradingAgents) (Apache-2.0) analyses what the wallet holds and a
+  few stocks from your watchlist (rotating): market, news, social and fundamentals analysts, a bull/bear debate, a risk debate and a
+  portfolio manager, on your own model. Each decision (Buy, Overweight, Hold, Underweight, Sell) becomes an order: a Buy aims for
+  `buy %` of the wallet in that stock, Overweight half of it, Underweight sells half, Sell sells all. Every order stays under your
+  cap per trade, so a big exit happens over several sessions.
+- **Advice for your account:** the same analysis for the stocks in your main Robinhood account (a few per session, rotating), plus buy
+  ideas from the watchlist, as ideas: add, hold, trim, sell. Nothing is ever ordered in your main account.
+- **It learns:** TradingAgents keeps a log of its calls and, before each analysis, scores the due ones against what the price did
+  (5 trading days, against SPY); the lessons go into the next decision. That covers the calls on your stocks too.
+- **You steer:** standing guidance (every session); for the next session only, guidance, and a mode: trade on its own, ask you
+  before each order, your own plan (`buy 2 NVDA`, `sell all TSLA`, still checked against the rules) or skip. Orders that wait for
+  you are approved or rejected on the tab. "Run a session now" runs one straight away.
+
+**The rules**, checked before every order, in this order (a rule that can't be checked blocks):
+
+1. **Daily loss stop**: once the wallet is down `daily_loss_pct` (3%) from where it started the day, nothing more trades that day.
+2. **Day-trade guard**: a stock bought today is not sold today, so the account never makes a day trade (the pattern-day-trader
+   limit for accounts under $25,000).
+3. **Your policy**, a YAML file you edit on the tab, checked by [AgentRisk](https://github.com/trycoin-ai/agentrisk) (MIT): cap per
+   trade (20%), largest position (20%), cash floor, crypto/options/margin (blocked: stocks and ETFs only), symbols never to trade, and
+   symbols that ask you first.
+
+**Paper first.** The wallet starts as paper: simulated, with real prices, from the paper cash you set (1,000). Switch to live when its
+record looks right: **Connect Robinhood for trading** (a sign-in separate from the read-only one, asking Robinhood for trading;
+Robinhood only lets an outside agent trade your Agentic account), **Check** (shows Robinhood's order tool and exactly what Coinpile
+would send for 1 share of SPY; sends nothing), then **Switch to live** and type LIVE. Robinhood's order tool isn't documented
+publicly, so Coinpile reads its input format when you connect and refuses an order it can't fill in; check before going live. While the
+live wallet is on, Pondering Orb places no Picks orders in the Agentic account (when **Trading** is shared with it): one account,
+one trader, so the day-trade guard and daily loss stop see every order. Put a buy you want in Next session's plan instead.
+
+**The trader container** does the analysis and never places orders or holds a Robinhood sign-in; Coinpile does. Add it next to
+Coinpile (see `docker-compose.example.yml`) with `TRADER_URL`, the same `CONNECTOR_SECRET`, and your model:
+`TRADINGAGENTS_LLM_BACKEND_URL` (an OpenAI-compatible server such as Argos or Ollama, e.g. `http://192.168.20.5:8080/v1`) and the model
+names in `TRADINGAGENTS_DEEP_THINK_LLM` / `TRADINGAGENTS_QUICK_THINK_LLM`. Market data comes from Yahoo Finance and SEC EDGAR (no keys);
+`FRED_API_KEY` adds macro data. A session takes a few minutes per stock on a local model, so keep the per-session counts small.
+Results go to your chat webhook (Settings, Alerts) and, with **Trading** ticked under Sharing, to the Orb (read only).
+
+Sessions follow the US stock market's days: none at weekends or on market holidays (New Year's Day, Martin Luther King Jr. Day,
+Washington's Birthday, Good Friday, Memorial Day, Juneteenth, Independence Day, Labor Day, Thanksgiving, Christmas; a Saturday holiday
+moves to Friday, a Sunday one to Monday), and none after 1 pm on early-close days (the day before Independence Day, the day after
+Thanksgiving, Christmas Eve). These are worked out from the exchanges' rules, so nothing needs updating each year. One-off closures
+(a national day of mourning) go in **Extra market closures**. A session you run by hand while the market is closed gives ideas but
+places no orders, and orders waiting for you can only be approved while it's open.
 
 ## Settings
 
@@ -315,6 +370,7 @@ A model without tool calling gets a summary of the same data instead. "Discuss w
 | `REFRESH_MINUTES` | default: read Firefly III every 10 minutes (each person can change it) |
 | `DATA_DIR` | default `/data` |
 | `RH_AGENT_URL`, `RH_LIVE_URL`, `CONNECTOR_SECRET` | the optional Robinhood connector containers |
+| `TRADER_URL` | the trader container (TradingAgents), for the Trading tab; it uses `CONNECTOR_SECRET` |
 | `RH_OWNER` | the Firefly III email of the one person those Robinhood connectors belong to (nobody else sees them; without it, nobody does) |
 | `ALLOW_LOOPBACK_URLS` | `1` lets addresses people type (model server, calendar, webhook) point at the container itself; off by default |
 

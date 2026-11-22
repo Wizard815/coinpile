@@ -5,7 +5,8 @@ category on it (anything set there, by you or a Firefly III rule, is never touch
 you have not set its category yourself and no rule, bank category or keyword matched.
 
 How: many transactions go to the model in ONE message (BATCH at a time), with the exact category names Coinpile has; the model answers a
-category or null for each. Anything that is not exactly one of those names is thrown away. The guess is kept in ai_category; it shows as the
+category or null for each. The same merchant is asked once (see merchant_key) and every one of its transactions gets that answer, so it is
+always placed the same way; a merchant the model already placed in an earlier run gets that same category without asking again. Anything that is not exactly one of those names is thrown away. The guess is kept in ai_category; it shows as the
 transaction's category in Coinpile and survives later reads from Firefly III, but is never sent to Firefly III.
 
 What the model sees: the transaction's description, payee, amount and the bank's own category hint. Not account names, not ids (it gets
@@ -44,6 +45,24 @@ def candidates(db, only_new: bool, limit: int | None = None) -> list[dict]:
     return out[:limit] if limit else out
 
 
+def merchant_key(t: dict) -> tuple:
+    """Transactions that are the same merchant the same way round: description and payee with case, spacing and digit runs (store numbers,
+    reference numbers, dates) ignored, and money in kept apart from money out."""
+    def norm(v):
+        return re.sub(r"\s+", " ", re.sub(r"\d+", "#", str(v or "").lower())).strip()
+    return norm(t.get("name")), norm(t.get("payee")), (t.get("amount") or 0) >= 0
+
+
+def known(db) -> dict[tuple, str]:
+    """Merchants the model already placed and whose guess still stands: {merchant_key: category}. Only a category every such transaction
+    agrees on counts."""
+    seen: dict[tuple, set] = {}
+    for r in db.all("SELECT name, payee, amount, ai_category FROM transactions WHERE ai_category IS NOT NULL AND category=ai_category"):
+        seen.setdefault(merchant_key(r), set()).add(r["ai_category"])
+    valid = set(categories(db))
+    return {k: next(iter(v)) for k, v in seen.items() if len(v) == 1 and next(iter(v)) in valid}
+
+
 def _prompt(cats: list[str], batch: list[dict]) -> tuple[str, str]:
     system = ("You sort bank transactions into a person's budget categories. Use ONLY these category names, spelled exactly: "
               + json.dumps(cats) + ". Money out (negative amount) is spending; money in (positive) is usually Income or a refund. "
@@ -71,24 +90,33 @@ def _answer(text: str) -> dict:
 
 
 def ai_categorize(db, prov: dict, key: str, transactions: list[dict], transport=None) -> tuple[dict[str, str], int]:
-    """{transaction id: category} for the ones the model placed with a valid name, and how many model calls it took. Raises on a model
-    server that cannot be reached or answers an error, so the caller can say so."""
+    """{transaction id: category} for the ones placed with a valid name, and how many model calls it took. One line per merchant; a
+    merchant placed before is not asked again. Raises on a model server that cannot be reached or answers an error, so the caller can say so."""
     from coinpile.agent import _call_anthropic, _call_openai
     cats = categories(db)
     valid = set(cats)
+    before = known(db)
+    groups: dict[tuple, list[dict]] = {}
+    for t in transactions:
+        groups.setdefault(merchant_key(t), []).append(t)
+    out = {t["id"]: before[k] for k, ts in groups.items() if k in before for t in ts}
+    ask = [ts for k, ts in groups.items() if k not in before]
     call = _call_anthropic if prov["kind"] == "anthropic" else _call_openai
-    out, calls = {}, 0
+    calls = 0
+    if not ask:
+        return out, calls
     with netguard.client(transport, timeout=TIMEOUT) as http:
-        for i in range(0, len(transactions), BATCH):
-            batch = transactions[i:i + BATCH]
-            system, user = _prompt(cats, batch)
+        for i in range(0, len(ask), BATCH):
+            batch = ask[i:i + BATCH]
+            system, user = _prompt(cats, [ts[0] for ts in batch])
             calls += 1
             reply = call(http, prov, key, system, [{"role": "user", "content": user}], None)
             got = _answer(reply.get("content") or "")
-            for n, t in enumerate(batch, 1):
+            for n, ts in enumerate(batch, 1):
                 v = got.get(str(n))
                 if isinstance(v, str) and v in valid:              # exactly one of the person's categories; anything else is dropped
-                    out[t["id"]] = v
+                    for t in ts:
+                        out[t["id"]] = v
     return out, calls
 
 
