@@ -271,6 +271,14 @@ def main_currency(db) -> str | None:
     return cfg.get(db, "currency") or None
 
 
+COUNTED = "coalesce(in_net_worth, 1) != 0 AND coalesce(in_totals, 1) != 0"     # Firefly III's "include in net worth" and Coinpile's own "count in totals"
+
+
+def counted(a: dict) -> bool:
+    """An account that counts in net worth and the totals. One left out is still shown, with its balance; it just adds to nothing."""
+    return (a.get("in_net_worth") if a.get("in_net_worth") is not None else 1) != 0 and (a.get("in_totals") if a.get("in_totals") is not None else 1) != 0
+
+
 def in_main(db, alias: str = "") -> tuple[str, tuple]:
     """A WHERE clause: only rows in the main currency. Firefly III converts other currencies when its "convert to primary currency" is on;
     with it off an account or transaction arrives in its own currency, and adding yen to dollars would be wrong. Rows kept in Coinpile only
@@ -333,7 +341,7 @@ def savings_summary(db, today: date) -> dict:
 def net_worth(db, today: date | None = None) -> float:
     total = 0.0
     w, wa = in_main(db)
-    for a in db.all(f"SELECT kind, balance, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0 AND {w}", wa):     # Firefly III's "include in net worth" off
+    for a in db.all(f"SELECT kind, balance, my_share FROM accounts WHERE " + COUNTED + f" AND {w}", wa):     # Firefly III's "include in net worth" off
         total += mine(a) * (-1 if a["kind"] in OUT_KINDS else 1)
     for s in db.all("SELECT * FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')"):
         total += s["balance"] or 0                       # savings linked to an account are already counted via that account
@@ -518,6 +526,8 @@ def overview(db, days: int, today: date) -> dict:
     by_kind = {}
     from coinpile import investments
     for a in accts:
+        if not counted(a):
+            continue
         k = "investment" if investments.is_investment(a) else a["kind"]          # an account you track as an investment shows as one
         by_kind[k] = round(by_kind.get(k, 0) + mine(a), 2)
     sav = savings_summary(db, today)
@@ -621,7 +631,7 @@ def net_worth_history(store) -> list[dict]:
     """Daily net worth built from balance snapshots read from Firefly III (last known balance carried forward)."""
     # Only accounts that count today (as net worth does): a removed account, or one left out of net worth in Firefly III, must not be carried forward.
     w, wa = in_main(store)
-    accts = {a["id"]: a for a in store.all(f"SELECT id, kind, my_share FROM accounts WHERE coalesce(in_net_worth, 1) != 0 AND {w}", wa)}
+    accts = {a["id"]: a for a in store.all(f"SELECT id, kind, my_share FROM accounts WHERE " + COUNTED + f" AND {w}", wa)}
     sign = {"credit": -1, "loan": -1}
     last, by_day = {}, {}
     for r in store.all("SELECT * FROM snapshots ORDER BY ts"):

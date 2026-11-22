@@ -100,6 +100,24 @@ def test_an_account_left_out_of_net_worth_in_firefly_is_left_out_here():
     assert ledger.net_worth(read(ff)) == 1000
 
 
+def test_an_account_not_counted_stays_listed_but_adds_nothing_to_net_worth_or_the_totals(tmp_path):
+    ff = alone()
+    ff.acct("1", 1, "Robinhood individual", balance="306.07")
+    ff.acct("1", 2, "Robinhood IRA", balance="71.05")
+    ff.acct("1", 3, "Robinhood (main)", balance="377.12", include_net_worth=False)          # the sum of the others, left out in Firefly III
+    ff.acct("1", 4, "Robinhood sum, kept here", balance="377.12")                              # the same, left out in Coinpile instead
+    c = signed_in(app(tmp_path, ff))
+    assert c.put("/api/accounts/ff:4", json={"in_totals": False}).status_code == 200
+    ov = c.get("/api/overview").json()
+    assert ov["net_worth"] == 377.12 and ov["by_kind"]["cash"] == 377.12
+    acc = {a["id"]: a for a in c.get("/api/accounts").json()}
+    assert len(acc) == 4 and acc["ff:3"]["in_net_worth"] == 0 and acc["ff:4"]["in_totals"] == 0
+    c.post("/api/refresh")                                                                     # reading Firefly III again keeps Coinpile's own choice
+    assert {a["id"]: a for a in c.get("/api/accounts").json()}["ff:4"]["in_totals"] == 0
+    assert c.put("/api/accounts/ff:4", json={"in_totals": True}).status_code == 200
+    assert c.get("/api/overview").json()["net_worth"] == 754.24
+
+
 # ---------------------------------------------------------------- splits, cards and loans
 def card_world():
     ff = alone()
