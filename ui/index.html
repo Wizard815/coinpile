@@ -1167,7 +1167,7 @@ function modelForm(D, edit, rerender) {
     let info = {};
     if (cur.kind === "openai") { try { info = await api("/api/agent/model-info", send("POST", { kind: cur.kind, base_url: cur.base_url, model: id })); } catch {} }
     const tok = info.context_tokens || found?.context || null;
-    return { ...cur, model: id, context_tokens: tok ? Math.min(tok, 1000000) : cur.context_tokens, ctxNote: tok ? `Context set from ${info.context_tokens ? info.source : "the model list"}.` : "" };
+    return { ...cur, model: id, context_tokens: tok ? Math.min(tok, 4000000) : cur.context_tokens, ctxNote: tok ? `Context set from ${info.context_tokens ? info.source : "the model list"}.` : "" };
   };
   const refresh = async (btn) => {
     const cur = draftFromForm(); btn.disabled = true; btn.textContent = "Checking…";
@@ -1189,7 +1189,7 @@ function modelForm(D, edit, rerender) {
       h("div", { style: "display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end" }, sel, h("button", { class: "btn", type: "button", onclick: (e) => refresh(e.target) }, "Refresh")),
       D.error ? h("div", { class: "small neg", style: "grid-column:1/-1" }, D.error + " You can still type a model name.") : null,
       D.models ? h("div", { class: "small muted", style: "grid-column:1/-1" }, `${D.models.length} model${D.models.length === 1 ? "" : "s"} found on that server.`) : null,
-      h("div", {}, field("pv-ctx", "Context size (tokens)", D.context_tokens ?? 8192, { type: "number", min: "1024", step: "1024" }), D.ctxNote ? h("div", { class: "small muted" }, D.ctxNote + " Change it if you run the model with a different size.") : null),
+      h("div", {}, field("pv-ctx", "Context size (tokens)", D.context_tokens ?? 8192, { type: "number", min: "1024", max: "4000000", step: "1" }), D.ctxNote ? h("div", { class: "small muted" }, D.ctxNote + " Change it if you run the model with a different size.") : null),
       h("label", { class: "check" }, h("input", { type: "checkbox", id: "pv-tools", checked: D.tools }), "Supports tool calling (untick for small models; they get a data snapshot instead)"),
       cloud ? h("label", { class: "check" }, h("input", { type: "checkbox", id: "pv-cloud", checked: D.allow_cloud }), "Allow cloud: I accept my financial data is sent to this address") : null,
       h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Save model"), h("button", { class: "btn", type: "button", onclick: () => edit(null) }, "Cancel"))));
