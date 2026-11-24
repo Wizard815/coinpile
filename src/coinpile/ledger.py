@@ -447,7 +447,7 @@ def _alerts(db, today: date) -> list[dict]:
                     "detail": "Open Settings, Connect & import and press Relink. Until then its numbers are out of date." + (f" ({it['status_detail']})" if it.get("status_detail") else "")})
     for a in db.all("SELECT * FROM accounts"):
         bal = a["balance"]
-        if bal is None or a["kind"] in OUT_KINDS or a["kind"] == "investment":
+        if bal is None or a["kind"] in OUT_KINDS or a["kind"] == "investment" or a.get("ff_closed"):         # switched off in Firefly III: no alerts about it
             continue
         if bal < 0:
             out.append({"kind": "negative_balance", "severity": "critical", "title": f"{a['name']} is overdrawn", "detail": f"Balance {bal:,.2f}", "account_id": a["id"]})

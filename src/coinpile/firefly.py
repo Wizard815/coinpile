@@ -135,21 +135,26 @@ def account_row(a: dict, primary: str | None = None) -> dict | None:
             bal, nat = -bal, -nat                        # Firefly III: owed on a card is negative; here a card's balance is what you owe
     elif typ in ("liabilities", "liability", "loan", "debt", "mortgage"):
         kind, subtype = "loan", at.get("liability_type") or "loan"
+        # Firefly III: "debit" is "I owe this debt to somebody else" (a loan), "credit" is "I am owed this debt" (checked against 6.7.9's own labels).
+        # A liability with no direction (older Firefly III) is a debt you owe.
+        owe = (at.get("liability_direction") or "debit") != "credit"
         debt, cur, conv = _pc(at, "debt_amount", own, primary)
         cb, cur2, conv2 = _pc(at, "current_balance", own, primary)
         if not debt:
             debt, cur, conv = cb, cur2, conv2
         bal, nat = abs(debt), abs(_num(at.get("debt_amount")) or _num(at.get("current_balance")))
-        # Firefly III: "debit" is "I owe this debt to somebody else" (a loan), "credit" is "I am owed this debt" (checked against 6.7.9's own labels).
-        # A liability with no direction (older Firefly III) is a debt you owe.
-        if (at.get("liability_direction") or "debit") == "credit":
+        # how much, as above; whether it is paid past zero: a debt you owe whose balance has gone above zero, which 6.7.9 also marks with a
+        # negative debt_amount (checked: -16250 balance is 16250 owed, +3543 is 3543 overpaid). Older versions write debt_amount negative while owed.
+        if owe and _num(at.get("current_balance")) > 0.005 and at.get("debt_amount") not in (None, "") and _num(at.get("debt_amount")) < 0:
+            bal, nat = -bal, -nat
+        if not owe:
             kind, subtype = "cash", "owed to you"                # money someone owes you counts for you
     else:
         return None
     return {"id": f"ff:{a['id']}", "ff_id": str(a["id"]), "institution": inst, "name": name + (" (closed)" if closed else ""), "mask": mask, "kind": kind, "subtype": subtype,
             "balance": round(bal, 2), "currency": cur or "USD", "own_currency": own,
             "native_balance": round(nat, 2) if conv else None, "native_currency": own if conv else None,
-            "in_net_worth": 0 if at.get("include_net_worth") is False or closed else 1, "notes": at.get("notes") or "", "closed": closed}
+            "in_net_worth": 0 if at.get("include_net_worth") is False or closed else 1, "notes": at.get("notes") or "", "closed": int(closed)}
 
 
 def primary_currency(db) -> str:
@@ -169,12 +174,12 @@ def sync_accounts(db, ff: Firefly) -> dict[str, dict]:
         cfg.set_value(db, "currency", primary)
     with db.tx() as c:
         for r in rows.values():
-            c.execute("""INSERT INTO accounts(id,item_id,source,institution,name,kind,balance,currency,updated,subtype,mask,native_balance,native_currency,in_net_worth) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            c.execute("""INSERT INTO accounts(id,item_id,source,institution,name,kind,balance,currency,updated,subtype,mask,native_balance,native_currency,in_net_worth,ff_closed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                          ON CONFLICT(id) DO UPDATE SET institution=excluded.institution,name=excluded.name,kind=excluded.kind,balance=excluded.balance,
                          currency=excluded.currency,updated=excluded.updated,subtype=excluded.subtype,mask=excluded.mask,native_balance=excluded.native_balance,
-                         native_currency=excluded.native_currency,in_net_worth=excluded.in_net_worth""",
+                         native_currency=excluded.native_currency,in_net_worth=excluded.in_net_worth,ff_closed=excluded.ff_closed""",
                       (r["id"], None, "firefly", r["institution"], r["name"], r["kind"], r["balance"], r["currency"], sync.now(), r["subtype"], r["mask"],
-                       r["native_balance"], r["native_currency"], r["in_net_worth"]))
+                       r["native_balance"], r["native_currency"], r["in_net_worth"], r["closed"]))
         gone = [x["id"] for x in db.all("SELECT id FROM accounts WHERE source='firefly'") if x["id"][3:] not in rows]
         if gone and not rows:
             raise FireflyError("Firefly III answered with no accounts at all: nothing was changed here (if you really removed them all, use Forget me)")

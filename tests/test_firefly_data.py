@@ -292,3 +292,19 @@ def test_a_bill_paid_under_its_own_category_is_not_forecast_twice():
     assert db.one("SELECT category FROM subscriptions WHERE name='Rent'")["category"] == "Housing"
     f = {c["category"]: c for c in ledger.spending_forecast(db, TODAY)["categories"]}
     assert f["Housing"]["forecast"] == 1500 and "Subscriptions" not in f
+
+
+def test_a_loan_paid_past_zero_and_a_closed_account_as_firefly_iii_6_7_9_shows_them():
+    ff = alone()
+    ff.acct("1", 1, "Checking", balance="100")
+    ff.acct("1", 7, "Car loan", type="liabilities", role=None, balance="-16250", debt_amount="16250", liability_type="loan", liability_direction="debit")
+    ff.acct("1", 8, "Line of credit", type="liabilities", role=None, balance="3543", debt_amount="-3543", liability_type="loan", liability_direction="debit")
+    ff.acct("1", 9, "Car loan (old asset)", balance="-23211.33", active=False)            # the account the connector switched off when the loan moved
+    db = read(ff)
+    acc = {a["name"]: a for a in db.all("SELECT * FROM accounts")}
+    assert (acc["Car loan"]["kind"], acc["Car loan"]["balance"]) == ("loan", 16250.0)
+    assert (acc["Line of credit"]["kind"], acc["Line of credit"]["balance"]) == ("loan", -3543.0)        # overpaid: not 3,543 more owed
+    old = acc["Car loan (old asset) (closed)"]
+    assert old["ff_closed"] == 1 and old["in_net_worth"] == 0
+    titles = [a["title"] for a in ledger.alerts(db, TODAY)]
+    assert not any("old asset" in t or "Car loan" in t for t in titles)                 # a switched-off account raises no "overdrawn"
