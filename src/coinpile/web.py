@@ -24,7 +24,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from coinpile.strict import BaseModel
 
-from coinpile import aicat, agent, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync, trading
+from coinpile import aicat, agent, categorize, api_links, api_money, ffwrite, importers, investments, mcp, netguard, robinhood, webhooks, api_plan, connector as conn, links, external, feed, firefly, ledger, notify, plan, settings as cfg, sync, trading
 from coinpile.db import DB, Closed
 from coinpile.oplog import log
 from coinpile.security import Throttle, check_password_strength, hash_password, verify_password
@@ -429,6 +429,12 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             raise
         try:
             out = firefly.refresh(db, ff_for(uid), today(), full)
+            try:                                                    # merchants you said "always" for (kept in Coinpile) get their category first
+                n = categorize.auto(db)
+                if n:
+                    out["remembered_categories"] = n
+            except Exception as e:
+                out["remembered_categories"] = {"error": type(e).__name__}
             try:                                                    # AI categories for what just arrived (only when switched on; never stops a refresh)
                 ai = aicat.run(db, llm_transport, only_new=True)
                 if not ai.get("skipped"):

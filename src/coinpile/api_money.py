@@ -370,6 +370,46 @@ def register(app, ctx):
         except ValueError as e:
             bad(str(e))
 
+    # ------------------------------------------------------------ categorize: what is still uncategorized, by merchant
+    class CatApply(BaseModel):
+        key: str
+        category: str
+        always: bool = False
+
+    @app.get("/api/categorize")
+    def categorize_list(request: Request, limit: int = 200):
+        auth(request)
+        from coinpile import categorize
+        out = categorize.queue(store, max(1, min(int(limit), 1000)))
+        out["sends_to_firefly"] = sends("categories")
+        out["ai"] = {"on": cfg.get(store, "ai_categorize") == "on", "model": bool(aicat.provider(store))}
+        return out
+
+    @app.post("/api/categorize/apply")
+    def categorize_apply(request: Request, body: CatApply):
+        """One merchant: every payment of it still uncategorized gets this category, in Firefly III when sending categories is on."""
+        auth(request)
+        from coinpile import categorize
+        try:
+            out = in_firefly(categorize.apply, store, W if sends("categories") else None, body.key, body.category, body.always)
+        except KeyError:
+            bad("nothing left to categorize for that merchant (already done?)", 404)
+        except ValueError as e:
+            bad(str(e))
+        return out
+
+    @app.post("/api/categorize/ai")
+    def categorize_ai(request: Request):
+        """Ask the AI for suggestions on everything uncategorized. They show in the list for you to confirm; nothing goes to Firefly III."""
+        auth(request)
+        if cfg.get(store, "ai_categorize") != "on":
+            bad("switch on AI categories first (Settings, Categories)", 409)
+        from coinpile.agent import ModelError
+        try:
+            return aicat.run(store, getattr(ctx, "llm_transport", None))
+        except (httpx.HTTPError, httpx.InvalidURL, ModelError) as e:
+            bad(f"the model could not be asked ({type(e).__name__})", 502)
+
     @app.get("/api/spending")
     def spending(request: Request, start: str | None = None, end: str | None = None):
         auth(request)

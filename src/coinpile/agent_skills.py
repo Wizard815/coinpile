@@ -46,6 +46,15 @@ Answer: monthly amount, date, and a realistic source. Offer to note it on the pi
 3. If financing is an option and the user gives an APR: calculate pmt for the monthly payment and total interest (payment * months - price).
 Answer: yes / not yet / only with financing, the numbers behind it, and the safest way. Offer a piggy bank for it (asked first).
 """),
+    "categorize": ("Sort out uncategorized payments merchant by merchant, and keep them sorted.", """
+1. uncategorized_merchants: the merchants still on Misc/Income, biggest first, with a suggestion where one exists.
+2. For each of the top ones (up to 10 per turn), pick a category from the existing list: the suggestion when it is 'remembered' or 'history',
+   else what the merchant name clearly is (a grocery chain is Groceries, a gas station Gas...). If a name is unclear, say so and ask; never guess
+   wildly. Use web_search only if the user wants a name looked up.
+3. categorize_merchant for each one you are sure of, always=true for merchants that will come back (stores, utilities), false for one-offs.
+   Each is asked first; the user answers Yes or No per merchant.
+Answer: a short table of merchant, payments, category, and which ones you were not sure about.
+"""),
     "budget_setup": ("Set realistic monthly budgets from real spending.", """
 1. spending_by_category for each of the last 3 full months; calculate the average per category.
 2. firefly_budgets for this month: which budgets exist already.

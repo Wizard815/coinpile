@@ -631,6 +631,13 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_u
                     "note": "Nothing has changed yet. Tell the user what you asked and why; they answer with the Yes / No buttons."}
         return f
 
+    def t_uncategorized(a):
+        from coinpile import categorize
+        q = categorize.queue(store, max(1, min(int(a.get("limit", 40) or 40), 100)))
+        return {"merchants": q["merchants"], "transactions": q["transactions"], "categories": [c["name"] for c in store.all("SELECT name FROM categories WHERE name != 'Transfer' ORDER BY name")],
+                "sends_to_firefly": bool(getattr(ctx, "writer", None)) and ctx.writer.on("categories"),
+                "items": [{k: i[k] for k in ("key", "name", "payee", "direction", "count", "total", "last", "suggestion", "suggested_by")} for i in q["items"]]}
+
     def t_subs(a):
         return [{k: s[k] for k in ("id", "name", "amount", "label", "next_due", "monthly", "category", "payer", "payer_name", "account_name", "payment_method", "active")} for s in ledger.subscriptions(store, today())]
 
@@ -757,6 +764,9 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_u
          S({"q": {**STR, "description": "words in the description"}, "account_id": STR, "category": {**STR, "description": "one or more category names, comma separated"}, "min_amount": {**NUM, "description": "magnitude, >= 0"}, "max_amount": NUM,
             "start": DATE, "end": DATE, "direction": {"type": "string", "enum": ["in", "out"]}, "limit": INT, "tag": {**STR, "description": "a Firefly III tag, e.g. tax-deductible"}, "budget": {**STR, "description": "a Firefly III budget name"}, "sort": {"type": "string", "enum": ["date_desc", "date_asc", "amount_desc", "amount_asc"]}}), t_search),
         ("spending_by_category", "Money spent per category between two dates (transfers excluded).", S({"start": DATE, "end": DATE}), t_spending),
+        ("uncategorized_merchants", "Payments still uncategorized (on Misc/Income) or with an unconfirmed AI guess, grouped by merchant: key, name, count, total, and a suggestion "
+                                    "(remembered, history = what their other payments have, or ai). Use categorize_merchant with the key to propose a category; prefer existing categories.",
+         S({"limit": INT}), t_uncategorized),
         ("list_subscriptions", "Every subscription/recurring bill: amount, repeat interval, next due date, monthly cost, who pays, bound account.", S({}), t_subs),
         ("upcoming_bills", "Bills due in the next N days with each occurrence dated, the total you pay, and what others pay.", S({"days": INT}), t_upcoming),
         ("find_recurring_payments", "Payments that repeat at a steady interval and amount in the transaction history but are not tracked yet, plus pending proposals.", S({}), t_recurring),

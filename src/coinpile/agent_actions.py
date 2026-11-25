@@ -180,6 +180,32 @@ def r_cat(ctx, a):
     return {"category": out["category"], "rule": out.get("rule")}
 
 
+def p_merchant(ctx, a):
+    from coinpile import categorize
+    key = str(a.get("key") or "")
+    rows = categorize.group_rows(ctx.store, key)
+    if not rows:
+        raise Refused("nothing to categorize for that key (use a key from uncategorized_merchants)")
+    cat = txt(a.get("category"), 60)
+    if not cat or cat == "Transfer":
+        raise Refused("a category is needed")
+    always = bool(a.get("always"))
+    w = getattr(ctx, "writer", None)
+    send = bool(w) and w.on("categories") and any(r["id"].startswith("ff:") for r in rows)
+    where = "in Firefly III" if send else "in Coinpile"
+    total = sum(r["amount"] for r in rows)
+    return ({"key": key, "category": cat, "always": always},
+            f"{where[0].upper() + where[1:]}, set the category of {len(rows)} payment{'s' if len(rows) != 1 else ''} from \"{txt(rows[0]['name'], 60)}\" ({total:,.2f} in all) to {cat}"
+            + ((" and make a Firefly III rule so future ones get it too" if send else " and remember it for this merchant") if always else ""), "firefly" if send else "coinpile")
+
+
+def r_merchant(ctx, a):
+    from coinpile import categorize
+    w = getattr(ctx, "writer", None)
+    out = categorize.apply(ctx.store, w if (w and w.on("categories")) else None, a["key"], a["category"], a["always"])
+    return {k: out[k] for k in ("category", "sent_to_firefly", "kept_in_coinpile", "failed", "rule", "remembered")}
+
+
 def _bank_problems(ctx) -> dict:
     try:
         return hook(ctx, "bank_problems")()
@@ -352,6 +378,9 @@ ACTIONS = {
                            S({"account_id": STR, "amount": NUM, "description": STR, "date": DATE, "category": STR}, ["account_id", "amount", "description"]), p_tx, r_tx),
     "set_transaction_category": ("Change a transaction's category in Firefly III (transaction_id from search_transactions). always=true also makes a Firefly III rule for future ones.",
                                  S({"transaction_id": STR, "category": STR, "always": BOOL}, ["transaction_id", "category"]), p_cat, r_cat),
+    "categorize_merchant": ("Set the category of every uncategorized payment from one merchant (key from uncategorized_merchants). Goes to Firefly III when the user sends categories "
+                            "there, else kept in Coinpile. always=true also makes a Firefly III rule (or remembers the merchant in Coinpile) for future payments.",
+                            S({"key": STR, "category": STR, "always": BOOL}, ["key", "category"]), p_merchant, r_merchant),
     "create_piggy_bank": ("Make a piggy bank (a goal) in Firefly III: name, the Firefly III account that holds the money, optional target, target_date, start_amount, notes.",
                           S({"name": STR, "account_id": STR, "target": NUM, "target_date": DATE, "start_amount": NUM, "notes": STR}, ["name", "account_id"]), p_piggy_new, r_piggy_new),
     "update_piggy_bank": ("Change a piggy bank's name, target, target_date or notes in Firefly III (piggy_id from list_goals).",

@@ -870,6 +870,7 @@ async function viewAgent(root, rerender) {
     add(log, bubble(m));
   }
   const input = h("textarea", { id: "ag-in", rows: 2, placeholder: "Ask anything about your money…", onkeydown: (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go(); } } });
+  if (S.agentDraft) { input.value = S.agentDraft; S.agentDraft = null; setTimeout(() => input.focus(), 0); }
   async function go(text) {
     const q = (text || input.value).trim(); if (!q) return;
     let id = S.chatId;
@@ -1065,6 +1066,53 @@ function invHistoryPanel() {
       r.points.length >= 2 ? h("p", { class: "muted small" }, `${usd(r.points[0].value)} on ${r.points[0].date} → ${usd(r.points.at(-1).value)} on ${r.points.at(-1).date} (${r.points.at(-1).value >= r.points[0].value ? "+" : ""}${usd(r.points.at(-1).value - r.points[0].value)})`) : null);
   };
   draw(); return panel;
+}
+
+/* ================================ CATEGORIZE ================================ */
+// What is still uncategorized, one merchant at a time. A choice covers every payment from that merchant; with sending categories on it goes to
+// Firefly III (and "always" makes a Firefly III rule, so the bank's next ones arrive categorized), else it is kept in Coinpile.
+const BY = { remembered: "you chose it before", history: "its other payments", ai: "AI guess" };
+async function viewCategorize(root, rerender) {
+  const [q, cats] = await Promise.all([api("/api/categorize?limit=300"), api("/api/categories")]);
+  const names = cats.filter((c) => c.name !== "Transfer").map((c) => c.name);
+  const where = q.sends_to_firefly ? "Firefly III (through its API)" : "Coinpile only";
+  const apply = async (it, i, btn) => {
+    const sel = $("#cz-c" + i).value === "__new" ? ($("#cz-n" + i).value || "").trim() : $("#cz-c" + i).value;
+    if (!sel) return toast("Choose a category");
+    btn.disabled = true; btn.textContent = "Saving…";
+    try {
+      const r = await api("/api/categorize/apply", send("POST", { key: it.key, category: sel, always: $("#cz-a" + i).checked }));
+      const row = $("#cz-r" + i); if (row) { row.classList.add("muted"); row.querySelector(".cz-act").replaceChildren(h("span", { class: "small" }, `✓ ${r.category}` + (r.sent_to_firefly ? ` · ${r.sent_to_firefly} in Firefly III` : "") + (r.kept_in_coinpile ? ` · ${r.kept_in_coinpile} in Coinpile` : "") + (r.rule ? " · rule made" : r.remembered ? " · remembered" : "") + (r.failed.length ? ` · ${r.failed.length} failed` : ""))); }
+      if (r.failed.length) toast(`${r.failed.length} could not be changed in Firefly III: ${r.failed[0].why}`);
+      return r;
+    } catch (e) { fail(e); btn.disabled = false; btn.textContent = "Apply"; }
+  };
+  const rows = q.items.map((it, i) => {
+    const pick = it.suggestion || "";
+    const newBox = h("input", { id: "cz-n" + i, placeholder: "New category", class: "tiny", style: "display:none;width:140px;margin-top:4px" });
+    return h("tr", { id: "cz-r" + i },
+      h("td", {}, h("b", {}, it.name), it.payee && it.payee.toLowerCase() !== it.name.toLowerCase() ? h("div", { class: "muted small" }, it.payee) : null,
+        h("div", { class: "muted small" }, `${it.count} payment${it.count === 1 ? "" : "s"} · ${it.first === it.last ? it.last : it.first + " to " + it.last}`)),
+      h("td", { class: "num r " + (it.total < 0 ? "" : "pos") }, usd(it.total)),
+      h("td", {}, h("select", { id: "cz-c" + i, "aria-label": "Category for " + it.name, onchange: (e) => { newBox.style.display = e.target.value === "__new" ? "" : "none"; } },
+        h("option", { value: "" }, "Choose…"), names.map((n) => h("option", { value: n, selected: n === pick }, n)), h("option", { value: "__new" }, "New category…")), newBox,
+        it.suggestion ? h("div", { class: "muted small" }, "suggested: " + BY[it.suggested_by]) : null),
+      h("td", {}, h("label", { class: "check small", title: q.sends_to_firefly ? "Make a Firefly III rule so the next ones arrive with this category" : "Remember this merchant in Coinpile" }, h("input", { type: "checkbox", id: "cz-a" + i, checked: it.count > 1 }), "always")),
+      h("td", { class: "cz-act" }, h("button", { class: "btn sm primary", onclick: (e) => apply(it, i, e.target) }, "Apply")));
+  });
+  const withSug = q.items.map((it, i) => [it, i]).filter(([it]) => it.suggestion);
+  add(root,
+    h("div", { class: "panel wide" }, h("div", { class: "bar" }, h("h3", {}, q.merchants ? `${q.transactions} payments from ${q.merchants} merchants to categorize` : "Nothing to categorize"),
+        h("span", { class: "pill " + (q.sends_to_firefly ? "t" : "") }, "goes to " + where)),
+      h("p", { class: "muted small" }, q.sends_to_firefly
+        ? "Each choice sets the category on every payment from that merchant in Firefly III. \"always\" also makes a Firefly III rule (group Coinpile), so the bank connector's next ones arrive already categorized."
+        : "Kept in Coinpile: Firefly III is not changed. \"always\" remembers the merchant so its new payments get the same category. To send them to Firefly III, switch on Categories under Settings, Firefly III, Send to Firefly III."),
+      h("div", { class: "chips" },
+        withSug.length ? h("button", { class: "btn", onclick: async (e) => { if (!e.target.dataset.sure) { e.target.dataset.sure = 1; e.target.textContent = `Sure? Sets ${withSug.length} merchants` + (q.sends_to_firefly ? " in Firefly III" : ""); return; } e.target.disabled = true; let n = 0; for (const [it, i] of withSug) { const b = $("#cz-r" + i + " .cz-act button"); if (b && $("#cz-c" + i).value) { if (await apply(it, i, b)) n++; } } toast(`Applied ${n} suggestion${n === 1 ? "" : "s"}`); e.target.disabled = false; } }, `Apply all ${withSug.length} suggestions`) : null,
+        q.ai.on ? h("button", { class: "btn", disabled: !q.ai.model, title: q.ai.model ? "" : "Set up a model in Settings, Agent models", onclick: async (e) => { e.target.disabled = true; e.target.textContent = "Asking the AI…"; try { const r = await api("/api/categorize/ai", { method: "POST" }); toast(r.skipped || `AI looked at ${r.asked}, suggested ${r.set}`); rerender(); } catch (err) { fail(err); e.target.disabled = false; } } }, "Ask the AI for suggestions")
+          : h("button", { class: "btn", onclick: () => { S.settingsTab = "categories"; goTab("settings"); } }, "Switch on AI suggestions"),
+        h("button", { class: "btn", title: "The agent proposes categories; each is done only when you press Yes", onclick: () => { S.agentDraft = "Help me categorize my uncategorized payments (use the categorize skill)."; goTab("agent"); } }, "Ask the agent to help"))),
+    q.items.length ? h("div", { class: "panel wide" }, h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["Merchant", "Total", "Category", "", ""].map((x, i) => h("th", { class: i === 1 ? "r" : "" }, x)))), h("tbody", {}, rows)))) : null);
 }
 
 /* ================================ SETTINGS (tabs) ================================ */
@@ -1442,7 +1490,7 @@ async function tabSharing(root, rerender) {
 }
 
 /* ================================ SHELL ================================ */
-const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["piggy", "Piggy banks", viewPiggy], ["budgets", "Budgets", viewBudgets], ["notes", "Notes", viewNotes], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["trading", "Trading", viewTrading], ["settings", "Settings", viewSettings]];
+const TABS = [["overview", "Overview", viewOverview], ["movement", "Money movement", viewMovement], ["categorize", "Categorize", viewCategorize], ["accounts", "Accounts", viewAccounts], ["subs", "Subscriptions", viewSubs], ["savings", "Savings", viewSavings], ["piggy", "Piggy banks", viewPiggy], ["budgets", "Budgets", viewBudgets], ["notes", "Notes", viewNotes], ["agent", "Agent", viewAgent], ["investments", "Investments", viewInvestments], ["trading", "Trading", viewTrading], ["settings", "Settings", viewSettings]];
 /* ---------- movable panels: order is remembered per tab in this browser ---------- */
 function layoutKey() { return "gb_layout_" + S.tab + (S.tab === "settings" ? ":" + S.settingsTab : "") + (S.acct ? ":acct" : ""); }
 function blocksOf(main) {

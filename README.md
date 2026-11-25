@@ -181,6 +181,22 @@ connector held back from Firefly III, and accounts that look duplicated. It can 
 bills) or to **match a balance** in Firefly III (the opening balance moves; no transaction is added). Both wait for your Yes. Signing in
 to a bank again, approving accounts and releasing a held batch stay with you or the connector's admin.
 
+## Categorize (and send it back to Firefly III)
+
+The **Categorize** tab lists what is still uncategorized (nothing set in Firefly III, no rule matched) and AI guesses you have not confirmed,
+grouped by merchant, so one choice covers every payment from that store. Each merchant gets a suggestion when there is one: what you chose
+before, what its other payments already have, or the AI's guess. Pick a category (or type a new one) and press Apply.
+
+- **Categories sending on** (Settings, Firefly III): the category is set on each of those payments in Firefly III through its API. **always**
+  also makes one Firefly III rule (group Coinpile), so the next payments the bank connector sends arrive categorized by Firefly III itself
+  (the connector sends with Firefly III's rules on).
+- **Sending off:** kept in Coinpile only; Firefly III is not changed. **always** remembers the merchant, and its new payments get the same
+  category after each read from Firefly III.
+- **Ask the AI for suggestions** fills in guesses (needs AI categories on). **Ask the agent to help** opens a chat with the categorize skill:
+  the agent reads the same list and proposes one merchant at a time; each is done only when you press Yes.
+
+Money arriving on a loan with no category is read as a transfer (paying the loan down), never as income, and is not listed.
+
 ## AI categories (optional, off by default)
 
 Payments no rule, bank category or keyword could place stay on Misc (or Income). In Categories, **AI categories** lets your chat model
