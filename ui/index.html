@@ -1284,10 +1284,20 @@ const blank = () => ({ server: "ollama", kind: "openai", base_url: SERVERS[0][3]
 async function tabModels(root, rerender) {
   const [pv, cfg] = await Promise.all([api("/api/agent/providers"), api("/api/settings")]);
   add(root, h("div", { class: "panel" }, h("h3", {}, "Web search (SearXNG)"),
-    h("p", { class: "muted small" }, "Lets the agent look up current rates, limits and rules. Searches go to your own SearXNG, never with your personal details. In SearXNG's settings.yml, search.formats must include json."),
-    h("div", { class: "url" }, h("input", { id: "sx-url", type: "url", value: cfg.searx_url || "", placeholder: "http://searxng:8080" }),
-      h("button", { class: "btn", onclick: () => saveCfg({ searx_url: val("sx-url").trim() }, rerender) }, "Save"),
-      h("button", { class: "btn", onclick: async () => { try { const r = await api("/api/agent/search-test", send("POST", { q: "current CD rates" })); toast(`Works: ${r.results.length} results, first from ${r.results[0]?.site || "?"}`); } catch (e) { fail(e); } } }, "Test"))));
+    h("p", { class: "muted small" }, "Lets the agent look up current prices, interest rates, house prices in an area, limits and rules. Searches go to your own SearXNG, never with your personal details (names, balances, account numbers are refused)."),
+    h("div", { class: "url" }, h("input", { id: "sx-url", type: "url", value: cfg.searx_url || "", placeholder: "http://192.168.1.20:8080 or http://searxng:8080" }),
+      h("button", { class: "btn", onclick: () => saveCfg({ searx_url: val("sx-url").trim(), searx_insecure: $("#sx-ins").checked ? "on" : "off" }, rerender) }, "Save"),
+      h("button", { class: "btn", onclick: async (e) => { e.target.disabled = true; const out = $("#sx-out"); out.textContent = "Testing…";
+        try { await api("/api/settings", send("PUT", { searx_url: val("sx-url").trim(), searx_insecure: $("#sx-ins").checked ? "on" : "off" })); const r = await api("/api/agent/search-test", send("POST", { q: "current CD rates" }));
+          out.textContent = `Works: ${r.results.length} results (${r.results.map((x) => x.site).join(", ")})` + (r.engines.length ? `. Engines: ${r.engines.join(", ")}` : "") + (r.unresponsive.length ? `. Not answering: ${r.unresponsive.join(", ")}` : ""); out.className = "small pos"; }
+        catch (err) { out.textContent = err.message; out.className = "small neg"; } finally { e.target.disabled = false; } } }, "Save and test")),
+    h("label", { class: "check small" }, h("input", { type: "checkbox", id: "sx-ins", checked: cfg.searx_insecure === "on" }), "Trust this server's own certificate (an https:// SearXNG with a self-signed or home certificate)"),
+    h("p", { id: "sx-out", class: "small", role: "status" }),
+    h("details", { class: "small muted" }, h("summary", {}, "Setting up SearXNG for Coinpile"),
+      h("ul", {}, h("li", {}, "In SearXNG's settings.yml, under search: formats: [html, json]. Restart SearXNG."),
+        h("li", {}, "A private SearXNG: server: limiter: false (otherwise it may block Coinpile with 429)."),
+        h("li", {}, "Address: from inside Docker use the container name on a shared network (http://searxng:8080) or your server's IP and port, not localhost."),
+        h("li", {}, "Behind a login: http://user:password@host:port.")))));
   const D = S.draftProv || null;                                   // the model being added or edited
   const edit = (p) => { S.draftProv = p; rerender(); };
   add(root, h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, "Models for the agent"), h("button", { class: "btn sm primary", onclick: () => edit(blank()) }, "+ Add a model")),

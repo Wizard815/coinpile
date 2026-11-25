@@ -31,7 +31,7 @@ from coinpile.security import Throttle, check_password_strength, hash_password, 
 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
-USER_KEYS = {"searx_url", "share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
+USER_KEYS = {"searx_url", "searx_insecure", "share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
              "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider", "ai_categorize", "ai_categorize_auto", "nw_without_loans"}
 
 
@@ -624,6 +624,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
         ctx.llm_transport = llm_transport
         ctx.search_transport = search_transport
         ctx.searx_url = lambda: cfg.get(db, "searx_url") or os.environ.get("SEARXNG_URL", "")
+        ctx.searx_insecure = lambda: cfg.get(db, "searx_insecure") == "on" or os.environ.get("SEARXNG_INSECURE") == "1"
         outbound = netguard.Slots()                 # this person's share of the worker threads for calls to servers they typed in
         ctx.outbound = outbound
 

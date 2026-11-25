@@ -21,28 +21,69 @@ class SearchError(Exception):
     pass
 
 
-def search(base_url: str, query: str, transport=None, limit: int = 8, time_range: str | None = None) -> list[dict]:
+def _ask(base_url: str, query: str, transport=None, time_range: str | None = None, insecure: bool = False) -> dict:
+    """SearXNG's JSON answer, or a SearchError that says what to change."""
     if not base_url:
         raise SearchError("no SearXNG address is set (Settings, Agent models, Web search)")
+    base = base_url.strip().rstrip("/")
+    if base.endswith("/search"):
+        base = base[:-7]                                  # the address of the search page pasted instead of the server's
+    if not base.startswith(("http://", "https://")):
+        raise SearchError("the SearXNG address starts with http:// or https:// (for example http://192.168.1.20:8080)")
     q = " ".join(str(query or "").split())[:300]
     if not q:
         raise SearchError("empty query")
     params = {"q": q, "format": "json", "safesearch": 1}
     if time_range in ("day", "week", "month", "year"):
         params["time_range"] = time_range
+    host = urlparse(base).hostname or base
     try:
-        with netguard.client(transport, timeout=20) as c:
-            r = c.get(base_url.rstrip("/") + "/search", params=params, headers={"Accept": "application/json"})
+        with netguard.client(transport, timeout=20, verify=not insecure, follow_redirects=True) as c:
+            r = c.get(base + "/search", params=params, headers={"Accept": "application/json", "User-Agent": "Coinpile"})
+    except netguard.Blocked as e:
+        raise SearchError(f"{e}. Coinpile runs in its own container: use the SearXNG container's name (on a shared Docker network) or your server's IP address, not localhost")
+    except httpx.ConnectError as e:
+        if "CERTIFICATE" in str(e).upper() or "SSL" in str(e).upper():
+            raise SearchError(f"{host}'s certificate is not trusted. Tick \"Trust this server's own certificate\" for a self-signed or home certificate, or use its http:// address")
+        raise SearchError(f"could not connect to {host}: check the address and port, and that Coinpile's container can reach it (same Docker network, or your server's IP)")
+    except httpx.TimeoutException:
+        raise SearchError(f"{host} did not answer in 20 seconds")
     except httpx.HTTPError as e:
         raise SearchError(f"could not reach SearXNG ({type(e).__name__})")
+    if r.status_code == 401:
+        raise SearchError("SearXNG asks for a login: put it in the address, http://user:password@host:port")
     if r.status_code == 403:
-        raise SearchError("SearXNG refused JSON: add json to search.formats in its settings.yml")
+        raise SearchError("SearXNG refused JSON: add json to search.formats in its settings.yml, then restart it")
+    if r.status_code == 429:
+        raise SearchError("SearXNG's limiter blocked Coinpile: set server.limiter: false in its settings.yml (fine for a private SearXNG), or let Coinpile's address through its bot detection")
+    if r.status_code == 404:
+        raise SearchError(f"{host} has no SearXNG search page at that address: use the address you open SearXNG at in a browser")
     if r.status_code >= 400:
         raise SearchError(f"SearXNG answered {r.status_code}")
     try:
-        rows = r.json().get("results") or []
-    except ValueError:
-        raise SearchError("SearXNG did not answer in JSON (add json to search.formats in its settings.yml)")
+        data = r.json()
+        assert isinstance(data, dict)
+    except (ValueError, AssertionError):
+        raise SearchError("SearXNG did not answer in JSON: add json to search.formats in its settings.yml (or this address is not SearXNG)")
+    return data
+
+
+def probe(base_url: str, transport=None, insecure: bool = False, query: str = "current CD rates") -> dict:
+    """The Test button: results, and which search engines answered or failed."""
+    data = _ask(base_url, query, transport, insecure=insecure)
+    rows = _rows(data.get("results") or [], 3)
+    engines = sorted({e for x in data.get("results") or [] for e in (x.get("engines") or [x.get("engine")]) if e})
+    down = [str(u[0]) + (f" ({u[1]})" if len(u) > 1 and u[1] else "") for u in data.get("unresponsive_engines") or [] if u]
+    if not rows:
+        raise SearchError("SearXNG answered but found nothing" + (f": these engines failed: {', '.join(down)}" if down else ": check that some search engines are enabled in it"))
+    return {"ok": True, "results": rows, "engines": engines, "unresponsive": down}
+
+
+def search(base_url: str, query: str, transport=None, limit: int = 8, time_range: str | None = None, insecure: bool = False) -> list[dict]:
+    return _rows(_ask(base_url, query, transport, time_range, insecure).get("results") or [], limit)
+
+
+def _rows(rows: list, limit: int) -> list[dict]:
     out, seen = [], set()
     for x in rows:
         url = str(x.get("url") or "")

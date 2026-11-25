@@ -96,3 +96,15 @@ def test_a_payment_arriving_on_a_loan_is_never_income_or_left_to_categorize():
     row = db.one("SELECT category, ff_uncat FROM transactions WHERE account_id='ff:7'")
     assert row["category"] == "Transfer" and row["ff_uncat"] == 0
     assert categorize.queue(db)["merchants"] == 0
+
+
+def test_well_known_names_are_placed_by_keywords_without_any_model():
+    ff = shop_world()
+    db = read(ff, T)
+    categorize.auto(db)
+    q = {i["name"]: i for i in categorize.queue(db)["items"]}
+    shell = next(i for n, i in q.items() if "SHELL" in n)
+    assert shell["suggestion"] == "Gas" and shell["suggested_by"] == "rules"
+    assert q["ODD SHOP"]["suggestion"] is None                                   # left for you, the AI or the agent
+    assert {r["category"] for r in db.all("SELECT category FROM transactions WHERE name LIKE 'SHELL%'")} == {"Gas"}    # shown in Coinpile now
+    assert cat_in_firefly(ff, 21) is None                                         # but not sent until applied

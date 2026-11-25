@@ -593,7 +593,8 @@ def build_tools(ctx, chat_id: int | None = None, peer_data: bool = False, seen_u
         if private:
             return {"error": f"not searched: the query holds {private}. Search for the general question without personal details."}
         try:
-            rows = websearch.search(url, str(a.get("query", "")), getattr(ctx, "search_transport", None), time_range=a.get("time_range"))
+            rows = websearch.search(url, str(a.get("query", "")), getattr(ctx, "search_transport", None), time_range=a.get("time_range"),
+                                    insecure=bool(getattr(ctx, "searx_insecure", None) and ctx.searx_insecure()))
         except websearch.SearchError as e:
             return {"error": str(e)}
         seen_urls.update(r["url"] for r in rows)
@@ -1211,7 +1212,8 @@ def run_chat(ctx, prov: dict, key: str, history: list[dict], max_steps: int = 8,
                     msgs.append({"role": "assistant", "content": reply})
                     msgs.append({"role": "user", "content": "[Coinpile check] These figures in your answer did not come from any tool result: " + ", ".join(bad)
                                  + ". Every figure must come from a tool. Compute each with calculate (or the right tool), then give your full answer again. "
-                                 + "If a figure was the user's own, say so."})
+                                 + "If a figure was the user's own, say so. This check is automatic and the user does not see it: "
+                                 + "write the answer as if for the first time, without thanking anyone or mentioning a correction."})
                     continue
                 return {"reply": reply, "trace": trace, "steps": step + 1, "actions": asked(trace), "checked": {"figures": len(figures(reply)), "unverified": bad}}
             msgs.append({"role": "assistant", "content": out["content"], "tool_calls": out["tool_calls"]})
@@ -1564,10 +1566,10 @@ def register(app, ctx):
         auth(request)
         from coinpile import websearch
         try:
-            rows = websearch.search(ctx.searx_url() if getattr(ctx, "searx_url", None) else "", str(b.get("q") or "current CD rates"), getattr(ctx, "search_transport", None), limit=3)
+            return websearch.probe(ctx.searx_url() if getattr(ctx, "searx_url", None) else "", getattr(ctx, "search_transport", None),
+                                   bool(getattr(ctx, "searx_insecure", None) and ctx.searx_insecure()), str(b.get("q") or "current CD rates"))
         except websearch.SearchError as e:
             raise HTTPException(502, str(e))
-        return {"ok": True, "results": rows}
 
     def chat_view(chat_id):
         chat = store.one("SELECT * FROM chats WHERE id=?", (chat_id,))

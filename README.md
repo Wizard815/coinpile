@@ -185,7 +185,9 @@ to a bank again, approving accounts and releasing a held batch stay with you or 
 
 The **Categorize** tab lists what is still uncategorized (nothing set in Firefly III, no rule matched) and AI guesses you have not confirmed,
 grouped by merchant, so one choice covers every payment from that store. Each merchant gets a suggestion when there is one: what you chose
-before, what its other payments already have, or the AI's guess. Pick a category (or type a new one) and press Apply.
+before, what its other payments already have, your rules and Coinpile's keyword list of well-known names (Kroger is Groceries, Shell is
+Gas, Geico is Bills...: free, no AI, shown in Coinpile at once but sent to Firefly III only when you apply it), or the AI's guess, which is
+only asked about what nothing else could place. Pick a category (or type a new one) and press Apply.
 
 - **Categories sending on** (Settings, Firefly III): the category is set on each of those payments in Firefly III through its API. **always**
   also makes one Firefly III rule (group Coinpile), so the next payments the bank connector sends arrive categorized by Firefly III itself
@@ -313,8 +315,12 @@ pending payments don't count; never the transactions themselves).
 **Money maths and outside facts.** loan_payoff (months, interest, and what an extra payment saves), savings_plan (monthly amount for a date, or
 the date for a monthly amount, with interest), cashflow (in vs out per month and the savings rate) and calculate do the maths exactly.
 With a **SearXNG** address in Settings, Agent models, Web search (or `SEARXNG_URL`), web_search looks up current rates, limits and rules and
-read_webpage reads a page it found to check a figure; it names the source and date. SearXNG must allow JSON (`search.formats: [html, json]` in
-its settings.yml). The agent is told never to put personal details in a search, and a query that holds an email address, an account or
+read_webpage reads a page it found to check a figure; it names the source and date (current CD and savings rates, prices, house prices
+in an area...). **Connecting your SearXNG container:** Settings, Agent models, Web search: its address as Coinpile's container sees it
+(`http://searxng:8080` on a shared Docker network, or `http://<server IP>:<port>`, not localhost), then **Save and test**, which says which
+search engines answered. In SearXNG's settings.yml: `search: formats: [html, json]`, and for a private SearXNG `server: limiter: false`
+(its limiter otherwise blocks Coinpile with 429). An `https://` SearXNG with a self-signed or home certificate: tick "Trust this server's
+own certificate" (or `SEARXNG_INSECURE=1`); it applies to SearXNG only. Behind a login: `http://user:password@host:port`. The agent is told never to put personal details in a search, and a query that holds an email address, an account or
 card number or one of your exact balances is not sent. It can only open pages its search returned in the last ten minutes, and only on the
 public internet: a page (or a redirect) that leads into your home network or to the server is refused. A page is read up to 2 MB and 30 seconds.
 

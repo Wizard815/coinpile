@@ -117,12 +117,12 @@ def _hook_public(request: httpx.Request) -> None:
     check(str(request.url), resolve=False, public_only=True)
 
 
-def client(transport=None, public_only: bool = False, **kw) -> httpx.Client:
+def client(transport=None, public_only: bool = False, verify: bool = True, **kw) -> httpx.Client:
     """An httpx client for addresses a person typed. Every request (redirects too) is checked, and the connection goes to the very address that
-    was checked. Tests with a stand-in transport skip both checks."""
+    was checked. Tests with a stand-in transport skip both checks. verify=False only for a home server the person said to trust (its own certificate)."""
     if transport is not None:
         return httpx.Client(transport=transport, **kw)
-    return httpx.Client(transport=guarded_transport(public_only), event_hooks={"request": [_hook_public if public_only else _hook]}, **kw)
+    return httpx.Client(transport=guarded_transport(public_only, **({} if verify else {"verify": False})), event_hooks={"request": [_hook_public if public_only else _hook]}, **kw)
 
 
 # ---------------------------------------------------------------- how many slow outbound calls one person may have at once

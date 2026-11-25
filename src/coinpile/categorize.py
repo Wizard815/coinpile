@@ -65,6 +65,8 @@ def queue(db, limit: int | None = None) -> dict:
             sug, src = mem[k], "remembered"
         elif hist.get(k) in valid:
             sug, src = hist[k], "history"
+        elif (rc := ledger.rule_category(db, rs[0]["name"], rs[0]["amount"], rs[0]["plaid_category"])) in valid and rc != "Transfer":
+            sug, src = rc, "rules"
         elif len(ai) == 1 and next(iter(ai)) in valid:
             sug, src = next(iter(ai)), "ai"
         items.append({"key": k, "name": rs[0]["name"], "payee": rs[0]["payee"], "direction": "in" if rs[0]["amount"] >= 0 else "out", "count": len(rs),
@@ -126,12 +128,18 @@ def apply(db, writer, key: str, category: str, always: bool = False) -> dict:
 
 def auto(db) -> int:
     """After a read from Firefly III: merchants you told Coinpile to always put somewhere get that category on their new payments (kept in
-    Coinpile; with sending on, the Firefly III rule made then already does it in Firefly III)."""
+    Coinpile; with sending on, the Firefly III rule made then already does it in Firefly III). Then Coinpile's own rules and keyword list
+    (Kroger is Groceries, Shell is Gas...) give an uncategorized Firefly III payment a guess: shown in Coinpile and listed to confirm, never
+    sent to Firefly III until you apply it, and the AI is then only asked about what is left."""
     mem = {m["mkey"]: m["category"] for m in db.all("SELECT mkey, category FROM cat_memory")}
-    if not mem:
-        return 0
     n = 0
     for r in _rows(db):
+        if r["source"] == "firefly" and r["ff_uncat"] == 1 and not r["ai_category"] and not mem.get(key_of(r)):
+            g = ledger.rule_category(db, r["name"], r["amount"], r["plaid_category"])
+            if g and g != "Transfer" and g != r["category"]:
+                with db.tx() as c:
+                    c.execute("UPDATE transactions SET category=?, ai_category=? WHERE id=? AND ff_uncat=1 AND ai_category IS NULL", (g, g, r["id"]))
+            continue
         cat = mem.get(key_of(r))
         if cat and r["category"] != cat:
             with db.tx() as c:

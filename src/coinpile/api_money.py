@@ -404,7 +404,9 @@ def register(app, ctx):
         auth(request)
         if cfg.get(store, "ai_categorize") != "on":
             bad("switch on AI categories first (Settings, Categories)", 409)
+        from coinpile import categorize
         from coinpile.agent import ModelError
+        categorize.auto(store)                          # rules and keywords first, so the model is only asked about the rest
         try:
             return aicat.run(store, getattr(ctx, "llm_transport", None))
         except (httpx.HTTPError, httpx.InvalidURL, ModelError) as e:

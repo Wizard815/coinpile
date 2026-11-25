@@ -41,7 +41,7 @@ def candidates(db, only_new: bool, limit: int | None = None) -> list[dict]:
     rows = db.all("""SELECT id, name, payee, amount, plaid_category, source, category, category_locked, ff_uncat, ai_category FROM transactions
                      WHERE category IN ('Misc','Income') AND ai_category IS NULL AND (ff_uncat=1 OR (category_locked=0 AND source != 'firefly'))"""
                   + (" AND coalesce(ai_seen,0)=0" if only_new else "") + " ORDER BY date DESC, id")
-    out = [r for r in rows if r["ff_uncat"] == 1 or ledger.rule_category(db, r["name"], r["amount"], r["plaid_category"]) is None]
+    out = [r for r in rows if ledger.rule_category(db, r["name"], r["amount"], r["plaid_category"]) is None]     # rules and keywords first: the model only gets the rest
     return out[:limit] if limit else out
 
 
