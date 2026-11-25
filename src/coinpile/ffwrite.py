@@ -10,6 +10,7 @@ What Firefly III has no place for stays in Coinpile: savings APY and maturity, n
 After each change Coinpile reads Firefly III back, so the screens show what Firefly III holds."""
 import hashlib
 import json
+import re
 import time
 import uuid
 from datetime import date
@@ -253,6 +254,30 @@ class Writer:
                 return                                      # only Coinpile's own details changed (paid from, reminder, category ...)
             body = send
         self.ff().send("PUT", f"/bills/{s['plaid_stream_id'].split(':')[1]}", body)
+
+    def send_subs(self) -> dict:
+        """Every active Coinpile subscription not yet in Firefly III becomes a bill there: the ones added before "send subscriptions" was on,
+        or by the agent. Ones read from Firefly III (bills, recurring transactions) are already there. Daily ones cannot be bills."""
+        sent, daily, failed = [], [], []
+        rows = self.db.all("SELECT * FROM subscriptions WHERE active=1 AND coalesce(source,'') NOT IN ('firefly','ff-recurring') ORDER BY id")
+        for s in rows:
+            if not self._bill_body(s):
+                daily.append(s["name"])
+                continue
+            clean = re.sub(r"\s*\(not in Firefly III: [^)]*\)", "", s.get("notes") or "").strip()
+            if clean != (s.get("notes") or ""):
+                with self.db.tx() as c:                     # an earlier refusal noted here: not sent to Firefly III as part of the bill
+                    c.execute("UPDATE subscriptions SET notes=? WHERE id=?", (clean, s["id"]))
+            try:
+                self.sub_created(s["id"])
+            except firefly.TokenRefused:
+                raise
+            except firefly.FireflyError as e:
+                failed.append({"name": s["name"], "why": str(e)[:200]})
+                continue
+            if (self.db.one("SELECT source FROM subscriptions WHERE id=?", (s["id"],)) or {}).get("source") == "firefly":
+                sent.append(s["name"])
+        return {"sent": len(sent), "names": sent, "daily": daily, "failed": failed}
 
     def sub_deleted(self, row: dict) -> None:
         if row and row.get("source") == "firefly" and (row.get("plaid_stream_id") or "").startswith("ff-bill:"):

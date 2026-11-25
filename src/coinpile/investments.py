@@ -71,6 +71,34 @@ def monthly(db, ids: list[str], months: int = 12) -> list[dict]:
     return out[-months:]
 
 
+def history(db, ids: list[str], by: str = "month", count: int = 12) -> list[dict]:
+    """Value of all tracked investment accounts together at the end of each day, week (starting Monday) or month, the last `count` of them.
+    A period with no reading carries the last known value."""
+    from datetime import date, timedelta
+    if by == "month":
+        return [{"date": m["month"], "value": m["value"]} for m in monthly(db, ids, count)]
+    if not ids or by not in ("day", "week"):
+        return []
+    ph = ",".join("?" * len(ids))
+    rows = db.all(f"SELECT account_id, balance, ts FROM snapshots WHERE account_id IN ({ph}) ORDER BY ts, rowid", tuple(ids))
+    key = (lambda d: d) if by == "day" else (lambda d: d - timedelta(days=d.weekday()))
+    step = timedelta(days=1 if by == "day" else 7)
+    last, per = {}, {}
+    for r in rows:
+        try:
+            d = key(date.fromisoformat(r["ts"][:10]))
+        except ValueError:
+            continue
+        last[r["account_id"]] = r["balance"] or 0
+        per[d] = round(sum(last.values()), 2)
+    out = []
+    for d in sorted(per):
+        while out and date.fromisoformat(out[-1]["date"]) + step < d:
+            out.append({"date": (date.fromisoformat(out[-1]["date"]) + step).isoformat(), "value": out[-1]["value"]})
+        out.append({"date": d.isoformat(), "value": per[d]})
+    return out[-max(1, count):]
+
+
 def _next_month(m: str) -> str:
     y, mo = int(m[:4]), int(m[5:7])
     return f"{y + (mo == 12):04d}-{mo % 12 + 1:02d}"

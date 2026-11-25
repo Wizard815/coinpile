@@ -176,3 +176,19 @@ def test_f12_a_piggy_bank_cannot_hold_more_than_its_account(tmp_path):
     r = c.post("/api/piggy-banks/2/money", json={"account_id": "ff:1", "amount": 50000})          # the checking account holds 1,200.50
     print(r.status_code, r.text[:120])
     assert r.status_code == 422, f"50,000 was set aside on an account that holds 1,200.50 (answer {r.status_code})"
+
+
+def test_subscriptions_made_before_the_switch_was_on_can_be_sent_as_bills_later(tmp_path):
+    ff, c = start(tmp_path)
+    add = lambda name, every, unit: c.post("/api/subscriptions", json={"name": name, "amount": 12.5, "next_date": "2026-12-01", "every": every, "unit": unit}).json()   # noqa: E731
+    gym, daily = add("Gym", 1, "month"), add("Coffee", 1, "day")
+    assert not [b for b in ff.data["1"]["bills"] if b["attributes"]["name"] == "Gym"]          # the switch was off: Coinpile only
+    assert c.post("/api/firefly/sync-subscriptions").status_code == 409                          # nothing goes without the switch
+    assert c.put("/api/settings", json={"ff_send_bills": "on"}).status_code == 200
+    r = c.post("/api/firefly/sync-subscriptions").json()
+    assert r["sent"] == 1 and r["names"] == ["Gym"] and r["daily"] == ["Coffee"] and not r["failed"]
+    gyms = [b for b in ff.data["1"]["bills"] if b["attributes"]["name"] == "Gym"]
+    assert len(gyms) == 1 and float(gyms[0]["attributes"]["amount_min"]) == 12.5
+    assert c.post("/api/firefly/sync-subscriptions").json()["sent"] == 0                         # pressing it again makes no second bill
+    assert len([b for b in ff.data["1"]["bills"] if b["attributes"]["name"] == "Gym"]) == 1
+    assert len([s for s in c.get("/api/subscriptions").json()["items"] if s["name"] == "Gym"]) == 1   # and Coinpile shows it once

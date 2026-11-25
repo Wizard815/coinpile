@@ -96,7 +96,7 @@ def summary(db, today) -> dict:
     al = ledger.alerts(db, today)
     subs = ledger.subscriptions(db, today)
     fc = ledger.spending_forecast(db, today)
-    return {"as_of": today.isoformat(), "net_worth": ledger.net_worth(db), "subscriptions_monthly": round(sum(s["monthly"] for s in subs), 2),
+    return {"as_of": today.isoformat(), "net_worth": ledger.net_worth(db), "net_worth_without_loans": ledger.net_worth(db, loans=False), "subscriptions_monthly": round(sum(s["monthly"] for s in subs), 2),
             "bills_7d": ledger.upcoming(db, 7, today)["total"], "bills_30d": ledger.upcoming(db, 30, today)["total"],
             "next_bill": ({"name": mine[0]["name"], "date": mine[0]["date"], "amount": mine[0]["amount"]} if mine else None),
             "savings_total": gv["total"], "savings_free": gv["free"], "savings_earmarked": gv["allocated"], "goals_active": sum(1 for g in gv["items"] if g["status"] == "active"), "goals_needed": gv["needed"],

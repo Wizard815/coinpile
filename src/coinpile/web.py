@@ -32,7 +32,7 @@ from coinpile.security import Throttle, check_password_strength, hash_password, 
 SESSION_DAYS = 30
 COOKIE = "coinpile"
 USER_KEYS = {"searx_url", "share", "rh_main_source", "rh_mcp_url", "refresh_minutes", "ff_webhook_secret", "ff_send_goals", "ff_send_piggies", "ff_send_bills", "ff_send_categories", "ff_send_accounts", "connector_url", "connector_name", "connector_token", "caldav_url", "caldav_user", "caldav_password",
-             "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider", "ai_categorize", "ai_categorize_auto"}
+             "notify_url", "notify_min_severity", "alert_missed", "alert_untracked", "alert_maturity_days", "agent_provider", "ai_categorize", "ai_categorize_auto", "nw_without_loans"}
 
 
 def ui_dir() -> Path:
@@ -857,6 +857,13 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
 
         ctx.investments = investments_data
 
+        @app.get("/api/investments/history")
+        def investments_history(by: str = "month", count: int = 12):
+            """The investments chart by day, week or month."""
+            if by not in ("day", "week", "month"):
+                raise HTTPException(422, "by is day, week or month")
+            return {"by": by, "points": investments.history(db, [a["id"] for a in investments.accounts(db)], by, max(2, min(int(count), 3650)))}
+
         class TrackIn(BaseModel):
             investment: bool
             category: str = "Investment"           # Investment or Retirement
@@ -1090,6 +1097,19 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             try:
                 r = await run_in_threadpool(ctx.writer.sync_goals)
                 await run_in_threadpool(firefly.sync_piggies, db, ff_for(uid))
+                return r
+            except firefly.FireflyError as e:
+                raise HTTPException(502, str(e))
+
+        @app.post("/api/firefly/sync-subscriptions")
+        async def sync_subs_now():
+            """Send every Coinpile subscription that is not in Firefly III yet as a bill (ones made before the switch was on, or by the agent)."""
+            if not ctx.writer.on("bills"):
+                raise HTTPException(409, "switch on sending subscriptions to Firefly III first")
+            try:
+                r = await run_in_threadpool(ctx.writer.send_subs)
+                if r["sent"]:
+                    await run_in_threadpool(ctx.writer.after)
                 return r
             except firefly.FireflyError as e:
                 raise HTTPException(502, str(e))

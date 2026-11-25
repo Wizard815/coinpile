@@ -360,6 +360,41 @@ def monthly_plan(db, month: str, today: date) -> dict:
             "income_suggestions": income_suggestions(db, today)}
 
 
+def budget_suggestions(db, today: date, months: int = 3) -> dict:
+    """Monthly budgets from what you really spent: for each spending category, the typical (median) month of the last `months` full months,
+    rounded up to the next $10. Categories seen in only one month (a one-off) are left out; so is what is all bills, which already plan themselves."""
+    months = max(2, min(int(months), 12))
+    first = date(today.year, today.month, 1)
+    spans = []
+    for _ in range(months):
+        end = first - timedelta(days=1)
+        first = date(end.year, end.month, 1)
+        spans.append((first.isoformat(), end.isoformat()))
+    spans.reverse()
+    per: dict[str, list[float]] = {}
+    for i, (s, e) in enumerate(spans):
+        for r in ledger.spending_by_category(db, s, e):
+            per.setdefault(r["category"], [0.0] * months)[i] = r["spent"]
+    bills = {}
+    for sub in ledger.subscriptions(db, today):
+        if sub["active"] and sub["payer"] == "me":
+            bills[sub["category"]] = bills.get(sub["category"], 0) + sub["monthly"]
+    have = {b["category"]: b["monthly_amount"] for b in db.all("SELECT * FROM budgets")}
+    out = []
+    for cat, vals in per.items():
+        seen = [v for v in vals if v > 0.004]
+        if len(seen) < 2:
+            continue
+        typical = sorted(vals)[len(vals) // 2] if len(vals) % 2 else (sorted(vals)[len(vals) // 2 - 1] + sorted(vals)[len(vals) // 2]) / 2
+        if typical <= bills.get(cat, 0) + 0.5:
+            continue                                     # all of it is bills Coinpile already knows
+        suggest = float(-(-round(typical, 2) // 10) * 10)
+        out.append({"category": cat, "suggested": suggest, "typical": round(typical, 2), "average": round(sum(vals) / months, 2), "highest": round(max(vals), 2),
+                    "by_month": [{"month": spans[i][0][:7], "spent": round(v, 2)} for i, v in enumerate(vals)], "bills": round(bills.get(cat, 0), 2), "current_budget": have.get(cat)})
+    out.sort(key=lambda r: -r["suggested"])
+    return {"months": [s[:7] for s, _ in spans], "items": out, "total": round(sum(r["suggested"] for r in out), 2)}
+
+
 def afford(db, amount: float, today: date) -> dict:
     """Could I buy this? Uses FREE savings (not earmarked) and the monthly plan's leftover to say how long saving would take."""
     v = goals_view(db, today)

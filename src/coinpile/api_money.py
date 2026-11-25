@@ -785,6 +785,13 @@ def register(app, ctx):
             bad("month must be YYYY-MM")
         return {"month": month, "items": ledger.budget_status(store, month, today)}
 
+    @app.get("/api/budgets/suggest")
+    def budget_suggest(request: Request, months: int = 3):
+        """Budgets suggested from your own spending (groceries, gas...). Nothing is set until you choose them."""
+        auth(request)
+        from coinpile import plan
+        return plan.budget_suggestions(store, ctx.today(), months)
+
     @app.put("/api/budgets")
     def budget_set(request: Request, b: BudgetIn):
         auth(request)

@@ -264,7 +264,21 @@ function filterTx(all, P) {
 /* ---------- shared bits ---------- */
 const KIND = { cash: ["Cash", "var(--teal)"], investment: ["Investments", "var(--brass)"], credit: ["Credit owed", "var(--red)"], loan: ["Loans", "#8a5a7a"], "savings (manual)": ["Savings (manual)", "#4a6fa5"] };
 /* A key number. With `to` (a tab id) the whole tile is a link to that page. */
-const goTab = (id) => { S.tab = id; S.acct = null; S.edit = null; location.hash = id; render(); window.scrollTo(0, 0); };
+const goTab = (id) => { S.tab = id; S.acct = null; S.edit = null; render(); window.scrollTo(0, 0); };
+// The address follows what is on screen (#tab, #accounts/<id>, #settings/<section>), so the browser's Back and Forward work.
+const stateHash = () => "#" + S.tab + (S.tab === "accounts" && S.acct ? "/" + encodeURIComponent(S.acct) : S.tab === "settings" && S.settingsTab && S.settingsTab !== "general" ? "/" + S.settingsTab : "");
+function readHash() {
+  let [t, sub] = location.hash.slice(1).split("/"); if (t === "planner") t = "budgets";
+  if (!t) t = "overview"; if (!TABS.some((x) => x[0] === t)) return false;
+  S.tab = t; S.acct = t === "accounts" && sub ? decodeURIComponent(sub) : null; S.edit = null;
+  if (t === "settings") S.settingsTab = STABS.some((x) => x[0] === sub) ? sub : "general";
+  return true;
+}
+function syncHash() {
+  const want = stateHash(); if (location.hash === want) { S.navReplace = false; return; }
+  history[S.navReplace ? "replaceState" : "pushState"](null, "", location.pathname + location.search + want); S.navReplace = false;
+}
+addEventListener("popstate", () => { if ((S.authed || S.demo) && readHash()) { S.navReplace = true; render(); window.scrollTo(0, 0); } });
 const kpi = (label, value, sub, cls, to) => h(to ? "a" : "div", { class: "panel kpi" + (to ? " link" : ""), ...(to ? { href: "#" + to, title: "Open " + ((TABS.find((t) => t[0] === to) || [])[1] || to), onclick: (e) => { if (e.ctrlKey || e.metaKey || e.shiftKey || e.button) return; e.preventDefault(); goTab(to); } } : {}) },
   h("div", { class: "label" }, label), h("div", { class: "value " + (cls || "") }, value), h("div", { class: "sub" }, sub));
 const field = (id, label, value, o = {}) => h("label", {}, label, h("input", { id, value: value ?? "", autocomplete: "off", ...o }));
@@ -276,15 +290,16 @@ const barList = (rows, fmt = usd) => { const top = Math.max(...rows.map((r) => r
 const alertRow = (a) => h("div", { class: "alert " + a.severity }, h("b", {}, a.title), a.detail ? h("span", { class: "muted small" }, " " + a.detail) : null,
   a.kind === "matured_idle" && a.key ? h("div", { style: "margin-top:6px" }, h("button", { class: "btn sm", onclick: async () => { try { await api("/api/alerts/dismiss", send("POST", { key: a.key })); toast("Marked handled"); render(); } catch (e) { fail(e); } } }, "Handled, stop reminding me")) : null);
 const evRow = (e) => h("div", { class: "ev" }, h("span", { class: "when" }, ago(e.ts)), h("span", {}, e.title.replace(/ [+−-]\$[\d,.]+$/, "")), h("span", { class: "num " + (e.amount > 0 ? "pos" : e.amount < 0 ? "neg" : "") }, e.amount == null ? "" : usd(e.amount, true)));
-function spark(points, w = 560, ht = 120, key = "net_worth", xkey = "date") {
+function spark(points, w = 560, ht = 120, key = "net_worth", xkey = "date", key2 = null) {
   if (points.length < 2) return h("p", { class: "muted small" }, "Needs a few days of balance snapshots.");
-  const ys = points.map((p) => p[key]), lo = Math.min(...ys), hi = Math.max(...ys), pad = 34, span = hi - lo || 1;
+  const ys = points.map((p) => p[key]), all = key2 ? ys.concat(points.map((p) => p[key2] ?? p[key])) : ys, lo = Math.min(...all), hi = Math.max(...all), pad = 34, span = hi - lo || 1;
   const X = (i) => pad + (i * (w - pad - 8)) / (points.length - 1), Y = (v) => ht - 18 - ((v - lo) / span) * (ht - 34);
   const line = points.map((p, i) => (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(p[key]).toFixed(1)).join("");
   const ns = "http://www.w3.org/2000/svg", mk = (t, a) => { const e = document.createElementNS(ns, t); for (const k in a) e.setAttribute(k, a[k]); return e; };
   const svg = mk("svg", { viewBox: `0 0 ${w} ${ht}`, width: "100%", role: "img", "aria-label": "History" });
   for (const v of [lo, hi]) { svg.append(mk("line", { x1: pad, x2: w - 8, y1: Y(v), y2: Y(v), stroke: "var(--line)", "stroke-dasharray": "3 4" })); const t = mk("text", { x: 0, y: Y(v) + 4 }); t.textContent = Math.abs(v) >= 1000 ? "$" + Math.round(v / 1000) + "k" : "$" + Math.round(v); svg.append(t); }
   svg.append(mk("path", { d: line + `L${X(points.length - 1)} ${ht - 18}L${pad} ${ht - 18}Z`, fill: "var(--teal-soft)", stroke: "none" }), mk("path", { d: line, fill: "none", stroke: "var(--teal)", "stroke-width": 2 }), mk("circle", { cx: X(points.length - 1), cy: Y(ys.at(-1)), r: 4, fill: "var(--teal)" }));
+  if (key2) { const l2 = points.map((p, i) => (i ? "L" : "M") + X(i).toFixed(1) + " " + Y(p[key2] ?? p[key]).toFixed(1)).join(""); svg.append(mk("path", { d: l2, fill: "none", stroke: "var(--muted)", "stroke-width": 2, "stroke-dasharray": "5 4" })); }
   for (const [i, anchor] of [[0, "start"], [points.length - 1, "end"]]) { const t = mk("text", { x: X(i), y: ht - 3, "text-anchor": anchor }); t.textContent = String(points[i][xkey]).slice(5, 10); svg.append(t); }
   return svg;
 }
@@ -326,10 +341,11 @@ async function viewOverview(root, rerender) {
   const setDays = (d) => { S.days = Math.min(Math.max(parseInt(d) || 30, 1), 3650); store.set("gb_days", S.days); rerender(); };
   add(root, 
     o.alerts.length ? h("div", { class: "panel wide" }, h("h3", {}, "Needs attention"), h("div", { class: "alerts" }, o.alerts.slice(0, 6).map(alertRow))) : null,
-    h("div", { class: "grid wide", "data-title": "Key numbers" }, kpi("Net worth", usd(o.net_worth), o.savings_total ? `savings ${usd(o.savings_total)}, ${usd(o.savings_free)} free` : `${o.accounts.length} accounts`, "", "accounts"), kpi("Owed on cards", usd(owed), "Credit + loans", "neg", "accounts"),
+    h("div", { class: "grid wide", "data-title": "Key numbers" }, kpi("Net worth", usd(o.net_worth), o.savings_total ? `savings ${usd(o.savings_total)}, ${usd(o.savings_free)} free` : `${o.accounts.length} accounts`, "", "accounts"),
+      o.net_worth_two ? kpi("Net worth without loans", usd(o.net_worth_without_loans), `loans ${usd(o.net_worth_without_loans - o.net_worth)}`, "", "accounts") : null, kpi("Owed on cards", usd(owed), "Credit + loans", "neg", "accounts"),
       kpi("Subscriptions / month", usd(o.subscriptions_monthly), usd(o.subscriptions_monthly * 12) + " a year", "", "subs"), kpi(`Bills, next ${up.days} days`, usd(up.total), `${up.count} payments${up.others_total ? " · others pay " + usd(up.others_total) : ""}`, "", "subs")),
     pinnedPanel(allAcc, rerender),
-    h("div", { class: "panel wide" }, h("div", { class: "bar" }, h("h3", {}, "Net worth" + (hist.length ? ` since ${hist[0].date}` : ""))), spark(hist)),
+    h("div", { class: "panel wide" }, h("div", { class: "bar" }, h("h3", {}, "Net worth" + (hist.length ? ` since ${hist[0].date}` : "")), o.net_worth_two && hist.length >= 2 ? h("span", { class: "muted small" }, "solid: with loans · dashed: without") : null), spark(hist, 560, 120, "net_worth", "date", o.net_worth_two ? "without_loans" : null)),
     h("div", { class: "panel" }, h("h3", {}, "Where the money sits"), h("div", { class: "comp" }, Object.entries(o.by_kind).map(([k, v]) => h("i", { style: `width:${(Math.abs(v) / gross) * 100}%;background:${(KIND[k] || ["", "var(--muted)"])[1]}`, title: `${(KIND[k] || [k])[0]} ${usd(v)}` }))),
       h("div", { class: "legend" }, Object.entries(o.by_kind).map(([k, v]) => h("span", {}, h("b", { style: "background:" + (KIND[k] || ["", "var(--muted)"])[1] }), `${(KIND[k] || [k])[0]} ${usd(v)}`)))),
     h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, `Bills in the next ${up.days} days`),
@@ -411,7 +427,7 @@ async function viewAccounts(root, rerender) {
 }
 async function accountDetail(root, rerender) {
   let d;
-  try { d = await api("/api/accounts/" + encodeURIComponent(S.acct)); } catch (e) { S.acct = null; return rerender(); }
+  try { d = await api("/api/accounts/" + encodeURIComponent(S.acct)); } catch (e) { S.acct = null; S.navReplace = true; return rerender(); }
   const a = d.account, manual = a.source === "manual", toFF = a.source === "firefly" && !!S.sends?.accounts, local = manual || toFF;
   add(root, 
     h("div", { class: "bar" }, h("button", { class: "btn sm", onclick: () => { S.acct = null; rerender(); } }, "‹ All accounts"), h("span", { class: "muted small" }, `${a.institution} · ${a.kind}${a.category_effective ? " · " + a.category_effective : ""}${manual ? " · tracked by hand" : " · linked"}`),
@@ -674,6 +690,37 @@ async function viewPiggy(root, rerender) {
 }
 
 /* ================================ BUDGETS: the monthly plan and income ================================ */
+// Budgets from your own spending: the typical month of the last few full months per category (groceries, gas...), rounded up. You pick which to keep.
+function budgetSuggestPanel(rerender) {
+  const panel = h("div", { class: "panel" }), body = h("div", {});
+  let months = 3;
+  const scan = async (btn) => {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await api("/api/budgets/suggest?months=" + months);
+      if (!r.items.length) { body.replaceChildren(h("p", { class: "muted" }, `Nothing to suggest: no category had spending in at least two of ${r.months.join(", ")}. Categorize more payments, or try more months.`)); return; }
+      body.replaceChildren(
+        h("p", { class: "muted small" }, `From ${r.months[0]} to ${r.months.at(-1)}. Change any amount, untick what you do not want, then set them.`),
+        h("div", { class: "scroll" }, h("table", {}, h("thead", {}, h("tr", {}, ["", "Category", ...r.months.map((m) => m.slice(5) + "/" + m.slice(2, 4)), "Typical", "Now", "Budget"].map((x, i) => h("th", { class: i > 1 ? "r" : "" }, x)))),
+          h("tbody", {}, r.items.map((it, i) => h("tr", {},
+            h("td", {}, h("input", { type: "checkbox", id: "bs-on" + i, checked: it.current_budget == null && !/^(misc|other|uncategori[sz]ed|general)$/i.test(it.category), "aria-label": "Use for " + it.category })), h("td", {}, it.category, it.bills ? h("span", { class: "muted small" }, ` (bills ${usd(it.bills)})`) : null),
+            ...it.by_month.map((m) => h("td", { class: "num r" }, m.spent ? usd(m.spent) : "–")), h("td", { class: "num r" }, usd(it.typical)),
+            h("td", { class: "num r" }, it.current_budget == null ? h("span", { class: "muted" }, "none") : usd(it.current_budget)),
+            h("td", { class: "r" }, h("input", { id: "bs-amt" + i, type: "number", min: "0", step: "1", value: it.suggested, class: "tiny", style: "width:90px", "aria-label": "Budget for " + it.category }))))))),
+        h("div", { class: "chips", style: "margin-top:10px" }, h("button", { class: "btn primary", onclick: async (e) => {
+          const pick = r.items.map((it, i) => [it.category, $("#bs-on" + i).checked, parseFloat($("#bs-amt" + i).value)]).filter(([, on, v]) => on && v >= 0);
+          if (!pick.length) return toast("Tick at least one");
+          e.target.disabled = true;
+          try { for (const [category, , monthly_amount] of pick) await api("/api/budgets", send("PUT", { category, monthly_amount })); toast(`Set ${pick.length} budget${pick.length === 1 ? "" : "s"}`); rerender(); } catch (err) { fail(err); e.target.disabled = false; }
+        } }, "Set the ticked budgets")));
+    } catch (err) { fail(err); } finally { if (btn) btn.disabled = false; }
+  };
+  panel.append(h("div", { class: "bar" }, h("h3", {}, "Suggest budgets from my spending")),
+    h("p", { class: "muted small" }, "Looks at what you really spent per category (groceries, gas, eating out...) and suggests a monthly budget: your typical month, rounded up to the next $10. Nothing changes until you set them."),
+    h("div", { class: "chips" }, h("select", { "aria-label": "Months to look at", style: "width:auto", onchange: (e) => { months = +e.target.value; } }, [[3, "Last 3 months"], [6, "Last 6 months"], [12, "Last 12 months"]].map(([n, t]) => h("option", { value: n }, t))),
+      h("button", { class: "btn", onclick: (e) => scan(e.target) }, "Scan my spending")), body);
+  return panel;
+}
 async function viewBudgets(root, rerender) {
   const month = S.month || today().slice(0, 7);
   const [pl, cats, accts, fcs, fb] = await Promise.all([api("/api/plan?month=" + month), api("/api/categories"), api("/api/accounts"), api("/api/forecast").catch(() => null), api("/api/firefly/budgets?month=" + month).catch(() => null)]);
@@ -700,6 +747,7 @@ async function viewBudgets(root, rerender) {
       pl.actual.unbudgeted_spent ? h("p", { class: "muted small" }, `${usd(pl.actual.unbudgeted_spent)} was spent in categories with no budget or bill.`) : null,
       h("form", { class: "row", style: "margin-top:10px", onsubmit: async (e) => { e.preventDefault(); try { await api("/api/budgets", send("PUT", { category: val("bg-cat"), monthly_amount: num("bg-amt") })); rerender(); } catch (err) { fail(err); } } },
         select("bg-cat", "Budget for", cats.filter((c) => c.kind === "expense").map((c) => [c.name, c.name]), "Food"), field("bg-amt", "Per month ($)", "", { type: "number", step: "0.01", min: "0", required: true }), h("button", { class: "btn primary", type: "submit" }, "Set budget"))),
+    budgetSuggestPanel(rerender),
     h("div", { class: "panel" }, h("h3", {}, "Income"), h("p", { class: "muted small" }, "From Firefly III: your recurring deposits there, and steady deposits found in your Firefly III transactions (add those below). To change one, change it in Firefly III."),
       pl.incomes.length ? pl.incomes.map(incomeRow) : h("p", { class: "muted" }, "No income yet. Add a recurring deposit in Firefly III, or wait for a few paychecks to show up below."),
       pl.income_suggestions.length ? h("div", { class: "cards" }, pl.income_suggestions.slice(0, 4).map((s, i) => h("div", { class: "card" }, h("div", { class: "bar" }, h("b", {}, s.name), h("span", { class: "num pos" }, usd(s.amount))), h("div", { class: "muted small" }, `${s.label} · seen ${s.occurrences}×`),
@@ -901,7 +949,7 @@ async function viewInvestments(root, rerender) {
         select("iv-acct", "Track an account as an investment", [["", "Choose an account..."], ...inv.candidates.map((a) => [a.id, `${a.name} (${a.institution || ""})`])], ""),
         select("iv-cat", "As", [["Investment", "Investment"], ["Retirement", "Retirement"]], "Investment"),
         h("div", { class: "formbtns" }, h("button", { class: "btn primary", type: "submit" }, "Track it"))) : null),
-    (inv.monthly || []).length >= 2 ? h("div", { class: "panel wide" }, h("h3", {}, "Investments by month"), spark(inv.monthly.map((m) => ({ date: m.month, net_worth: m.value })))) : null,
+    inv.accounts.length ? invHistoryPanel() : null,
     ...inv.providers.map((p) => h("div", { class: "panel" }, h("div", { class: "bar" }, h("h3", {}, p.name), h("span", { class: "pill " + (p.connected ? "t" : p.available ? "" : "b") }, p.connected ? "connected" : p.available ? "not set up" : "planned")),
       h("p", { class: "muted small", style: "margin:0" }, p.how + (p.id === "robinhood" ? ". An activity report has no prices, so it shows shares, cost and money moved, not value over time; a live connector adds value." : "")), p.id === "robinhood" ? h("div", { id: "rh-box" }) : null)));
   const box = $("#rh-box");
@@ -1001,6 +1049,24 @@ async function viewTrading(root, rerender) {
   );
 }
 
+// Investments over time: by day, week or month, and how far back. The choice is remembered in this browser.
+const INV_RANGES = { day: [[30, "30 days"], [90, "90 days"], [365, "1 year"]], week: [[13, "3 months"], [26, "6 months"], [52, "1 year"], [156, "3 years"]], month: [[6, "6 months"], [12, "1 year"], [36, "3 years"], [120, "10 years"]] };
+function invHistoryPanel() {
+  const panel = h("div", { class: "panel wide" });
+  const draw = async () => {
+    let by = store.get("gb_inv_by") || "month"; if (!INV_RANGES[by]) by = "month";
+    let count = +store.get("gb_inv_count_" + by) || INV_RANGES[by][1][0];
+    const set = (k, v) => { store.set(k, v); draw(); };
+    const r = await api(`/api/investments/history?by=${by}&count=${count}`).catch(() => ({ points: [] }));
+    panel.replaceChildren(h("div", { class: "bar" }, h("h3", {}, "Investments by " + by),
+      h("div", { class: "chips", role: "group", "aria-label": "Group by" }, ["day", "week", "month"].map((b) => h("button", { class: "chip" + (b === by ? " on" : ""), "aria-pressed": b === by, onclick: () => set("gb_inv_by", b) }, b[0].toUpperCase() + b.slice(1))),
+        h("select", { "aria-label": "How far back", onchange: (e) => set("gb_inv_count_" + by, e.target.value) }, INV_RANGES[by].map(([n, t]) => h("option", { value: n, selected: n === count }, t))))),
+      r.points.length >= 2 ? spark(r.points.map((p) => ({ date: p.date, net_worth: p.value }))) : h("p", { class: "muted small" }, "Needs readings on at least two different " + by + "s."),
+      r.points.length >= 2 ? h("p", { class: "muted small" }, `${usd(r.points[0].value)} on ${r.points[0].date} → ${usd(r.points.at(-1).value)} on ${r.points.at(-1).date} (${r.points.at(-1).value >= r.points[0].value ? "+" : ""}${usd(r.points.at(-1).value - r.points[0].value)})`) : null);
+  };
+  draw(); return panel;
+}
+
 /* ================================ SETTINGS (tabs) ================================ */
 const STABS = [["general", "General"], ["firefly", "Firefly III"], ["banks", "Banks"], ["links", "Sharing"], ["models", "Agent models"], ["api", "Home Assistant & API"], ["webhooks", "Webhooks"], ["robinhood", "Robinhood"], ["alerts", "Alerts"], ["categories", "Categories"], ["calendar", "Calendar"]];
 async function viewSettings(root, rerender) {
@@ -1031,6 +1097,7 @@ async function tabFirefly(root, rerender) {
          ["sw-a", "ff_send_accounts", "Accounts and transactions", "An account you add is made in Firefly III. Transactions you add to a Firefly III account, and bank or PayPal CSVs you import into one, go there; rows Firefly III already has are skipped."]]
           .map(([id, k, t, d]) => h("label", { class: "check", style: "align-items:flex-start" }, h("input", { type: "checkbox", id, checked: cfg[k] === "on" }), h("span", {}, h("b", {}, t), h("div", { class: "muted small" }, d)))),
         h("div", { class: "chips" }, h("button", { class: "btn primary", type: "submit" }, "Save"),
+          cfg.ff_send_bills === "on" ? h("button", { class: "btn", type: "button", title: "Subscriptions you had before this switch was on, or that the agent added, are not bills yet", onclick: async (e) => { e.target.disabled = true; try { const r = await api("/api/firefly/sync-subscriptions", { method: "POST" }); toast(`Subscriptions: ${r.sent} sent as bills` + (r.daily.length ? `, ${r.daily.length} daily kept here` : "") + (r.failed.length ? `, ${r.failed.length} refused: ${r.failed.map((f) => f.name + " (" + f.why + ")").join("; ")}` : "") + (r.sent || r.daily.length || r.failed.length ? "" : " (all already in Firefly III)")); } catch (err) { fail(err); } finally { e.target.disabled = false; } } }, "Send subscriptions now") : null,
           cfg.ff_send_goals === "on" ? h("button", { class: "btn", type: "button", onclick: async () => { try { const r = await api("/api/firefly/sync-goals", { method: "POST" }); toast(`Piggy banks: ${r.made} made, ${r.changed} changed, ${r.removed} removed`); } catch (e) { fail(e); } } }, "Send goals now") : null))),
     (() => { const box = h("div", { class: "panel" }, h("h3", {}, "Instant updates (Firefly III webhook)"), h("p", { class: "muted small" }, "Loading...")); api("/api/firefly/webhook").then((w) => box.replaceChildren(
       h("h3", {}, "Instant updates (Firefly III webhook)"),
@@ -1097,7 +1164,7 @@ async function tabBanks(root, rerender) {
   add(root, h("div", { class: "panel" }, h("h3", {}, "Your banks"),
     h("p", { class: "muted small" }, `Plaid ${b.plaid_configured ? "is set up (" + b.plaid_env + ")" : "is not set up on the connector"}. Sent to Firefly III: ${ff.sent ?? 0}, waiting ${ff.waiting ?? 0}, failed ${ff.failed ?? 0}.` + (ff.awaiting_approval ? ` ${ff.awaiting_approval} account(s) wait for your admin's approval before they are sent.` : "")),
     h("div", { class: "chips" }, h("button", { class: "btn primary", onclick: async () => { try { await openLink(null, rerender); } catch (e) { fail(e); } } }, "Link a bank"),
-      h("button", { class: "btn", onclick: async (e) => { const btn = e.target; btn.disabled = true; try { const r = await api("/api/banks/pull", { method: "POST" }); toast(r.read_error ? `Banks pulled; could not read Firefly III back: ${r.read_error}` : `Banks pulled: ${r.accounts} accounts, ${r.transactions} transactions, up to date now`); rerender(); } catch (err) { fail(err); } finally { btn.disabled = false; } } }, "Pull my banks now")),
+      h("button", { class: "btn", onclick: pullBanks }, "Pull my banks now")),
     b.items.length ? h("div", { style: "margin-top:12px;display:grid;gap:10px" }, b.items.map((it) => h("div", { class: "card" },
       h("div", { class: "bar" }, h("b", {}, it.institution || "Bank"), h("span", { class: "small muted" }, it.status ? h("span", { class: "pill r" }, it.status === "error" ? "sign in again" : it.status) : null, it.webhook_live ? h("span", { class: "pill t" }, "live updates") : null, ` ${it.last_sync ? "last checked " + ago(new Date(it.last_sync * 1000).toISOString()) : "not checked yet"}`)),
       h("div", { class: "small muted" }, it.accounts.map((a) => a.name + (a.mask ? " ••" + a.mask : "")).join(", ")),
@@ -1237,6 +1304,7 @@ async function tabCategories(root, rerender) {
       h("label", { class: "check" }, h("input", { type: "checkbox", id: "ai-auto", checked: cfg.ai_categorize_auto === "on", disabled: cfg.ai_categorize !== "on", onchange: (e) => saveCfg({ ai_categorize_auto: e.target.checked ? "on" : "off" }, rerender) }), "Auto-categorize new entries: after each read from Firefly III, only the payments that just arrived (at most 80 a time)")));
 }
 async function tabGeneral(root, rerender) {
+  const cfg = await api("/api/settings").catch(() => ({}));
   const mode = store.get("gb_mode") || "system", pal = PALETTES[store.get("gb_palette")] ? store.get("gb_palette") : "teal";
   const setMode = (m) => { store.set("gb_mode", m); applyPrefs(); rerender(); };
   add(root,
@@ -1245,6 +1313,9 @@ async function tabGeneral(root, rerender) {
       h("div", { class: "chips", role: "group", "aria-label": "Colour mode" }, [["system", "Match my device"], ["light", "Light"], ["dark", "Dark"]].map(([m, t]) => h("button", { class: "chip" + (m === mode ? " on" : ""), "aria-pressed": m === mode, onclick: () => setMode(m) }, t))),
       h("h3", { style: "margin-top:16px;font-size:.95rem" }, "Accent colour"),
       h("div", { class: "swatches", role: "group", "aria-label": "Accent colour" }, Object.entries(PALETTES).map(([k, v]) => h("button", { class: "swatch", title: v[0], "aria-label": v[0], "aria-pressed": k === pal, style: `background:${v[1]}`, onclick: () => { store.set("gb_palette", k); applyPrefs(); rerender(); } })))),
+    h("div", { class: "panel" }, h("h3", {}, "Net worth"),
+      h("p", { class: "muted small" }, "Loans (car, student, mortgage) can make net worth look low while you pay them down. Credit cards always count."),
+      h("label", { class: "check" }, h("input", { type: "checkbox", id: "nw-two", checked: cfg.nw_without_loans === "on", onchange: (e) => saveCfg({ nw_without_loans: e.target.checked ? "on" : "off" }, rerender) }), "Also show net worth without loans (a second number on Overview and a dashed line on the chart)")),
     h("div", { class: "panel" }, h("h3", {}, "Layout"),
       h("p", { class: "muted small" }, "Move panels around on every tab, and hide the ones you never look at. The order is remembered per tab in this browser."),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: S.arrange, onchange: (e) => { S.arrange = e.target.checked; } }), "Arrange mode (turn it on, then go to any tab)"),
@@ -1321,7 +1392,7 @@ async function tabAlerts(root, rerender) {
 }
 /* ---------- Sharing: the Pondering Orb, and API tokens for Home Assistant and scripts ---------- */
 const SHARE_LABELS = { net_worth: "Net worth", subscriptions: "Monthly subscription total", bills: "Bills due: totals for 7 and 30 days, and the next one", bill_list: "Bill list: each upcoming bill with its date, name and amount", alerts: "Alert counts", alert_list: "Alert list: the alert titles (these can name your accounts)", savings: "Savings: total, free, set aside", goals: "Goals (piggy banks): names and progress", budgets: "Firefly III budgets this month: limit, spent, left", paycheck: "Next paycheck: date, amount, bills before the next one, what is left", week: "This week: money in and out against last week, the 3 biggest payments, net worth change", spending: "Spending: this month so far, projected, average income", robinhood_main: "Robinhood main balance", robinhood_agent: "Robinhood agent balance", holdings: "Holdings: the stocks you hold (symbol, shares, cost, value) from Robinhood", daily: "Daily totals: spent and income per day for the last 31 days (no transactions)", trading: "Trading: the auto wallet (value, holdings, orders, last session) and its ideas for your stocks" };
-const haYaml = (url, tok) => `rest_command:\n  coinpile_refresh:\n    url: "${url}/api/v1/me/ha?refresh=1"\n    method: GET\n    headers:\n      Authorization: "Bearer ${tok}"\n\nrest:\n  - resource: ${url}/api/v1/me/ha\n    scan_interval: 900\n    headers:\n      Authorization: Bearer ${tok}\n    sensor:\n      - name: "Coinpile net worth"\n        value_template: "{{ value_json.net_worth }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile bills next 7 days"\n        value_template: "{{ value_json.bills_7d }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile free savings"\n        value_template: "{{ value_json.savings_free }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile alerts"\n        value_template: "{{ value_json.alerts_total }}"\n      - name: "Coinpile next bill"\n        value_template: "{{ value_json.next_bill_name }} {{ value_json.next_bill_date }}"\n`;
+const haYaml = (url, tok) => `rest_command:\n  coinpile_refresh:\n    url: "${url}/api/v1/me/ha?refresh=1"\n    method: GET\n    headers:\n      Authorization: "Bearer ${tok}"\n\nrest:\n  - resource: ${url}/api/v1/me/ha\n    scan_interval: 900\n    headers:\n      Authorization: Bearer ${tok}\n    sensor:\n      - name: "Coinpile net worth"\n        value_template: "{{ value_json.net_worth }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile net worth without loans"\n        value_template: "{{ value_json.net_worth_without_loans }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile bills next 7 days"\n        value_template: "{{ value_json.bills_7d }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile free savings"\n        value_template: "{{ value_json.savings_free }}"\n        unit_of_measurement: "USD"\n        device_class: monetary\n      - name: "Coinpile alerts"\n        value_template: "{{ value_json.alerts_total }}"\n      - name: "Coinpile next bill"\n        value_template: "{{ value_json.next_bill_name }} {{ value_json.next_bill_date }}"\n`;
 async function tabWebhooks(root, rerender) {
   const d = await api("/api/webhooks"), fresh = S.newHook;
   const evBoxes = (cur, cls) => Object.entries(d.events).map(([k, t]) => h("label", { class: "check" }, h("input", { type: "checkbox", class: cls, value: k, checked: cur.includes(k) }), h("span", {}, h("b", {}, k), " ", h("span", { class: "muted" }, t))));
@@ -1464,12 +1535,20 @@ function resumeOAuth() {
   S.tab = "settings"; S.settingsTab = "banks";
   setTimeout(async () => { try { await openLink(null, render, true); } catch (e) { fail(e); } history.replaceState(null, "", location.pathname + "#settings"); }, 400);
 }
+// The Plaid connector gets the latest from every bank right now (not only the ones that are due), sends it to Firefly III, then Coinpile reads Firefly III.
+async function pullBanks(e) {
+  const btn = e.target; btn.disabled = true; const was = btn.textContent; btn.textContent = "Pulling...";
+  try { const r = await api("/api/banks/pull", { method: "POST" }); toast(r.read_error ? `Banks pulled; could not read Firefly III back: ${r.read_error}` : `Banks pulled: ${r.accounts} accounts, ${r.transactions} transactions, up to date now`); render(); }
+  catch (err) { fail(err); btn.disabled = false; btn.textContent = was; }
+}
 async function render() {
+  if (!TABS.some((t) => t[0] === S.tab)) S.tab = "overview";
+  syncHash();
   const [, title, view] = TABS.find((t) => t[0] === S.tab);
   try { S.badge = (await api("/api/suggestions")).filter((x) => x.source === "detected" || x.source === "agent").length; } catch { S.badge = 0; }
-  const main = h("main", {}, h("div", { class: "bar" }, h("h2", {}, title), S.demo ? h("span", { class: "banner", title: "Recorded sample data. Nothing here is a real account and changes are not saved. To click through the live app, run python3 scripts/dev_stack.py (see the README)." }, "Sample data") : h("span", { class: "muted small" }, S.name)));
+  const main = h("main", {}, h("div", { class: "bar" }, h("h2", {}, title), S.connector && (S.tab === "overview" || S.tab === "accounts") ? h("button", { class: "btn sm", title: "Ask the Plaid connector to get the latest from every bank now, then read Firefly III", onclick: pullBanks }, "Pull from banks now") : null, S.demo ? h("span", { class: "banner", title: "Recorded sample data. Nothing here is a real account and changes are not saved. To click through the live app, run python3 scripts/dev_stack.py (see the README)." }, "Sample data") : h("span", { class: "muted small" }, S.name)));
   $("#app").replaceChildren(h("div", { class: "shell" }, h("nav", { class: "side", "aria-label": "Sections" }, h("div", { class: "brand" }, h("span", { class: "coin" }), "Coinpile"),
-    TABS.map(([id, label]) => h("button", { "aria-current": id === S.tab ? "page" : null, onclick: () => { S.tab = id; S.acct = null; S.edit = null; location.hash = id; render(); } }, label, id === "subs" && S.badge ? h("span", { class: "badge", title: "Repeating payments to review" }, S.badge) : null)),
+    TABS.map(([id, label]) => h("button", { "aria-current": id === S.tab ? "page" : null, onclick: () => { S.tab = id; S.acct = null; S.edit = null; render(); window.scrollTo(0, 0); } }, label, id === "subs" && S.badge ? h("span", { class: "badge", title: "Repeating payments to review" }, S.badge) : null)),
     h("div", { class: "foot" }, S.demo ? null : h("button", { class: "btn sm", onclick: async () => { await fetch("/auth/logout", { method: "POST", credentials: "same-origin" }); location.reload(); } }, "Sign out"))), main));
   try { await view(main, render); } catch (e) { add(main, h("div", { class: "panel" }, h("p", { class: "neg" }, "Could not load: " + e.message))); }
   try { arrangeable(main); } catch (e) { console.warn("arrange", e); }
@@ -1511,12 +1590,12 @@ async function login() {
         h("button", { class: "btn", type: "submit" }, "Set the new password")))));
 }
 async function boot() {
-  const want = location.hash.slice(1) === "planner" ? "budgets" : location.hash.slice(1); if (TABS.some((t) => t[0] === want)) S.tab = want;
+  readHash(); S.navReplace = true;          // opening a link (#accounts, #settings/banks) lands there without adding a step to Back
   if (new URLSearchParams(location.search).has("demo") && window.COINPILE_DEMO) { DEMO = window.COINPILE_DEMO; S.demo = true; S.provider = DEMO.chatProvider; return render(); }
   let me = {}; try { me = await (await fetch("/auth/me", { credentials: "same-origin", cache: "no-store" })).json(); } catch {}
   if (!me.signed_in) return login();
   S.authed = true; S.name = me.email || "";
-  try { const st0 = await api("/api/status"); S.sends = st0.sends || {}; S.cur = st0.currency || "USD"; } catch { S.sends = {}; }
+  try { const st0 = await api("/api/status"); S.sends = st0.sends || {}; S.cur = st0.currency || "USD"; S.connector = !!(st0.connector || {}).configured; } catch { S.sends = {}; }
   if (me.problem) toast("Firefly III needs you to sign in again (Settings, Firefly III)");
   const rhBack = new URLSearchParams(location.search).get("robinhood");
   if (rhBack) { toast({ connected: "Robinhood connected", failed: "Signing in to Robinhood did not finish", refused: "Robinhood refused the sign-in" }[rhBack] || "Robinhood"); history.replaceState(null, "", location.pathname + location.hash); }

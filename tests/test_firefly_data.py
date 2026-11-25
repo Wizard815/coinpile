@@ -308,3 +308,50 @@ def test_a_loan_paid_past_zero_and_a_closed_account_as_firefly_iii_6_7_9_shows_t
     assert old["ff_closed"] == 1 and old["in_net_worth"] == 0
     titles = [a["title"] for a in ledger.alerts(db, TODAY)]
     assert not any("old asset" in t or "Car loan" in t for t in titles)                 # a switched-off account raises no "overdrawn"
+
+
+def test_net_worth_can_also_be_shown_without_loans(tmp_path):
+    ff = card_world()                        # checking 2000, a card owing 300, a car loan owing 9000
+    c = signed_in(app(tmp_path, ff))
+    ov = c.get("/api/overview").json()
+    assert ov["net_worth"] == 2000 - 300 - 9000 and ov["net_worth_without_loans"] == 1700 and ov["net_worth_two"] is False
+    assert c.put("/api/settings", json={"nw_without_loans": "on"}).json()["nw_without_loans"] == "on"
+    assert c.get("/api/overview").json()["net_worth_two"] is True
+    hist = c.get("/api/history").json()
+    assert hist and hist[-1]["net_worth"] == -7300 and hist[-1]["without_loans"] == 1700
+
+
+def test_budgets_are_suggested_from_the_typical_month_of_real_spending():
+    from datetime import date
+    from coinpile import plan
+    ff = alone()
+    ff.acct("1", 1, "Checking", balance="2000")
+    n = 100
+    for m, groceries, gas in (("2026-08", 410.20, 60), ("2026-09", 388.00, 0), ("2026-10", 455.10, 72.5)):
+        n += 1; ff.tx("1", n, "withdrawal", groceries, "KROGER", 1, 90, m + "-05", "Groceries")
+        n += 1; ff.tx("1", n, "withdrawal", 900, "TV", 1, 91, m + "-07", "Shopping") if m == "2026-09" else None
+        if gas:
+            n += 1; ff.tx("1", n, "withdrawal", gas, "SHELL", 1, 92, m + "-09", "Gas")
+    db = read(ff)
+    with db.tx() as c:
+        c.execute("INSERT OR REPLACE INTO budgets VALUES(?,?)", ("Groceries", 300))
+    r = plan.budget_suggestions(db, date(2026, 11, 20), 3)
+    by = {i["category"]: i for i in r["items"]}
+    assert r["months"] == ["2026-08", "2026-09", "2026-10"]
+    assert by["Groceries"]["typical"] == 410.2 and by["Groceries"]["suggested"] == 420 and by["Groceries"]["current_budget"] == 300
+    assert by["Gas"]["typical"] == 60 and by["Gas"]["suggested"] == 60          # a month with no gas counts as zero
+    assert "Shopping" not in by                                                  # one big purchase is not a habit
+    assert [m["spent"] for m in by["Gas"]["by_month"]] == [60, 0, 72.5]
+
+
+def test_the_investments_chart_groups_by_day_week_or_month(tmp_path):
+    from coinpile import investments
+    db = DB(tmp_path / "x.db")
+    with db.tx() as c:
+        for ts, a, b in (("2026-10-30T10:00:00", "a", 100), ("2026-11-02T10:00:00", "a", 110), ("2026-11-02T11:00:00", "b", 50), ("2026-11-05T10:00:00", "a", 120)):
+            c.execute("INSERT INTO snapshots(account_id, ts, balance) VALUES(?,?,?)", (a, ts, b))
+    day = investments.history(db, ["a", "b"], "day", 30)
+    assert day[0] == {"date": "2026-10-30", "value": 100} and day[-1] == {"date": "2026-11-05", "value": 170} and len(day) == 7   # empty days carry the last value
+    assert investments.history(db, ["a", "b"], "week", 10) == [{"date": "2026-10-26", "value": 100}, {"date": "2026-11-02", "value": 170}]
+    assert investments.history(db, ["a", "b"], "month", 12) == [{"date": "2026-10", "value": 100}, {"date": "2026-11", "value": 170}]
+    assert investments.history(db, ["a", "b"], "day", 2) == day[-2:]

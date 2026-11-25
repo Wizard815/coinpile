@@ -88,7 +88,7 @@ category budgets as Firefly III budgets (Firefly III budgets count only transact
 |---|---|
 | Goals as piggy banks | each goal becomes a piggy bank holding what you set aside for it on Firefly III accounts; closing or deleting the goal removes it |
 | Piggy banks | from the Piggy banks page: new piggy banks, their name, target, date and notes, and money put in or taken out |
-| Subscriptions as bills | a subscription you add or accept becomes a bill; editing or deleting it changes the bill (daily ones stay in Coinpile) |
+| Subscriptions as bills | a subscription you add or accept becomes a bill; editing or deleting it changes the bill (daily ones stay in Coinpile). Subscriptions you had before switching it on, or that the agent added, go when you press **Send subscriptions now** |
 | Categories | a category you set on a transaction; "always" also makes a Firefly III rule in a rule group called Coinpile |
 | Accounts and transactions | new accounts; transactions you add to a Firefly III account; bank or PayPal/Venmo/Cash App CSVs you import into one (rows already there are skipped) |
 
@@ -119,6 +119,11 @@ making a second. A transaction you add twice on purpose is still two.
 - **Budgets.** A Firefly III budget limit that is not exactly the month shown counts for the part of it that falls in the month, by
   days: a year's limit of 12,000 shows about 986 for November, and a week that straddles the month's end counts for its days in the
   month. Such a budget is marked "part of a longer limit". An auto-budget's amount is scaled from its own period (weekly, yearly ...).
+- **Net worth without loans.** Settings, General can also show net worth with loans (car, student, mortgage) left out: a second
+  number on Overview, a dashed line on the chart, and `net_worth_without_loans` for Home Assistant. Credit cards always count.
+- **Suggested budgets.** Budgets, Suggest budgets from my spending: for each category, the typical (median) month of the last 3, 6 or
+  12 full months, rounded up to the next $10. A month with nothing in the category counts as zero; a category seen in only one month
+  (a one-off purchase) or covered by its bills is left out. Nothing is set until you tick and set them.
 - **Money owed to you** counts in net worth but not as cash for paying bills in the balance projection.
 - **Paydays** are counted from the income's own date, so a salary on the 31st lands on 28 Feb and then 31 Mar. Two deposits from one
   payer on one day are one payday.
@@ -205,7 +210,7 @@ Tokens are stored encrypted with a key kept in `/data/.field_key` (or `FIELD_KEY
 
 ## Banks (Plaid connector)
 
-Settings, Banks: enter the connector's address, your name there and your connector password (or the login token the connector printed for you). From then on you can see your banks, link a new one in Plaid's window, fix a bank sign-in (relink) and pull your banks now. A newly linked bank's accounts wait for the connector admin's approval before they are sent to Firefly III.
+Settings, Banks: enter the connector's address, your name there and your connector password (or the login token the connector printed for you). From then on you can see your banks, link a new one in Plaid's window, fix a bank sign-in (relink) and pull your banks now (**Pull from banks now** on Overview and Accounts: the connector asks every bank for the latest, sends it to Firefly III, then Coinpile reads Firefly III). A newly linked bank's accounts wait for the connector admin's approval before they are sent to Firefly III.
 
 **Moved the connector from Goblin Bank to plaid-proxy?** Nothing changes here: the connector's address (its gateway), your name and your
 password or login token are the same after `migrate_from_goblin_bank.sh`, so Coinpile's Banks settings keep working as they are. Banks stay

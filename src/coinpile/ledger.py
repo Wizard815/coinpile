@@ -338,10 +338,13 @@ def savings_summary(db, today: date) -> dict:
 
 
 # ------------------------------------------------------------------ net worth, projection, alerts
-def net_worth(db, today: date | None = None) -> float:
+def net_worth(db, today: date | None = None, loans: bool = True) -> float:
+    """Everything you own minus what you owe. loans=False leaves loans (car, student, mortgage) out; credit cards still count."""
     total = 0.0
     w, wa = in_main(db)
     for a in db.all(f"SELECT kind, balance, my_share FROM accounts WHERE " + COUNTED + f" AND {w}", wa):     # Firefly III's "include in net worth" off
+        if not loans and a["kind"] == "loan":
+            continue
         total += mine(a) * (-1 if a["kind"] in OUT_KINDS else 1)
     for s in db.all("SELECT * FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')"):
         total += s["balance"] or 0                       # savings linked to an account are already counted via that account
@@ -539,7 +542,7 @@ def overview(db, days: int, today: date) -> dict:
     up = upcoming(db, days, today)
     subs = db.all("SELECT * FROM subscriptions WHERE active=1")
     monthly = sum(sub_view(s, today, main_currency(db))["monthly"] for s in subs)
-    return {"net_worth": net_worth(db), "currency": cfg.get(db, "currency") or "USD", "by_kind": by_kind, "accounts": accts, "subscriptions_monthly": round(monthly, 2), "upcoming": up,
+    return {"net_worth": net_worth(db), "net_worth_without_loans": net_worth(db, loans=False), "net_worth_two": cfg.get(db, "nw_without_loans") == "on", "currency": cfg.get(db, "currency") or "USD", "by_kind": by_kind, "accounts": accts, "subscriptions_monthly": round(monthly, 2), "upcoming": up,
             "events": db.all("SELECT * FROM events ORDER BY ts DESC LIMIT 10"), "alerts": alerts(db, today), "savings_total": gv["total"], "savings_free": gv["free"], "goals_needed": gv["needed"]}
 
 
@@ -633,17 +636,18 @@ def net_worth_history(store) -> list[dict]:
     w, wa = in_main(store)
     accts = {a["id"]: a for a in store.all(f"SELECT id, kind, my_share FROM accounts WHERE " + COUNTED + f" AND {w}", wa)}
     sign = {"credit": -1, "loan": -1}
-    last, by_day = {}, {}
+    last, by_day, no_loans = {}, {}, {}
     for r in store.all("SELECT * FROM snapshots ORDER BY ts"):
         a = accts.get(r["account_id"])
         if not a or r["balance"] is None:
             continue
         last[r["account_id"]] = r["balance"] * (100.0 if a["my_share"] is None else a["my_share"]) / 100 * sign.get(a["kind"], 1)
         by_day[r["ts"][:10]] = round(sum(last.values()), 2)
+        no_loans[r["ts"][:10]] = round(sum(v for k, v in last.items() if accts[k]["kind"] != "loan"), 2)
     # savings you keep by hand (a CD, a jar) count in net worth too: from the day they were opened, at their current value
     manual = store.all("SELECT balance, opened FROM savings WHERE active=1 AND (account_id IS NULL OR account_id='')")
     extra = lambda d: sum((m["balance"] or 0) for m in manual if not m["opened"] or m["opened"] <= d)       # noqa: E731
-    return [{"date": d, "net_worth": round(v + extra(d), 2)} for d, v in by_day.items()]
+    return [{"date": d, "net_worth": round(v + extra(d), 2), "without_loans": round(no_loans[d] + extra(d), 2)} for d, v in by_day.items()]
 
 
 def daily_totals(db, today: date, days: int = 31) -> list[dict]:
