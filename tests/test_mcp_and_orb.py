@@ -164,3 +164,41 @@ def test_the_orb_can_see_holdings_and_daily_totals_only_when_shared(tmp_path):
     assert summary()["holdings"][0]["symbol"] == "AAPL"
     # and a settings value Coinpile doesn't know is still refused
     assert c.put("/api/settings", json={"share": ["holdings", "everything"]}).status_code in (400, 422)
+
+
+def test_an_assistant_that_asks_itself_needs_no_second_yes(tmp_path):
+    """A token with 'mcp' and 'act' (FAITH): change tools are marked destructive, preview_change says what one would do,
+    and a call is done at once, listed on the Agent page with the token's name. Without 'act' nothing changes until Yes in Coinpile."""
+    ff = world()
+    c = signed_in(app(tmp_path, ff))
+    tok = c.post("/api/tokens", json={"name": "FAITH", "scopes": ["mcp", "act"]}).json()["token"]
+    anon = TestClient(c.app)
+    assert "ask the user first" in rpc(anon, tok, "initialize").json()["result"]["instructions"]
+    tools = {t["name"]: t for t in rpc(anon, tok, "tools/list").json()["result"]["tools"]}
+    rec_t = tools["record_transaction"]
+    assert rec_t["annotations"] == {"readOnlyHint": False, "destructiveHint": True} and rec_t["description"].startswith("CHANGES THINGS")
+    assert "destructiveHint" not in tools["list_accounts"]["annotations"] and tools["preview_change"]["annotations"]["readOnlyHint"] is True
+    args = {"account_id": "ff:1", "amount": -23.45, "description": "Corner Market", "date": "2026-11-24", "category": "Groceries"}
+
+    def call(name, a):
+        r = rpc(anon, tok, "tools/call", {"name": name, "arguments": a}).json()["result"]
+        return json.loads(r["content"][0]["text"]), r["isError"]
+
+    pv, bad = call("preview_change", {"tool": "record_transaction", "arguments": args})
+    assert not bad and pv["what"] == 'Record in Firefly III: paid 23.45 "Corner Market" on 2026-11-24, account Everyday Checking (Huntington), category Groceries'
+    assert call("preview_change", {"tool": "record_transaction", "arguments": {**args, "account_id": "ff:99"}})[0]["error"].startswith("it would be refused")
+    assert call("preview_change", {"tool": "list_accounts"})[0]["error"]
+    assert not getattr(ff, "writes", [])                                                     # previewing changes nothing
+    done, bad = call("record_transaction", args)
+    assert not bad and done["done"] is True and "Corner Market" in done["what"]
+    leg = [w for w in ff.writes if w[1] == "/transactions"][0][2]["transactions"][0]
+    assert leg["amount"] == "23.45" and leg["description"] == "Corner Market" and leg["category_name"] == "Groceries"
+    listed = c.get("/api/agent/actions").json()[0]
+    assert listed["status"] == "done" and listed["summary"].endswith("(Yes given in FAITH)") and listed["decided"]
+    assert call("record_transaction", {**args, "account_id": "ff:99"})[0]["error"].startswith("not done")     # still checked first
+    # The same call with an mcp-only token only asks.
+    plain = c.post("/api/tokens", json={"name": "Orb", "scopes": ["mcp"]}).json()["token"]
+    t2 = {t["name"]: t for t in rpc(anon, plain, "tools/list").json()["result"]["tools"]}
+    assert "preview_change" not in t2 and "destructiveHint" not in t2["record_transaction"]["annotations"]
+    asked = json.loads(rpc(anon, plain, "tools/call", {"name": "record_transaction", "arguments": args}).json()["result"]["content"][0]["text"])
+    assert asked["status"].startswith("waiting") and len([w for w in ff.writes if w[1] == "/transactions"]) == 1

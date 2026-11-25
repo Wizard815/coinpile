@@ -1534,13 +1534,7 @@ def register(app, ctx):
         if not yes:
             note = f"No to: {r['summary']}"
         else:
-            _, _, _, run = agent_actions.ACTIONS[r["tool"]]
-            try:
-                res, status = run(ctx, json.loads(r["args"])), "done"
-            except HTTPException as e:
-                res, status = {"error": str(e.detail)}, "failed"
-            except Exception as e:                              # Firefly III refused, or it is not reachable
-                res, status = {"error": str(e)[:300]}, "failed"
+            res, status = run_action(ctx, r["tool"], json.loads(r["args"]))
             with store.tx() as c:
                 c.execute("UPDATE agent_actions SET status=?, result=? WHERE id=?", (status, json.dumps(res, default=str), aid))
             note = f"Yes to: {r['summary']}. " + ("Done." if status == "done" else f"It failed: {res.get('error')}")
@@ -1789,9 +1783,54 @@ MCP_PROTOCOL = "2025-06-18"
 MCP_NEEDS = {"refresh_from_firefly": "refresh"}       # tools that need a second scope on the token, the same one the plain API asks for
 
 
-def mcp_handle(ctx, msg: dict, scopes: set | None = None) -> dict | None:
+def run_action(ctx, name: str, clean: dict) -> tuple[dict, str]:
+    """Do one prepared change. Returns (result, "done" or "failed")."""
+    _, _, _, run = agent_actions.ACTIONS[name]
+    try:
+        return run(ctx, clean), "done"
+    except HTTPException as e:
+        return {"error": str(e.detail)}, "failed"
+    except Exception as e:                              # Firefly III refused, or it is not reachable
+        return {"error": str(e)[:300]}, "failed"
+
+
+ASKS_PREFIX = "ASKS THE USER FIRST, nothing happens until they say yes. "
+ACT_PREFIX = "CHANGES THINGS: get the user's yes first. "
+
+
+def preview_change(ctx, a: dict) -> dict:
+    """The one sentence a change would do, checked but not done: for an assistant that asks the user itself."""
+    name = a.get("tool")
+    if name not in agent_actions.ACTIONS:
+        return {"error": f"{name} is not a change tool"}
+    try:
+        _, summary, target = agent_actions.ACTIONS[name][2](ctx, a.get("arguments") or {})
+    except (agent_actions.Refused, ValueError, KeyError, TypeError) as e:
+        return {"error": f"it would be refused: {e}"}
+    return {"what": summary, "where": target}
+
+
+def act_now(ctx, name: str, args: dict, by: str) -> dict:
+    """A change from an assistant that already has the user's yes (a token with the 'act' scope). Checked, done, and listed on the Agent page."""
+    try:
+        clean, summary, target = agent_actions.ACTIONS[name][2](ctx, args)
+    except (agent_actions.Refused, ValueError, KeyError, TypeError) as e:
+        return {"error": f"not done: {e}"}
+    ts = sync.now()
+    with ctx.store.tx() as c:
+        aid = c.execute("INSERT INTO agent_actions(chat_id,tool,args,summary,target,status,created,decided) VALUES(NULL,?,?,?,?,'running',?,?)",
+                        (name, json.dumps(clean), f"{summary} (Yes given in {by})", target, ts, ts)).lastrowid
+    res, status = run_action(ctx, name, clean)
+    with ctx.store.tx() as c:
+        c.execute("UPDATE agent_actions SET status=?, result=? WHERE id=?", (status, json.dumps(res, default=str), aid))
+    return {"done": status == "done", "what": summary, "result": res} if status == "done" else {"error": f"{summary}: it failed: {res.get('error')}"}
+
+
+def mcp_handle(ctx, msg: dict, scopes: set | None = None, by: str = "an assistant") -> dict | None:
     """One JSON-RPC message from an MCP client. Read tools run; change tools only ask (the request waits for a Yes on Coinpile's Agent page);
-    the skills are offered as prompts. Every call is checked against the tool's schema first, as in Coinpile's own chat."""
+    the skills are offered as prompts. Every call is checked against the tool's schema first, as in Coinpile's own chat.
+    act (a token with the 'act' scope): the client asks the user itself. Change tools are marked destructive so it does, preview_change gives
+    the sentence to ask with, and a call is done straight away (still listed on the Agent page)."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "not a JSON-RPC 2.0 message"}}
     mid, method, params = msg.get("id"), msg.get("method"), msg.get("params") or {}
@@ -1804,15 +1843,23 @@ def mcp_handle(ctx, msg: dict, scopes: set | None = None) -> dict | None:
     if not hasattr(ctx, "mcp_seen_urls"):
         ctx.mcp_seen_urls = SeenUrls()                 # each call builds the tools anew: what a search returned stays readable for the next calls
     tools = [x for x in build_tools(ctx, seen_urls=ctx.mcp_seen_urls) if x[0] != "use_skill"]
+    act = "act" in (scopes or ())
+    if act:
+        tools = [(n, ACT_PREFIX + d.removeprefix(ASKS_PREFIX), s, (lambda a, n=n: act_now(ctx, n, a, by))) if n in agent_actions.ACTIONS else (n, d, s, f)
+                 for n, d, s, f in tools]
+        tools.append(("preview_change", "The exact change a change tool would make, in one sentence, checked but not done. Use it to ask the user.",
+                      S({"tool": STR, "arguments": {"type": "object"}}, ["tool"]), lambda a: preview_change(ctx, a)))
     if method == "initialize":
         return ok({"protocolVersion": params.get("protocolVersion") or MCP_PROTOCOL, "capabilities": {"tools": {}, "prompts": {}},
                    "serverInfo": {"name": "coinpile", "version": "1"},
-                   "instructions": "Coinpile: the user's money, read from their Firefly III. Use the tools for every figure and calculate for all maths. "
-                                   "Tools marked ASKS THE USER FIRST only create a request; it is done when the user presses Yes in Coinpile."})
+                   "instructions": "Coinpile: the user's money, read from their Firefly III. Use the tools for every figure and calculate for all maths. " + (
+                                   "Tools marked CHANGES THINGS are done at once: ask the user first (preview_change gives the sentence)." if act else
+                                   "Tools marked ASKS THE USER FIRST only create a request; it is done when the user presses Yes in Coinpile.")})
     if method == "ping":
         return ok({})
     if method == "tools/list":
-        return ok({"tools": [{"name": n, "description": d, "inputSchema": s, "annotations": {"readOnlyHint": n not in WRITE_TOOLS}} for n, d, s, _ in tools]})
+        return ok({"tools": [{"name": n, "description": d, "inputSchema": s, "annotations": {"readOnlyHint": n not in WRITE_TOOLS,
+                                                                                                     **({"destructiveHint": True} if act and n in agent_actions.ACTIONS else {})}} for n, d, s, _ in tools]})
     if method == "tools/call":
         name, args = params.get("name"), params.get("arguments") or {}
         found = next((x for x in tools if x[0] == name), None)

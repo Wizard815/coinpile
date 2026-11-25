@@ -303,6 +303,9 @@ changed something.
 **Coinpile as an MCP server** (for Pondering Orb, Claude Desktop or any MCP client): make a token with the **mcp** scope (Settings, Home
 Assistant & API) and point the client at `https://your-coinpile/api/v1/mcp` with `Authorization: Bearer <token>`. It gets every read tool, the
 calculator, and the skills as prompts. Change tools only ask: the request waits under "Waiting for your answer" on Coinpile's Agent page.
+An assistant that asks you itself (FAITH) can also get the **act** scope. Then a change you say Yes to there is done at once, with no
+second Yes in Coinpile. Its change tools are marked destructive (so the assistant asks), and `preview_change` gives the sentence to ask
+with. Each change still shows on the Agent page as "(Yes given in <token name>)". Only give act to an assistant you trust to ask you.
 The Orb's summary can also share goals (piggy banks), Firefly III budgets and the next paycheck (Settings, Home Assistant & API, Sharing). Two more
 options feed the Orb's stock and journal pages: **Holdings** (the stocks you
 hold, from Robinhood's activity CSV, MCP or connector: symbol, shares, net
