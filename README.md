@@ -240,6 +240,10 @@ Banks that sign you in on their own website (OAuth banks) return you to the addr
 
 Settings, Agent models: add a model. A local one (Ollama, LM Studio, llama.cpp: anything OpenAI-compatible) is the default and keeps your data at home. A cloud model must be allowed explicitly per model.
 
+In the homelab, pick the **Argos** preset (`http://argos:8080/v1`, the model hub on the shared `ai_net` network) and change the model to one
+Argos serves; every call then shows up in Argos' metrics and captures. The example compose file joins `ai_net`; if Coinpile is not on it, use
+the Unraid box's address instead, e.g. `http://192.168.20.5:8080/v1`.
+
 The agent sees what every page shows, through the same code the pages use, so its numbers always match the screens. Firefly III is the main record:
 
 | Ask about | Tools |

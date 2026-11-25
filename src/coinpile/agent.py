@@ -21,6 +21,7 @@ from coinpile.strict import BaseModel
 from coinpile import agent_actions, agent_skills, crypto, links, feed, netguard, ledger, plan, recur, settings as cfg, sync
 
 PRESETS = [
+    {"name": "Argos (homelab model hub)", "kind": "openai", "base_url": "http://argos:8080/v1", "model": "default", "tools": True},
     {"name": "Ollama (this machine)", "kind": "openai", "base_url": "http://host.docker.internal:11434/v1", "model": "llama3.1", "tools": True},
     {"name": "LM Studio", "kind": "openai", "base_url": "http://host.docker.internal:1234/v1", "model": "local-model", "tools": True},
     {"name": "llama.cpp server", "kind": "openai", "base_url": "http://host.docker.internal:8080/v1", "model": "local", "tools": False},
