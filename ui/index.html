@@ -1495,7 +1495,7 @@ async function tabSharing(root, rerender) {
       h("form", { style: "display:grid;gap:10px;margin-top:12px", onsubmit: async (e) => { e.preventDefault(); const scopes = [...document.querySelectorAll(".tokscope:checked")].map((x) => x.value); if (!scopes.length) return toast("Tick at least one thing it may read");
         try { S.newToken = await api("/api/tokens", send("POST", { name: val("tk-name"), scopes })); rerender(); } catch (err) { fail(err); } } },
         field("tk-name", "Token name", "", { required: true, placeholder: "Home Assistant" }), h("div", { class: "small muted" }, "It may read:"),
-        Object.entries(tk.scopes).map(([k, t]) => h("label", { class: "check" }, h("input", { type: "checkbox", class: "tokscope", value: k, checked: k === "summary" }), h("span", {}, h("b", {}, k), " ", h("span", { class: "muted" }, t), k === "transactions" ? h("span", { class: "pill r" }, "sensitive") : null))),
+        Object.entries(tk.scopes).map(([k, t]) => h("label", { class: "check" }, h("input", { type: "checkbox", class: "tokscope", value: k, checked: k === "summary" }), h("span", {}, h("b", {}, k), " ", h("span", { class: "muted" }, t), k === "transactions" ? h("span", { class: "pill r" }, "sensitive") : k === "act" ? h("span", { class: "pill r" }, "makes changes") : null))),
         h("div", {}, h("button", { class: "btn primary", type: "submit" }, "Create token")))));
 }
 

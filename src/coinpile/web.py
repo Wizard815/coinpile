@@ -1665,7 +1665,7 @@ def create_app(firefly_url: str | None = None, data_dir: str | None = None, fire
             msg = await request.json()
         except (ValueError, RecursionError):
             return JSONResponse({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "not JSON"}}, 400)
-        res = await run_in_threadpool(agent.mcp_handle, contexts[uid], msg, set(str(row["scopes"] or "").split(",")))
+        res = await run_in_threadpool(agent.mcp_handle, contexts[uid], msg, set(str(row["scopes"] or "").split(",")), row["name"])
         return Response(status_code=202) if res is None else JSONResponse(res)
 
     @front.get("/api/v1/me")
