@@ -1,5 +1,7 @@
 # Coinpile
 
+[![License: PolyForm Shield 1.0.0](https://img.shields.io/badge/license-PolyForm%20Shield%201.0.0-blue)](LICENSE)
+
 A simple, friendly view of your **Firefly III**, with an **agent** you can ask about your money, and a remote control for the **Plaid connector** (plaid-proxy, from [plaid-firefly-connector](https://github.com/Wizard815/plaid-firefly-connector)).
 
 Firefly III stays in charge of your data. Coinpile reads it every few minutes and shows it in one place (it took over the screens of the old Goblin Bank app):
@@ -473,3 +475,12 @@ Settings, Home Assistant & API: make a token that may read `summary` (and `refre
 
 - Budgets in Coinpile are Coinpile's own; Firefly III budgets are not read yet.
 - Firefly III 6.7 can fail to change a piggy bank's amount (an internal error). Coinpile then replaces the piggy bank it made with a new one holding the new amount.
+
+## License
+
+Coinpile is source-available under the
+[PolyForm Shield License 1.0.0](LICENSE). You can read, run, change and share
+it for free, including at work. You can't sell it or offer it as a competing
+product or hosted service without permission: open an issue titled
+"License request" to ask. [docs/LICENSING.md](docs/LICENSING.md) explains it
+in plain English. Versions published before the switch stay under MIT.
